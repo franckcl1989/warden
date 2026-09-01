@@ -1,4 +1,4 @@
-﻿import { defineComponent, h } from 'vue';
+import { defineComponent, h } from 'vue';
 
 // 审计页占位视图：M2（PLT-07）实现
 export const AuditView = defineComponent({

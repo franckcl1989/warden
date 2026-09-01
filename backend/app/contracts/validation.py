@@ -190,13 +190,17 @@ def validate_contracts(contracts: ContractSet) -> None:
         if {boolean_map.true_outcome, boolean_map.false_outcome} > {"no_decision", "normal", "warning", "critical"}:
             errors.append(f"invalid boolean alert outcome in {boolean_map.alert_policy}")
 
-    poe_total_power = contracts.metric_definitions["poe.total_power_w"]
-    poe_total_percent = contracts.metric_definitions["poe.total_power_percent"]
-    poe_total_alarm = contracts.metric_definitions["poe.total_power_alarm"]
-    if (
-        poe_total_power.alert_policy != "none"
-        or poe_total_percent.alert_policy != "none"
-        or poe_total_alarm.alert_policy != "status"
+    poe_expected_policies: dict[str, str] = {
+        "poe.total_power_w": "none",
+        "poe.total_power_percent": "none",
+        "poe.total_power_alarm": "status",
+    }
+    missing_poe = [key for key in poe_expected_policies if key not in contracts.metric_definitions]
+    if missing_poe:
+        errors.append(f"PoE total metric(s) missing: {', '.join(sorted(missing_poe))}")
+    elif any(
+        contracts.metric_definitions[key].alert_policy != expected
+        for key, expected in poe_expected_policies.items()
     ):
         errors.append("PoE total alarm must come from explicit alarm state; watt and percent are display-only")
 

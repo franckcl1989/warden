@@ -1,4 +1,4 @@
-﻿import { defineComponent, h } from 'vue';
+import { defineComponent, h } from 'vue';
 
 // 当前问题页占位视图：M2（PLT-04）实现
 export const AlertsView = defineComponent({

@@ -12,10 +12,9 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
-
 from app.config import get_settings
 from app.infrastructure.db import dsn_with_psycopg_dialect
+from sqlalchemy import engine_from_config, pool
 
 config = context.config
 

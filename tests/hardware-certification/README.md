@@ -44,8 +44,8 @@ pwsh -File scripts/generate-hardware-matrix.ps1 -GeneratedAt 2026-09-01T00:00:00
 | `maintenance_window_ref` | 仅 operation 记录：`not_started-no-maintenance-window` | 尚无维护窗口引用 |
 | `result_summary` | `未开始：尚无自动化测试或真机证据；…` | 明确、可复核的中文摘要 |
 
-禁止把任何记录改成 `automated_passed` / `hardware_passed` / `unsupported_with_evidence` /
-`failed` 之一以外的内容，也禁止把占位值替换成猜测的型号、固件或设备证据。
+禁止把任何记录改为 `not_started` 之外的任何状态，也禁止把占位值替换成猜测的型号、
+固件或设备证据。
 
 ## 如何补充真实证据
 
