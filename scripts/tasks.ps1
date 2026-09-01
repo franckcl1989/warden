@@ -92,6 +92,7 @@ switch ($Target) {
     'dev-worker' { Invoke-Uv @('python', '-m', 'app.workers.run') }
     'dev-ingest' { Invoke-Uv @('python', '-m', 'app.workers.ingest') }
     'dev-frontend' { Invoke-Npm @('run', 'dev') }
+    'matrix' { & pwsh -File (Join-Path $wardenRoot 'scripts/generate-hardware-matrix.ps1') -GeneratedAt '2026-09-01T00:00:00Z' }
     'check-design' { & pwsh -File (Join-Path $wardenRoot 'scripts/check-design.ps1') }
     'check-hardware' { & pwsh -File (Join-Path $wardenRoot 'scripts/check-hardware-certification.ps1') -MatrixPath (Join-Path $wardenRoot 'tests/hardware-certification/matrix.json') }
     'check' {

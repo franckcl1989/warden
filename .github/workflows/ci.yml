@@ -91,12 +91,19 @@ jobs:
       - name: Design validation
         run: pwsh -File scripts/check-design.ps1
       - name: Hardware certification matrix
+        # The matrix is committed; the checker validates coverage, ownership
+        # and schema fields against the contracts. The strict release gate
+        # (-RequireReleaseReady) intentionally stays failing until real
+        # hardware evidence exists (docs/HARDWARE_CERTIFICATION.md).
+        run: pwsh -File scripts/check-hardware-certification.ps1 -MatrixPath tests/hardware-certification/matrix.json
+      - name: Hardware matrix drift check
+        # Regenerate with the fixed timestamp and fail if the committed
+        # matrix differs from what the contracts imply. The committed matrix
+        # must be regenerated with the same timestamp (make matrix).
         run: |
-          if [ ! -f tests/hardware-certification/matrix.json ]; then
-            echo "matrix not generated yet (M0T6)"
-            exit 0
-          fi
-          pwsh -File scripts/check-hardware-certification.ps1 -MatrixPath tests/hardware-certification/matrix.json
+          pwsh -File scripts/generate-hardware-matrix.ps1 -GeneratedAt 2026-09-01T00:00:00Z
+          git diff --exit-code -- tests/hardware-certification/matrix.json || \
+            { echo "Hardware certification matrix drifted from contracts; run 'make matrix' and commit the regenerated matrix."; exit 1; }
       - name: Secret scan (gitleaks)
         run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tgz

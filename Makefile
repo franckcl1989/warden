@@ -9,10 +9,18 @@ PY := uv run --project $(BACKEND) --directory $(BACKEND)
 .PHONY: help install lint format typecheck test test-backend test-frontend \
 	contracts contracts-check openapi migrations migrate db-up db-down \
 	build-frontend dev-api dev-worker dev-ingest dev-frontend compose-up compose-down \
-	check-design check-hardware check all
+	matrix check-design check-hardware check all
 
 help:
-	@echo "Warden tasks: install lint format typecheck test contracts openapi migrations compose-up check"
+	@echo "Warden tasks: install lint format typecheck test contracts openapi matrix migrations compose-up check"
+
+# Fixed generation timestamp shared with the CI drift check; the committed
+# matrix must be regenerated with this exact value (see
+# tests/hardware-certification/README.md).
+MATRIX_GENERATED_AT := 2026-09-01T00:00:00Z
+
+matrix:
+	pwsh -File scripts/generate-hardware-matrix.ps1 -GeneratedAt $(MATRIX_GENERATED_AT)
 
 install:
 	uv sync --project $(BACKEND) --all-extras
