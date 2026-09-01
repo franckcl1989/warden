@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "product_version": "0.1.0",
+  "matrix_path": "tests/hardware-certification/matrix.json",
+  "matrix_schema": "contracts/hardware-certification.schema.json",
+  "release_policy": {
+    "coverage_unit": "target_id + requirement_id + capability_key",
+    "applicability": "每个 target 必须覆盖 capabilities.json 中相同 device_type 的全部 metric、event 和 operation key",
+    "accepted_terminal_statuses": ["hardware_passed", "unsupported_with_evidence"],
+    "unsupported_rule": "仅当该精确实际型号、固件、许可组合由设备原生响应或厂商资料证明不支持，且有用户书面范围接受引用时允许",
+    "formal_support_rule": "只有 hardware_passed 才可对该精确实际型号、固件、许可组合宣称支持；automated_passed 或 experimental 不得替代真机通过",
+    "release_gate_command": "pwsh -File scripts/check-hardware-certification.ps1 -MatrixPath tests/hardware-certification/matrix.json -RequireReleaseReady"
+  },
+  "targets": [
+    {
+      "target_id": "server.dell_idrac",
+      "device_type": "server",
+      "vendor": "Dell",
+      "declared_target": "iDRAC",
+      "certification_scope": "management_family",
+      "adapter_key": "server.dell_idrac",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "server.inspur_ibmc",
+      "device_type": "server",
+      "vendor": "Inspur",
+      "declared_target": "iBMC",
+      "certification_scope": "management_family",
+      "adapter_key": "server.inspur_ibmc",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "server.xfusion_ibmc",
+      "device_type": "server",
+      "vendor": "xFusion",
+      "declared_target": "iBMC",
+      "certification_scope": "management_family",
+      "adapter_key": "server.xfusion_ibmc",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "server.lenovo_xcc",
+      "device_type": "server",
+      "vendor": "Lenovo",
+      "declared_target": "XCC",
+      "certification_scope": "management_family",
+      "adapter_key": "server.lenovo_xcc",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "server.huawei_ibmc",
+      "device_type": "server",
+      "vendor": "Huawei",
+      "declared_target": "iBMC",
+      "certification_scope": "management_family",
+      "adapter_key": "server.huawei_ibmc",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "nas.synology_ds224plus",
+      "device_type": "synology_nas",
+      "vendor": "Synology",
+      "declared_target": "DS224+",
+      "certification_scope": "exact_model",
+      "adapter_key": "nas.synology_dsm",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "nas.synology_ds225plus",
+      "device_type": "synology_nas",
+      "vendor": "Synology",
+      "declared_target": "DS225+",
+      "certification_scope": "exact_model",
+      "adapter_key": "nas.synology_dsm",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "core.huawei_s5732_h48xum2cc",
+      "device_type": "core_switch",
+      "vendor": "Huawei",
+      "declared_target": "S5732-H48XUM2CC",
+      "certification_scope": "exact_model",
+      "adapter_key": "switch.huawei_vrp_core",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "core.huawei_s5731s_s48p4x_a",
+      "device_type": "core_switch",
+      "vendor": "Huawei",
+      "declared_target": "S5731S-S48P4X-A",
+      "certification_scope": "exact_model",
+      "adapter_key": "switch.huawei_vrp_core",
+      "exact_model_must_be_recorded": true
+    },
+    {
+      "target_id": "access.huawei_s5735_l48p4s_a1",
+      "device_type": "access_switch",
+      "vendor": "Huawei",
+      "declared_target": "S5735-L48P4S-A1",
+      "certification_scope": "exact_model",
+      "adapter_key": "switch.huawei_vrp_access",
+      "exact_model_must_be_recorded": true
+    }
+  ]
+}

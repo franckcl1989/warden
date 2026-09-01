@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "product_version": "0.1.0",
+  "policy": {
+    "scope": "仅把设备明确上报的当前健康/故障/告警状态、连接离线和数据过期汇总为当前问题；设备日志只作为事件历史；0.1.0 不提供规则编辑、确认、派单或外部通知",
+    "numeric_metrics": "CPU、内存、容量、计数器、温度、功率和光模块等数值只按飞书要求展示；没有原始告警语义时不得由 agent 发明固定阈值",
+    "unknown": "unknown、缺值、采集错误和 unsupported 不得按 healthy/normal 处理",
+    "resolution": "恢复必须来自后续可信状态、连接恢复或明确恢复事件，不得因数据过期自动恢复"
+  },
+  "value_outcomes": ["no_decision", "normal", "warning", "critical"],
+  "enum_value_maps": [
+    {"alert_policy":"health","enum_set":"health_state","values":{"unknown":"no_decision","healthy":"normal","warning":"warning","critical":"critical"}},
+    {"alert_policy":"status","enum_set":"indicator_state","values":{"unknown":"no_decision","off":"normal","normal":"normal","warning":"warning","critical":"critical","identify":"normal"}},
+    {"alert_policy":"status","enum_set":"component_status","values":{"unknown":"no_decision","ok":"normal","warning":"warning","critical":"critical","absent":"no_decision"}},
+    {"alert_policy":"status","enum_set":"smart_status","values":{"unknown":"no_decision","passed":"normal","warning":"warning","failed":"critical","running":"normal"}},
+    {"alert_policy":"status","enum_set":"raid_status","values":{"unknown":"no_decision","optimal":"normal","degraded":"warning","rebuilding":"warning","failed":"critical"}},
+    {"alert_policy":"status","enum_set":"presence_state","values":{"unknown":"no_decision","present":"normal","absent":"critical"}},
+    {"alert_policy":"status","enum_set":"ups_state","values":{"unknown":"no_decision","normal":"normal","on_battery":"warning","low_battery":"critical","communication_lost":"warning","fault":"critical"}},
+    {"alert_policy":"status","enum_set":"poe_port_state","values":{"unknown":"no_decision","on":"normal","off":"normal","denied":"warning","fault":"critical"}},
+    {"alert_policy":"status","enum_set":"alarm_state","values":{"unknown":"no_decision","normal":"normal","warning":"warning","critical":"critical"}},
+    {"alert_policy":"detected_is_critical","enum_set":"condition_state","values":{"unknown":"no_decision","normal":"normal","detected":"critical"}},
+    {"alert_policy":"broken_is_critical","enum_set":"stp_port_state","values":{"unknown":"no_decision","disabled":"normal","discarding":"normal","learning":"normal","forwarding":"normal","broken":"critical"}}
+  ],
+  "boolean_value_maps": [
+    {"alert_policy":"true_is_critical","values":{"true":"critical","false":"normal"}},
+    {"alert_policy":"connectivity","values":{"true":"normal","false":"critical"}}
+  ],
+  "composite_policies": [],
+  "rules": [
+    {"rule_key":"device.offline","source":"reachability","selector":"connectivity","condition":"reachability offline","severity":"critical","open_after":3,"resolve_after":2,"dedupe":"device"},
+    {"rule_key":"device.health","source":"metric","selector":"health","metric_key":"health.overall","severity_from_value":true,"open_after":1,"resolve_after":2,"dedupe":"device"},
+    {"rule_key":"data.expired","source":"freshness","selector":"expired","severity":"warning","open_after":1,"resolve_after":1,"dedupe":"device+capability_group"},
+    {"rule_key":"status.problem","source":"metric_policy","selector":"status|true_is_critical|detected_is_critical|broken_is_critical","severity_from_value":true,"open_after":1,"resolve_after":2,"dedupe":"device+component+metric"}
+  ]
+}

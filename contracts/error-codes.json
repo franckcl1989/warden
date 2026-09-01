@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "product_version": "0.1.0",
+  "rules": {
+    "client_logic": "客户端只依赖 code，不解析 message",
+    "unknown": "未登记错误只能在边界转换为 internal_error，并保留仅服务端可见的 cause/request_id",
+    "secrets": "details 只允许 safe_detail_fields；厂商响应、命令正文、凭据、票据和文件路径禁止返回",
+    "retry": "retry_class 是唯一自动重试依据；设备副作用动作仍受 operations profile 和 dispatch fence 约束"
+  },
+  "errors": [
+    {"code":"invalid_request","http_status":400,"retry_class":"after_user_action","safe_detail_fields":["field","reason"]},
+    {"code":"unauthenticated","http_status":401,"retry_class":"after_user_action","safe_detail_fields":["reason"]},
+    {"code":"session_expired","http_status":401,"retry_class":"after_user_action","safe_detail_fields":[]},
+    {"code":"reauthentication_required","http_status":401,"retry_class":"after_user_action","safe_detail_fields":["reauthenticated_until"]},
+    {"code":"csrf_failed","http_status":403,"retry_class":"after_user_action","safe_detail_fields":[]},
+    {"code":"permission_denied","http_status":403,"retry_class":"never","safe_detail_fields":["permission"]},
+    {"code":"resource_not_found","http_status":404,"retry_class":"never","safe_detail_fields":["resource_type"]},
+    {"code":"version_conflict","http_status":412,"retry_class":"after_user_action","safe_detail_fields":["current_version"]},
+    {"code":"preview_stale","http_status":409,"retry_class":"after_user_action","safe_detail_fields":["reason"]},
+    {"code":"idempotency_conflict","http_status":409,"retry_class":"after_user_action","safe_detail_fields":["existing_task_id"]},
+    {"code":"unsupported_operation","http_status":422,"retry_class":"never","safe_detail_fields":["requirement_id","capability_key"]},
+    {"code":"maintenance_mode","http_status":503,"retry_class":"after_user_action","safe_detail_fields":["since","reason"]},
+    {"code":"dependency_unavailable","http_status":503,"retry_class":"read_backoff","safe_detail_fields":["dependency"]},
+    {"code":"storage_unavailable","http_status":503,"retry_class":"read_backoff","safe_detail_fields":["purpose"]},
+    {"code":"internal_error","http_status":500,"retry_class":"never","safe_detail_fields":[]},
+    {"code":"network_unreachable","http_status":422,"retry_class":"read_backoff","safe_detail_fields":["stage","endpoint"]},
+    {"code":"tls_validation_failed","http_status":422,"retry_class":"after_user_action","safe_detail_fields":["stage","fingerprint"]},
+    {"code":"authentication_failed","http_status":422,"retry_class":"after_user_action","safe_detail_fields":["stage"]},
+    {"code":"permission_denied_by_device","http_status":422,"retry_class":"after_user_action","safe_detail_fields":["stage","required_privilege"]},
+    {"code":"protocol_error","http_status":422,"retry_class":"read_backoff","safe_detail_fields":["stage","protocol","reason"]},
+    {"code":"unsupported_capability","http_status":422,"retry_class":"never","safe_detail_fields":["capability_key","model","firmware"]},
+    {"code":"not_configured","http_status":422,"retry_class":"after_user_action","safe_detail_fields":["capability_key","missing"]},
+    {"code":"device_busy","http_status":409,"retry_class":"retry_after","safe_detail_fields":["conflict_task_id","retry_after_seconds"]},
+    {"code":"validation_failed","http_status":422,"retry_class":"after_user_action","safe_detail_fields":["field","reason"]},
+    {"code":"rate_limited","http_status":429,"retry_class":"retry_after","safe_detail_fields":["retry_after_seconds","scope"]},
+    {"code":"operation_failed","http_status":422,"retry_class":"never","safe_detail_fields":["stage","device_job_id","reason"]},
+    {"code":"ambiguous_result","http_status":409,"retry_class":"verification_only","safe_detail_fields":["stage","device_job_id","last_confirmed_step"]}
+  ]
+}

@@ -1,0 +1,401 @@
+{
+  "schema_version": 2,
+  "product_version": "0.1.0",
+  "source_url": "https://yikongzhijia.feishu.cn/wiki/Y84PwLxSIiAlxGk15m8cEBWRn7d?fromScene=spaceOverview",
+  "source_snapshot": "docs/SOURCE_BASELINE.md",
+  "source_snapshot_sha256": "d798b5ef462a2c18b6647ce469c40599832a1a84be9d733cf230f93cc34cba36",
+  "source_last_verified_at": "2026-09-01",
+  "requirements": [
+    {
+      "id": "SRV-MON-01",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "整机综合健康状态与告警灯",
+      "metrics": ["health.overall", "indicator.led"]
+    },
+    {
+      "id": "SRV-MON-02",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "CPU、内存、进风口和主板温度",
+      "metrics": ["temperature.cpu", "temperature.memory", "temperature.inlet", "temperature.board"]
+    },
+    {
+      "id": "SRV-MON-03",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "内存 ECC 错误与内存条故障",
+      "metrics": ["memory.status", "memory.ecc_errors"]
+    },
+    {
+      "id": "SRV-MON-04",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "硬盘、S.M.A.R.T、RAID 与预测故障",
+      "metrics": ["drive.status", "drive.smart", "raid.status", "drive.predictive_failure"]
+    },
+    {
+      "id": "SRV-MON-05",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "双电源在位、故障、负载与电压",
+      "metrics": ["psu.present", "psu.status", "psu.load_w", "psu.voltage_v"]
+    },
+    {
+      "id": "SRV-MON-06",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "风扇转速与过低告警",
+      "metrics": ["fan.rpm", "fan.status"]
+    },
+    {
+      "id": "SRV-MON-07",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "机箱入侵与面板告警灯",
+      "metrics": ["chassis.intrusion", "indicator.led"]
+    },
+    {
+      "id": "SRV-MON-08",
+      "device_type": "server",
+      "kind": "monitoring",
+      "title": "SEL 系统事件日志",
+      "events": ["event.sel"]
+    },
+    {
+      "id": "SRV-ACT-01",
+      "device_type": "server",
+      "kind": "operation",
+      "title": "远程管理卡冷复位",
+      "operations": [{"key": "manager.reset", "risk": "high"}]
+    },
+    {
+      "id": "SRV-ACT-02",
+      "device_type": "server",
+      "kind": "operation",
+      "title": "远程电源操作",
+      "operations": [
+        {"key": "power.on", "risk": "high"},
+        {"key": "power.off", "risk": "high"},
+        {"key": "power.cycle", "risk": "high"}
+      ]
+    },
+    {
+      "id": "SRV-ACT-03",
+      "device_type": "server",
+      "kind": "operation",
+      "title": "远程 KVM 控制台连接",
+      "operations": [{"key": "console.kvm.open", "risk": "medium"}]
+    },
+    {
+      "id": "SRV-ACT-04",
+      "device_type": "server",
+      "kind": "operation",
+      "title": "采集支持报告与系统日志",
+      "operations": [{"key": "logs.support_bundle.collect", "risk": "low"}]
+    },
+    {
+      "id": "SRV-ACT-05",
+      "device_type": "server",
+      "kind": "operation",
+      "title": "远程虚拟介质",
+      "operations": [
+        {"key": "virtual_media.mount", "risk": "high"},
+        {"key": "virtual_media.unmount", "risk": "high"}
+      ]
+    },
+    {
+      "id": "SRV-ACT-06",
+      "device_type": "server",
+      "kind": "operation",
+      "title": "固件查询与升级",
+      "operations": [
+        {"key": "firmware.query", "risk": "low"},
+        {"key": "firmware.update", "risk": "high"}
+      ]
+    },
+    {
+      "id": "SRV-ACT-07",
+      "device_type": "server",
+      "kind": "operation",
+      "title": "序列号与 FRU 资产信息查询",
+      "operations": [{"key": "asset.refresh", "risk": "low"}]
+    },
+    {
+      "id": "NAS-MON-01",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "title": "磁盘健康、坏扇区与损毁降级",
+      "metrics": ["disk.smart", "disk.bad_sectors", "disk.status"]
+    },
+    {
+      "id": "NAS-MON-02",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "title": "存储池与 RAID 状态",
+      "metrics": ["storage_pool.status", "raid.status", "raid.rebuild_progress"]
+    },
+    {
+      "id": "NAS-MON-03",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "title": "温度、风扇与电源",
+      "metrics": ["temperature.system", "fan.rpm", "fan.status", "psu.status"]
+    },
+    {
+      "id": "NAS-MON-04",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "title": "卷与共享文件夹使用率",
+      "metrics": ["volume.usage_percent", "shared_folder.usage_percent"]
+    },
+    {
+      "id": "NAS-MON-05",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "title": "UPS 联动状态",
+      "metrics": ["ups.status"]
+    },
+    {
+      "id": "NAS-MON-06",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "title": "系统日志与网络连通性",
+      "metrics": ["connectivity.management"],
+      "events": ["event.system_log"]
+    },
+    {
+      "id": "NAS-ACT-01",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "title": "远程重启与关机",
+      "operations": [
+        {"key": "power.restart", "risk": "high"},
+        {"key": "power.shutdown", "risk": "high"}
+      ]
+    },
+    {
+      "id": "NAS-ACT-02",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "title": "DSM Web 远程连接",
+      "operations": [{"key": "console.dsm.open", "risk": "medium"}]
+    },
+    {
+      "id": "NAS-ACT-03",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "title": "采集日志与技术支持报告",
+      "operations": [{"key": "logs.support_bundle.collect", "risk": "low"}]
+    },
+    {
+      "id": "NAS-ACT-04",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "title": "S.M.A.R.T 快速与完整检测",
+      "operations": [
+        {"key": "disk.smart_test.quick", "risk": "medium"},
+        {"key": "disk.smart_test.full", "risk": "medium"}
+      ]
+    },
+    {
+      "id": "NAS-ACT-05",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "title": "快照与备份任务状态查看",
+      "operations": [{"key": "backup.status.refresh", "risk": "low"}]
+    },
+    {
+      "id": "NAS-ACT-06",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "title": "固件升级与 SNMP 告警配置",
+      "operations": [
+        {"key": "firmware.update", "risk": "high"},
+        {"key": "snmp.configure", "risk": "high"}
+      ]
+    },
+    {
+      "id": "CORE-MON-01",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "title": "CPU 与内存利用率",
+      "metrics": ["system.cpu_percent", "system.memory_percent"]
+    },
+    {
+      "id": "CORE-MON-02",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "title": "端口状态、流量、CRC 与丢包",
+      "metrics": ["interface.admin_status", "interface.oper_status", "interface.in_bps", "interface.out_bps", "interface.crc_errors", "interface.errors", "interface.drops"]
+    },
+    {
+      "id": "CORE-MON-03",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "title": "光模块诊断指标",
+      "metrics": ["transceiver.rx_dbm", "transceiver.tx_dbm", "transceiver.temperature_c", "transceiver.voltage_v", "transceiver.current_ma"]
+    },
+    {
+      "id": "CORE-MON-04",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "title": "电源、风扇与整机温度",
+      "metrics": ["psu.present", "psu.status", "fan.rpm", "fan.status", "temperature.system"]
+    },
+    {
+      "id": "CORE-MON-05",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "title": "环路、广播风暴与 STP",
+      "metrics": ["loop.status", "broadcast_storm.status", "stp.port_state"]
+    },
+    {
+      "id": "CORE-MON-06",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "title": "端口震荡、重启与认证失败日志",
+      "events": ["event.port_flap", "event.device_restart", "event.auth_failure"]
+    },
+    {
+      "id": "CORE-ACT-01",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "title": "远程重启交换机",
+      "operations": [{"key": "device.restart", "risk": "high"}]
+    },
+    {
+      "id": "CORE-ACT-02",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "title": "端口远程开启与关闭",
+      "operations": [{"key": "interface.admin.set", "risk": "high"}]
+    },
+    {
+      "id": "CORE-ACT-03",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "title": "SSH、Telnet 与 Web 远程连接",
+      "operations": [
+        {"key": "console.ssh.open", "risk": "medium"},
+        {"key": "console.telnet.open", "risk": "medium"},
+        {"key": "console.web.open", "risk": "medium"}
+      ]
+    },
+    {
+      "id": "CORE-ACT-04",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "title": "采集诊断信息",
+      "operations": [{"key": "logs.diagnostic.collect", "risk": "low"}]
+    },
+    {
+      "id": "CORE-ACT-05",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "title": "配置备份与恢复",
+      "operations": [
+        {"key": "config.backup", "risk": "low"},
+        {"key": "config.restore", "risk": "high"}
+      ]
+    },
+    {
+      "id": "CORE-ACT-06",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "title": "光模块诊断查询",
+      "operations": [{"key": "transceiver.diagnose", "risk": "low"}]
+    },
+    {
+      "id": "CORE-ACT-07",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "title": "固件升级",
+      "operations": [{"key": "firmware.update", "risk": "high"}]
+    },
+    {
+      "id": "ACCESS-MON-01",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "title": "CPU 与内存利用率",
+      "metrics": ["system.cpu_percent", "system.memory_percent"]
+    },
+    {
+      "id": "ACCESS-MON-02",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "title": "端口状态、流量与错误包",
+      "metrics": ["interface.admin_status", "interface.oper_status", "interface.in_bps", "interface.out_bps", "interface.errors"]
+    },
+    {
+      "id": "ACCESS-MON-03",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "title": "PoE 状态与功耗",
+      "metrics": ["poe.port.status", "poe.port.power_w", "poe.total_power_w", "poe.power_budget_w", "poe.total_power_percent", "poe.total_power_alarm"]
+    },
+    {
+      "id": "ACCESS-MON-04",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "title": "电源、风扇与温度",
+      "metrics": ["psu.status", "fan.rpm", "fan.status", "temperature.system"]
+    },
+    {
+      "id": "ACCESS-MON-05",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "title": "上联口光模块功率",
+      "metrics": ["transceiver.rx_dbm", "transceiver.tx_dbm"]
+    },
+    {
+      "id": "ACCESS-ACT-01",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "title": "远程重启",
+      "operations": [{"key": "device.restart", "risk": "high"}]
+    },
+    {
+      "id": "ACCESS-ACT-02",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "title": "端口开启与关闭",
+      "operations": [{"key": "interface.admin.set", "risk": "high"}]
+    },
+    {
+      "id": "ACCESS-ACT-03",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "title": "PoE 端口远程通断电",
+      "operations": [{"key": "poe.port.set", "risk": "high"}]
+    },
+    {
+      "id": "ACCESS-ACT-04",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "title": "SSH 与 Web 远程连接",
+      "operations": [
+        {"key": "console.ssh.open", "risk": "medium"},
+        {"key": "console.web.open", "risk": "medium"}
+      ]
+    },
+    {
+      "id": "ACCESS-ACT-05",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "title": "日志采集与配置备份恢复",
+      "operations": [
+        {"key": "logs.collect", "risk": "low"},
+        {"key": "config.backup", "risk": "low"},
+        {"key": "config.restore", "risk": "high"}
+      ]
+    },
+    {
+      "id": "ACCESS-ACT-06",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "title": "固件升级",
+      "operations": [{"key": "firmware.update", "risk": "high"}]
+    }
+  ]
+}

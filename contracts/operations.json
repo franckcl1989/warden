@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "product_version": "0.1.0",
+  "global_invariants": {
+    "parameters": "只接受本文件 JSON Schema 允许的字段；additionalProperties 永远为 false",
+    "high_risk": "必须具备最近 5 分钟密码复验、设备名确认、60 秒预览令牌、幂等键、设备互斥、验证和审计",
+    "dispatch_fence": "task 在设备调用前持久化 dispatch_started_at 和计划摘要；side_effect=true 时 fence 后只允许核验、不得再次调用设备；side_effect=false 可创建新 attempt 重试只读调用，但已持久化 device_job_id 时只能查询原 job",
+    "success": "只有执行响应明确成功且本 profile 的验证条件满足时才是 succeeded",
+    "ambiguity": "设备可能已接受动作但无法完成验证时必须 verification_required；不得 failed 后自动重放",
+    "launch": "launch profile 不进入副作用任务队列，但必须校验权限/能力、签发一次性短票据并记录会话审计",
+    "no_transform": "适配器不得把不支持的动作静默替换成另一个动作，例如 graceful shutdown 不得回退到 force off"
+  },
+  "profiles": [
+    {
+      "id":"SRV-ACT-01:manager.reset","requirement_id":"SRV-ACT-01","device_type":"server","key":"manager.reset","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":600,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["manager endpoint online","reset action explicitly advertised"],
+      "verification":{"strategy":"disconnect_reconnect_identity","success":"management endpoint disappears when observable, reconnects, and reports the same device identity","ambiguous":"command was accepted but reconnect or identity verification did not finish"}
+    },
+    {
+      "id":"SRV-ACT-02:power.on","requirement_id":"SRV-ACT-02","device_type":"server","key":"power.on","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":600,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["system power state is off","On action explicitly advertised"],
+      "verification":{"strategy":"power_state_readback","success":"system power state becomes on","ambiguous":"action accepted but final power state cannot be read"}
+    },
+    {
+      "id":"SRV-ACT-02:power.off","requirement_id":"SRV-ACT-02","device_type":"server","key":"power.off","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":900,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["system power state is on","GracefulShutdown or vendor-equivalent graceful action explicitly advertised"],
+      "verification":{"strategy":"power_state_readback","success":"system power state becomes off","ambiguous":"graceful action was accepted but final power state cannot be read","prohibition":"never fall back to ForceOff"}
+    },
+    {
+      "id":"SRV-ACT-02:power.cycle","requirement_id":"SRV-ACT-02","device_type":"server","key":"power.cycle","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":900,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["system power state is on","ForceRestart or PowerCycle is explicitly advertised and mapped in the certified overlay"],
+      "verification":{"strategy":"power_transition_and_readback","success":"restart/power-cycle transition evidence exists and final power state is on","ambiguous":"action was accepted but transition or final state cannot be proven"}
+    },
+    {
+      "id":"SRV-ACT-03:console.kvm.open","requirement_id":"SRV-ACT-03","device_type":"server","key":"console.kvm.open","channel":"launch","risk":"medium","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"launch_session","timeout_seconds":60,"expected_disconnect":false,"cancel_policy":"not_applicable",
+      "preconditions":["KVM capability and required license discovered"],
+      "verification":{"strategy":"launch_target_validation","success":"descriptor opens a real KVM entry or a vendor authentication page that deterministically continues to KVM","ambiguous":"generic management homepage only; this is not success"}
+    },
+    {
+      "id":"SRV-ACT-04:logs.support_bundle.collect","requirement_id":"SRV-ACT-04","device_type":"server","key":"logs.support_bundle.collect","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read_heavy","timeout_seconds":1800,"expected_disconnect":false,"cancel_policy":"adapter_declared_before_device_job",
+      "preconditions":["file storage ready","at least one certified TSR/support/SEL/system-log path available"],
+      "verification":{"strategy":"artifact_manifest","success":"a non-empty encrypted artifact and manifest list every included and unavailable source with hashes","ambiguous":"device job may still be generating after timeout"}
+    },
+    {
+      "id":"SRV-ACT-05:virtual_media.mount","requirement_id":"SRV-ACT-05","device_type":"server","key":"virtual_media.mount","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["file_id","media_kind"],"properties":{"file_id":{"type":"string","format":"uuid"},"media_kind":{"type":"string","enum":["iso","usb_image"]}}},"conflict_scope":"device","timeout_seconds":900,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["input file ready and authorized","device can reach the restricted file ticket endpoint","compatible virtual-media slot discovered"],
+      "verification":{"strategy":"mounted_media_readback","success":"device reports inserted media bound to the selected file hash or issued ticket","ambiguous":"insert accepted but mounted media identity cannot be read"}
+    },
+    {
+      "id":"SRV-ACT-05:virtual_media.unmount","requirement_id":"SRV-ACT-05","device_type":"server","key":"virtual_media.unmount","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["slot_id"],"properties":{"slot_id":{"type":"string","maxLength":128}}},"conflict_scope":"device","timeout_seconds":300,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["a platform-managed virtual medium is currently mounted"],
+      "verification":{"strategy":"mounted_media_readback","success":"target slot reports no inserted platform-managed media and its ticket is revoked","ambiguous":"eject accepted but slot state cannot be read"}
+    },
+    {
+      "id":"SRV-ACT-06:firmware.query","requirement_id":"SRV-ACT-06","device_type":"server","key":"firmware.query","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read","timeout_seconds":300,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["firmware inventory path discovered"],
+      "verification":{"strategy":"inventory_persisted","success":"non-empty normalized inventory with observed_at is stored","ambiguous":"not applicable; unreadable inventory is failed or unsupported"}
+    },
+    {
+      "id":"SRV-ACT-06:firmware.update","requirement_id":"SRV-ACT-06","device_type":"server","key":"firmware.update","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["file_id","target_id"],"properties":{"file_id":{"type":"string","format":"uuid"},"target_id":{"type":"string","maxLength":128}}},"conflict_scope":"device","timeout_seconds":7200,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["file ready and hash verified","package model/target metadata matches","device power/space/job prerequisites pass","certified update path available"],
+      "verification":{"strategy":"job_and_version_readback","success":"device job succeeds and target version readback equals package target","ambiguous":"job accepted or disconnect occurred but final job/version cannot be proven"}
+    },
+    {
+      "id":"SRV-ACT-07:asset.refresh","requirement_id":"SRV-ACT-07","device_type":"server","key":"asset.refresh","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read","timeout_seconds":300,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["asset/FRU resources discovered"],
+      "verification":{"strategy":"inventory_persisted","success":"serial and every discoverable FRU are stored with observation time","ambiguous":"not applicable; partial data is succeeded only with explicit partial manifest"}
+    },
+    {
+      "id":"NAS-ACT-01:power.restart","requirement_id":"NAS-ACT-01","device_type":"synology_nas","key":"power.restart","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":1200,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["DSM restart action discovered","no conflicting storage maintenance reported"],
+      "verification":{"strategy":"disconnect_reconnect_identity","success":"DSM reconnects as the same device after restart evidence","ambiguous":"restart accepted but reconnect/identity cannot be completed"}
+    },
+    {
+      "id":"NAS-ACT-01:power.shutdown","requirement_id":"NAS-ACT-01","device_type":"synology_nas","key":"power.shutdown","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":900,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["DSM graceful shutdown action discovered","no conflicting storage maintenance reported"],
+      "verification":{"strategy":"expected_disconnect","success":"shutdown was accepted and management services become unreachable within the certified window","ambiguous":"command delivery or expected shutdown transition cannot be proven"}
+    },
+    {
+      "id":"NAS-ACT-02:console.dsm.open","requirement_id":"NAS-ACT-02","device_type":"synology_nas","key":"console.dsm.open","channel":"launch","risk":"medium","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"launch_session","timeout_seconds":60,"expected_disconnect":false,"cancel_policy":"not_applicable",
+      "preconditions":["validated DSM management URL available"],
+      "verification":{"strategy":"launch_target_validation","success":"descriptor targets the validated DSM origin without credentials","ambiguous":"an unvalidated or redirected origin is rejected"}
+    },
+    {
+      "id":"NAS-ACT-03:logs.support_bundle.collect","requirement_id":"NAS-ACT-03","device_type":"synology_nas","key":"logs.support_bundle.collect","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read_heavy","timeout_seconds":1800,"expected_disconnect":false,"cancel_policy":"adapter_declared_before_device_job",
+      "preconditions":["file storage ready","certified DSM log/support path available"],
+      "verification":{"strategy":"artifact_manifest","success":"non-empty encrypted artifact and source manifest are stored with hashes","ambiguous":"DSM job may continue but final artifact cannot be retrieved"}
+    },
+    {
+      "id":"NAS-ACT-04:disk.smart_test.quick","requirement_id":"NAS-ACT-04","device_type":"synology_nas","key":"disk.smart_test.quick","channel":"task","risk":"medium","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["disk_id"],"properties":{"disk_id":{"type":"string","maxLength":128}}},"conflict_scope":"component:disk","timeout_seconds":1800,"expected_disconnect":false,"cancel_policy":"adapter_declared_before_device_job",
+      "preconditions":["disk_id exists and supports quick test","no conflicting disk/storage job"],
+      "verification":{"strategy":"device_job_status","success":"DSM reports test completed with result persisted","ambiguous":"test started but job result cannot be read"}
+    },
+    {
+      "id":"NAS-ACT-04:disk.smart_test.full","requirement_id":"NAS-ACT-04","device_type":"synology_nas","key":"disk.smart_test.full","channel":"task","risk":"medium","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["disk_id"],"properties":{"disk_id":{"type":"string","maxLength":128}}},"conflict_scope":"component:disk","timeout_seconds":86400,"expected_disconnect":false,"cancel_policy":"adapter_declared_before_device_job",
+      "preconditions":["disk_id exists and supports full test","no conflicting disk/storage job"],
+      "verification":{"strategy":"device_job_status","success":"DSM reports test completed with result persisted","ambiguous":"test started but job result cannot be read before timeout"}
+    },
+    {
+      "id":"NAS-ACT-05:backup.status.refresh","requirement_id":"NAS-ACT-05","device_type":"synology_nas","key":"backup.status.refresh","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read","timeout_seconds":300,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["at least one certified snapshot or backup API is discovered"],
+      "verification":{"strategy":"inventory_persisted","success":"available snapshot/backup jobs and their timestamps are persisted; unavailable packages are explicit","ambiguous":"not applicable"}
+    },
+    {
+      "id":"NAS-ACT-06:firmware.update","requirement_id":"NAS-ACT-06","device_type":"synology_nas","key":"firmware.update","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["file_id"],"properties":{"file_id":{"type":"string","format":"uuid"}}},"conflict_scope":"device","timeout_seconds":7200,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["PAT/package model and version metadata match","storage health and free-space checks pass","certified DSM update path available"],
+      "verification":{"strategy":"job_reconnect_version","success":"update job succeeds, DSM reconnects as same device, and version readback matches","ambiguous":"job accepted or DSM disconnected but final version cannot be proven"}
+    },
+    {
+      "id":"NAS-ACT-06:snmp.configure","requirement_id":"NAS-ACT-06","device_type":"synology_nas","key":"snmp.configure","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["enabled"],"properties":{"enabled":{"type":"boolean"}}},"conflict_scope":"device","timeout_seconds":300,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["platform Trap receiver address and credentials are configured","certified DSM SNMP configuration path available"],
+      "verification":{"strategy":"configuration_readback_and_test_trap","success":"DSM config readback matches and, when enabled, a test Trap is attributed to the device","ambiguous":"write accepted but config or test Trap cannot be verified","prohibition":"user cannot supply an arbitrary receiver address through this operation"}
+    },
+    {
+      "id":"CORE-ACT-01:device.restart","requirement_id":"CORE-ACT-01","device_type":"core_switch","key":"device.restart","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":1200,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["restart command certified for exact VRP family","no unsaved configuration; platform never auto-saves it"],
+      "verification":{"strategy":"disconnect_reconnect_identity_uptime","success":"switch reconnects with same identity and reset uptime","ambiguous":"command accepted but reconnect/identity/uptime cannot be proven"}
+    },
+    {
+      "id":"CORE-ACT-02:interface.admin.set","requirement_id":"CORE-ACT-02","device_type":"core_switch","key":"interface.admin.set","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["interface_id","enabled"],"properties":{"interface_id":{"type":"string","maxLength":128},"enabled":{"type":"boolean"}}},"conflict_scope":"device","timeout_seconds":180,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["interface_id exists in latest discovery","interface type is supported by certified command template","target is not the active management interface when determinable"],
+      "verification":{"strategy":"admin_state_readback","success":"interface admin state equals requested state","ambiguous":"command accepted but admin state cannot be read"}
+    },
+    {
+      "id":"CORE-ACT-03:console.ssh.open","requirement_id":"CORE-ACT-03","device_type":"core_switch","key":"console.ssh.open","channel":"launch","risk":"medium","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"terminal_session","timeout_seconds":60,"expected_disconnect":false,"cancel_policy":"not_applicable",
+      "preconditions":["SSH credential configured","terminal concurrency limit available"],
+      "verification":{"strategy":"ticket_and_handshake","success":"one-time ticket establishes authenticated SSH session to bound device","ambiguous":"handshake failure is not success"}
+    },
+    {
+      "id":"CORE-ACT-03:console.telnet.open","requirement_id":"CORE-ACT-03","device_type":"core_switch","key":"console.telnet.open","channel":"launch","risk":"medium","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"terminal_session","timeout_seconds":60,"expected_disconnect":false,"cancel_policy":"not_applicable",
+      "preconditions":["global Telnet explicitly enabled and audited","device Telnet credential configured","terminal concurrency limit available"],
+      "verification":{"strategy":"ticket_and_handshake","success":"one-time ticket establishes Telnet session to bound device with persistent weak-protocol warning","ambiguous":"handshake failure is not success"}
+    },
+    {
+      "id":"CORE-ACT-03:console.web.open","requirement_id":"CORE-ACT-03","device_type":"core_switch","key":"console.web.open","channel":"launch","risk":"medium","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"launch_session","timeout_seconds":60,"expected_disconnect":false,"cancel_policy":"not_applicable",
+      "preconditions":["validated Web management origin available"],
+      "verification":{"strategy":"launch_target_validation","success":"descriptor targets validated device origin without credentials","ambiguous":"unvalidated redirect is rejected"}
+    },
+    {
+      "id":"CORE-ACT-04:logs.diagnostic.collect","requirement_id":"CORE-ACT-04","device_type":"core_switch","key":"logs.diagnostic.collect","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read_heavy","timeout_seconds":1800,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["file storage ready","diagnostic command certified for exact VRP family"],
+      "verification":{"strategy":"artifact_manifest","success":"complete command output reaches a hashed encrypted artifact and CLI completion marker is observed","ambiguous":"disconnect before completion marker"}
+    },
+    {
+      "id":"CORE-ACT-05:config.backup","requirement_id":"CORE-ACT-05","device_type":"core_switch","key":"config.backup","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read_heavy","timeout_seconds":900,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["file storage ready","certified running-config export path available"],
+      "verification":{"strategy":"artifact_parse_and_hash","success":"non-empty parseable config plus device/model/VRP metadata and hash are stored encrypted","ambiguous":"transfer completion cannot be proven"}
+    },
+    {
+      "id":"CORE-ACT-05:config.restore","requirement_id":"CORE-ACT-05","device_type":"core_switch","key":"config.restore","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["file_id"],"properties":{"file_id":{"type":"string","format":"uuid"}}},"conflict_scope":"device","timeout_seconds":3600,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["backup was created by Warden","device identity/model and VRP major version match","config parses and management reachability preflight passes","one certified restore strategy is recorded for this firmware"],
+      "verification":{"strategy":"certified_restore_reconnect_fingerprint","success":"certified strategy completes, device reconnects with same identity, and normalized config fingerprint matches expected","ambiguous":"restore/restart may have started but reconnect or fingerprint cannot be proven","prohibition":"never choose merge-versus-replace or save/restart behavior at runtime by guessing"}
+    },
+    {
+      "id":"CORE-ACT-06:transceiver.diagnose","requirement_id":"CORE-ACT-06","device_type":"core_switch","key":"transceiver.diagnose","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["interface_id"],"properties":{"interface_id":{"type":"string","maxLength":128}}},"conflict_scope":"device_read","timeout_seconds":180,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["interface_id has a discovered transceiver"],
+      "verification":{"strategy":"observation_persisted","success":"available diagnostics are persisted with units/time and missing fields are explicit","ambiguous":"not applicable"}
+    },
+    {
+      "id":"CORE-ACT-07:firmware.update","requirement_id":"CORE-ACT-07","device_type":"core_switch","key":"firmware.update","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["file_id"],"properties":{"file_id":{"type":"string","format":"uuid"}}},"conflict_scope":"device","timeout_seconds":7200,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["image model/VRP metadata and hash match","space and boot-variable checks pass","no unsaved config","certified transfer/update path available"],
+      "verification":{"strategy":"reconnect_version_boot_image","success":"switch reconnects with same identity and reports expected version and boot image","ambiguous":"transfer/update/restart accepted but final boot state cannot be proven"}
+    },
+    {
+      "id":"ACCESS-ACT-01:device.restart","requirement_id":"ACCESS-ACT-01","device_type":"access_switch","key":"device.restart","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device","timeout_seconds":1200,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["restart command certified for exact VRP family","no unsaved configuration; platform never auto-saves it"],
+      "verification":{"strategy":"disconnect_reconnect_identity_uptime","success":"switch reconnects with same identity and reset uptime","ambiguous":"command accepted but reconnect/identity/uptime cannot be proven"}
+    },
+    {
+      "id":"ACCESS-ACT-02:interface.admin.set","requirement_id":"ACCESS-ACT-02","device_type":"access_switch","key":"interface.admin.set","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["interface_id","enabled"],"properties":{"interface_id":{"type":"string","maxLength":128},"enabled":{"type":"boolean"}}},"conflict_scope":"device","timeout_seconds":180,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["interface_id exists in latest discovery","supported interface type","not active management interface when determinable"],
+      "verification":{"strategy":"admin_state_readback","success":"interface admin state equals requested state","ambiguous":"command accepted but admin state cannot be read"}
+    },
+    {
+      "id":"ACCESS-ACT-03:poe.port.set","requirement_id":"ACCESS-ACT-03","device_type":"access_switch","key":"poe.port.set","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["interface_id","mode"],"properties":{"interface_id":{"type":"string","maxLength":128},"mode":{"type":"string","enum":["on","off","cycle"]},"off_seconds":{"type":"integer","minimum":5,"maximum":60}},"allOf":[{"if":{"properties":{"mode":{"const":"cycle"}},"required":["mode"]},"then":{"required":["off_seconds"]},"else":{"not":{"required":["off_seconds"]}}}]},"conflict_scope":"device","timeout_seconds":300,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["interface_id is a discovered PoE-capable port","PoE control command certified"],
+      "verification":{"strategy":"poe_state_readback","success":"on/off reaches requested state; cycle proves off transition then final on","ambiguous":"command accepted but required transition/final state cannot be read"}
+    },
+    {
+      "id":"ACCESS-ACT-04:console.ssh.open","requirement_id":"ACCESS-ACT-04","device_type":"access_switch","key":"console.ssh.open","channel":"launch","risk":"medium","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"terminal_session","timeout_seconds":60,"expected_disconnect":false,"cancel_policy":"not_applicable",
+      "preconditions":["SSH credential configured","terminal concurrency limit available"],
+      "verification":{"strategy":"ticket_and_handshake","success":"one-time ticket establishes authenticated SSH session to bound device","ambiguous":"handshake failure is not success"}
+    },
+    {
+      "id":"ACCESS-ACT-04:console.web.open","requirement_id":"ACCESS-ACT-04","device_type":"access_switch","key":"console.web.open","channel":"launch","risk":"medium","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"launch_session","timeout_seconds":60,"expected_disconnect":false,"cancel_policy":"not_applicable",
+      "preconditions":["validated Web management origin available"],
+      "verification":{"strategy":"launch_target_validation","success":"descriptor targets validated device origin without credentials","ambiguous":"unvalidated redirect is rejected"}
+    },
+    {
+      "id":"ACCESS-ACT-05:logs.collect","requirement_id":"ACCESS-ACT-05","device_type":"access_switch","key":"logs.collect","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read_heavy","timeout_seconds":900,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["file storage ready","log command certified"],
+      "verification":{"strategy":"artifact_manifest","success":"complete output is stored in hashed encrypted artifact with completion marker","ambiguous":"disconnect before completion marker"}
+    },
+    {
+      "id":"ACCESS-ACT-05:config.backup","requirement_id":"ACCESS-ACT-05","device_type":"access_switch","key":"config.backup","channel":"task","risk":"low","side_effect":false,
+      "parameter_schema":{"type":"object","additionalProperties":false,"properties":{}},"conflict_scope":"device_read_heavy","timeout_seconds":900,"expected_disconnect":false,"cancel_policy":"before_dispatch_only",
+      "preconditions":["file storage ready","certified running-config export path available"],
+      "verification":{"strategy":"artifact_parse_and_hash","success":"non-empty parseable config plus device/model/VRP metadata and hash are stored encrypted","ambiguous":"transfer completion cannot be proven"}
+    },
+    {
+      "id":"ACCESS-ACT-05:config.restore","requirement_id":"ACCESS-ACT-05","device_type":"access_switch","key":"config.restore","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["file_id"],"properties":{"file_id":{"type":"string","format":"uuid"}}},"conflict_scope":"device","timeout_seconds":3600,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["backup created by Warden","device/model and VRP major match","config parses and reachability preflight passes","certified restore strategy recorded"],
+      "verification":{"strategy":"certified_restore_reconnect_fingerprint","success":"certified strategy completes, device reconnects with same identity, and config fingerprint matches","ambiguous":"restore/restart may have started but reconnect or fingerprint cannot be proven","prohibition":"never guess restore mode or save/restart prompts"}
+    },
+    {
+      "id":"ACCESS-ACT-06:firmware.update","requirement_id":"ACCESS-ACT-06","device_type":"access_switch","key":"firmware.update","channel":"task","risk":"high","side_effect":true,
+      "parameter_schema":{"type":"object","additionalProperties":false,"required":["file_id"],"properties":{"file_id":{"type":"string","format":"uuid"}}},"conflict_scope":"device","timeout_seconds":7200,"expected_disconnect":true,"cancel_policy":"before_dispatch_only",
+      "preconditions":["image model/VRP metadata and hash match","space/boot-variable checks pass","no unsaved config","certified transfer/update path available"],
+      "verification":{"strategy":"reconnect_version_boot_image","success":"switch reconnects with same identity and reports expected version and boot image","ambiguous":"update/restart accepted but final boot state cannot be proven"}
+    }
+  ]
+}

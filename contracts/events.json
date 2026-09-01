@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "product_version": "0.1.0",
+  "rules": {
+    "storage": "事件只写 device_events，不写 metric_points",
+    "severity": "优先使用设备原始严重级别并归一化；无法确定时为 unknown，禁止默认 normal",
+    "deduplication": "优先使用设备原始事件 ID；没有 ID 时使用设备、类型、组件、规范消息与时间窗口散列"
+  },
+  "definitions": [
+    {"key":"event.sel","scope":"device_or_component","sources":["redfish_sel","oem_log"],"required_fields":["occurred_at","severity","message"]},
+    {"key":"event.system_log","scope":"device_or_component","sources":["dsm_log"],"required_fields":["occurred_at","severity","message"]},
+    {"key":"event.port_flap","scope":"component","sources":["syslog","snmp_trap","poll"],"required_fields":["occurred_at","severity","component_native_id"]},
+    {"key":"event.device_restart","scope":"device","sources":["syslog","snmp_trap","poll"],"required_fields":["occurred_at","severity"]},
+    {"key":"event.auth_failure","scope":"device","sources":["syslog","snmp_trap","poll"],"required_fields":["occurred_at","severity","message"]}
+  ]
+}
