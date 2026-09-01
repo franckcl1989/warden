@@ -1,0 +1,88 @@
+[project]
+name = "warden-backend"
+version = "0.1.0"
+description = "Warden - small private datacenter hardware monitoring and management platform (API + worker)"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "Proprietary" }
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "sqlalchemy>=2.0.36,<3",
+    "psycopg[binary]>=3.2,<4",
+    "alembic>=1.14,<2",
+    "argon2-cffi>=23.1,<26",
+    "cryptography>=44,<46",
+    "httpx[http2]>=0.28,<1",
+    "orjson>=3.10,<4",
+    "structlog>=24.4,<26",
+    "asyncssh>=2.19,<3",
+    "pysnmp-lextudio>=6.2,<8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.9,<1",
+    "mypy>=1.14,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<1",
+    "pytest-cov>=4,<7",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC", "S", "C4"]
+ignore = [
+    "S101",   # assert allowed in tests
+    "S311",   # non-cryptographic random for non-security purposes
+    "ASYNC210", # blocking call checks are explicit by design in sync endpoints
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S107", "S108"]
+"app/generated/*.py" = ["E501"]  # generated data literals; drift-checked by CI
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = []
+files = ["app"]
+exclude = ["migrations"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_decorators = true
+
+[[tool.mypy.overrides]]
+module = ["passlib.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --tb=short"
+markers = [
+    "integration: requires a live PostgreSQL 18 instance",
+    "unit: pure unit tests without external services",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

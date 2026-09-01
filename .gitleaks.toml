@@ -1,0 +1,4 @@
+# Warden secret scan configuration.
+# Standard gitleaks defaults: the community ruleset is used, no custom rules.
+[extend]
+useDefault = true

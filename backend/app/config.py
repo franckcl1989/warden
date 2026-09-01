@@ -1,0 +1,135 @@
+"""Application configuration.
+
+Non-secret configuration arrives via environment variables; secrets arrive via
+read-only mounted files (Docker secret style). All values are validated at
+startup. Never read secret files into logs.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Annotated
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class WardenSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="WARDEN_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # Runtime identity
+    app_env: str = Field(default="production")
+    public_url: str = Field(default="http://localhost")
+    display_timezone: str = Field(default="Asia/Shanghai")
+
+    # Database
+    postgres_dsn_file: Path | None = Field(default=None)
+    postgres_dsn: str = Field(default="")
+
+    # Secret files (read-only mounted secrets)
+    credential_master_key_file: Path | None = Field(default=None)
+    file_master_key_file: Path | None = Field(default=None)
+    session_secret_file: Path | None = Field(default=None)
+    csrf_secret_file: Path | None = Field(default=None)
+
+    # Device network policy
+    allowed_device_cidrs: str = Field(default="")
+
+    # Collection / retention / worker pools (deployment configuration, not a product page)
+    reachability_interval_seconds: int = Field(default=30, ge=5)
+    metrics_interval_seconds: int = Field(default=60, ge=10)
+    logs_interval_seconds: int = Field(default=120, ge=10)
+    discovery_interval_seconds: int = Field(default=21600, ge=300)
+    collection_workers: int = Field(default=4, ge=1, le=32)
+    operation_workers: int = Field(default=2, ge=1, le=8)
+    task_lease_seconds: int = Field(default=300, ge=30)
+    raw_retention_days: int = Field(default=7, ge=1)
+    rollup_5m_retention_days: int = Field(default=30, ge=2)
+    rollup_1h_retention_days: int = Field(default=180, ge=7)
+    event_retention_days: int = Field(default=180, ge=7)
+    resolved_alert_retention_days: int = Field(default=180, ge=7)
+    operation_retention_days: int = Field(default=365, ge=30)
+    audit_retention_days: int = Field(default=365, ge=30)
+    support_bundle_retention_days: int = Field(default=30, ge=1)
+    config_backup_keep_per_device: int = Field(default=10, ge=1)
+    config_backup_min_days: int = Field(default=90, ge=1)
+
+    # File quotas (deployment may lower, never raise without capacity evidence)
+    max_support_bundle_bytes: int = Field(default=5 * 1024**3)
+    max_firmware_bytes: int = Field(default=10 * 1024**3)
+    max_virtual_media_bytes: int = Field(default=50 * 1024**3)
+
+    # Ingress listeners (event-ingest)
+    syslog_udp_port: int = Field(default=1514, ge=1, le=65535)
+    syslog_tcp_port: int = Field(default=1514, ge=1, le=65535)
+    snmp_trap_port: int = Field(default=1162, ge=1, le=65535)
+    # The ingest listener must accept traps from the LAN; bind-all is the deployment default,
+    # operators narrow it via WARDEN_INGEST_BIND_HOST behind the firewall.
+    ingest_bind_host: str = Field(default="0.0.0.0")  # noqa: S104
+
+    # Platform base URL devices use to pull firmware / virtual media
+    device_access_base_url: str = Field(default="")
+
+    # Bootstrap
+    bootstrap_admin_username: str = Field(default="")
+
+    @field_validator("public_url", "device_access_base_url")
+    @classmethod
+    def _url_scheme(cls, value: str) -> str:
+        if value and not value.startswith(("http://", "https://")):
+            msg = "URL must start with http:// or https://"
+            raise ValueError(msg)
+        return value
+
+    def secret_value(self, file: Path | None, fallback: str = "") -> str:
+        if file is not None:
+            raw = file.read_text(encoding="utf-8").strip()
+            if not raw:
+                msg = f"Secret file is empty: {file}"
+                raise ValueError(msg)
+            return raw
+        return fallback
+
+    @property
+    def database_url(self) -> str:
+        if self.postgres_dsn_file is not None:
+            return self.secret_value(self.postgres_dsn_file)
+        if not self.postgres_dsn:
+            msg = "WARDEN_POSTGRES_DSN or WARDEN_POSTGRES_DSN_FILE must be configured"
+            raise ValueError(msg)
+        return self.postgres_dsn
+
+    @property
+    def credential_master_key(self) -> SecretStr:
+        return SecretStr(self.secret_value(self.credential_master_key_file))
+
+    @property
+    def file_master_key(self) -> SecretStr:
+        return SecretStr(self.secret_value(self.file_master_key_file))
+
+    @property
+    def session_secret(self) -> SecretStr:
+        return SecretStr(self.secret_value(self.session_secret_file))
+
+    @property
+    def csrf_secret(self) -> SecretStr:
+        return SecretStr(self.secret_value(self.csrf_secret_file))
+
+    @property
+    def allowed_device_networks(self) -> list[str]:
+        return [item.strip() for item in self.allowed_device_cidrs.split(",") if item.strip()]
+
+
+_WardenSettings = Annotated[WardenSettings, WardenSettings]
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> WardenSettings:
+    return WardenSettings()

@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+backend/openapi.gen.json
+
+# --- Node / frontend ---
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
+frontend/.vite/
+*.tsbuildinfo
+
+# --- SDD workspace ---
+.superpowers/
+
+# --- Local secrets and environment ---
+.env
+.env.*
+!.env.example
+secrets/
+deployment/secrets/
+*.pem
+*.key
+!deployment/tls/.gitkeep
+
+# --- Runtime data ---
+.warden-data/
+*.log
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
