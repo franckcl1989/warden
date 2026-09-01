@@ -7,7 +7,11 @@ and audit rows.
 
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
+from app.infrastructure.passwords import hash_password
 from app.models.auth import AuditLog, User
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -107,6 +111,69 @@ def test_username_is_case_insensitively_unique(db_client: TestClient, db_session
     assert duplicate.status_code == 422
     assert duplicate.json()["error"]["code"] == "validation_failed"
     assert duplicate.json()["error"]["details"]["field"] == "username"
+
+
+@pytest.mark.integration
+def test_create_username_with_percent_is_exact_match(db_client: TestClient, db_session: Session) -> None:
+    """Usernames containing LIKE wildcards must compare exactly.
+
+    Regression: the duplicate check used ``ilike``, so creating ``ops%user``
+    when ``opsXuser`` exists was falsely rejected as "用户名已存在".
+    """
+    create_admin(db_session)
+    csrf = _csrf(db_client)
+    first = _create_user_via_api(db_client, csrf, username="opsXuser", password="OpsX!user-2026-Pass")
+    assert first.status_code == 201
+    similar = _create_user_via_api(db_client, csrf, username="ops%user", password="OpsPct!user-2026-Pass")
+    assert similar.status_code == 201
+    duplicate = _create_user_via_api(db_client, csrf, username="ops%user", password="OpsPct!user-2026-Pass")
+    assert duplicate.status_code == 422
+    error = duplicate.json()["error"]
+    assert error["code"] == "validation_failed"
+    assert error["details"]["field"] == "username"
+    assert error["message"] == "用户名已存在"
+
+
+@pytest.mark.integration
+def test_concurrent_duplicate_create_returns_422(db_client: TestClient, db_session: Session) -> None:
+    """A duplicate hitting the unique index mid-race must be 422, not 500.
+
+    Regression: only the pre-check guarded uniqueness, so a concurrent create
+    surfaced as internal_error. The test holds an uncommitted row on the same
+    username: the API's pre-check (READ COMMITTED, separate connection) cannot
+    see it, the INSERT then blocks on the unique index and finally violates it
+    when the holder commits — the IntegrityError path must answer 422
+    validation_failed with field=username.
+    """
+    create_admin(db_session)
+    csrf = _csrf(db_client)
+    payload = {
+        "username": "race.user",
+        "display_name": "竞态用户",
+        "role": "operator",
+        "password": "R@ce-User-2026-Pass",
+    }
+    holder = User(
+        username=payload["username"],
+        display_name=payload["display_name"],
+        role=payload["role"],
+        password_hash=hash_password(payload["password"]),
+        must_change_password=True,
+    )
+    db_session.add(holder)
+    db_session.flush()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            db_client.post, f"{API}/users", json=payload, headers={"X-CSRF-Token": csrf}
+        )
+        time.sleep(0.5)
+        db_session.commit()
+        response = future.result()
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "validation_failed"
+    assert error["details"]["field"] == "username"
+    assert error["message"] == "用户名已存在"
 
 
 @pytest.mark.integration

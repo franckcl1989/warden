@@ -17,6 +17,7 @@ from typing import Annotated, cast
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import AuthContext, get_audit_logger, get_db, require_permission
@@ -192,7 +193,9 @@ def users_create(
     violations = validate_password(body.password, body.username)
     if violations:
         raise auth_errors.password_policy_violated(violations[0])
-    existing = db.scalar(select(User).where(User.username.ilike(body.username)).limit(1))
+    existing = db.scalar(
+        select(User).where(func.lower(User.username) == body.username.lower()).limit(1)
+    )
     if existing is not None:
         raise auth_errors.username_taken()
     user = User(
@@ -203,7 +206,13 @@ def users_create(
         must_change_password=True,
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # A concurrent create beat the pre-check: the unique index on
+        # lower(username) rejects it; surface the same 422 as the check.
+        db.rollback()
+        raise auth_errors.username_taken() from None
     db.refresh(user)
     request.state.actor_user_id = context.user.id
     _audit(request, logger, action="users.create", user=user, detail={"role": user.role})

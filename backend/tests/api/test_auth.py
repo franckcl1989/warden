@@ -86,6 +86,50 @@ def test_login_unknown_username_returns_same_generic_error(db_client: TestClient
 
 
 @pytest.mark.integration
+def test_login_like_pattern_username_does_not_lock_admin_or_enumerate(
+    db_client: TestClient, db_session: Session
+) -> None:
+    """Like-wildcard usernames must be exact-match lookups, not LIKE patterns.
+
+    Regression: ``ilike`` treated ``%``/``_`` as wildcards, so username ``%``
+    matched the first row (the admin) and 5 wrong-password attempts locked it;
+    the distinct account_locked/account_disabled responses also leaked the
+    account state. Every wildcard attempt must behave exactly like an unknown
+    username (generic invalid_credentials) and leave admin untouched.
+    """
+    create_admin(db_session)
+    baseline = login(db_client, ADMIN_USERNAME, "Wrong-Pass-2026!")
+    assert baseline.status_code == 422
+    baseline_error = baseline.json()["error"]
+    assert baseline_error["code"] == "validation_failed"
+    assert baseline_error["details"]["field"] == "credentials"
+    assert baseline_error["message"] == "用户名或密码错误"
+
+    for pattern in ("%", "_dmin", "%dmin%", "%"):
+        response = login(db_client, pattern, "Wrong-Pass-2026!")
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == baseline_error["code"]
+        assert error["message"] == baseline_error["message"]
+        assert error["details"]["field"] == "credentials"
+
+    admin = db_session.scalar(select(User).where(User.username == ADMIN_USERNAME))
+    assert admin is not None
+    assert admin.status == "active"
+    # Only the genuine wrong-password attempt counted; the 4 wildcard attempts
+    # must not have touched the admin's failure counter at all.
+    assert admin.failed_login_count == 1
+    assert admin.locked_until is None
+    assert _count_audit(db_session, "auth.lock") == 0
+    assert _count_audit(db_session, "auth.login_failed") == 5
+
+    sixth = login(db_client, "%", "Wrong-Pass-2026!")
+    assert sixth.status_code == 429
+    assert sixth.json()["error"]["code"] == "rate_limited"
+    assert sixth.json()["error"]["message"] != "账号已锁定，请稍后重试"
+
+
+@pytest.mark.integration
 def test_five_failures_lock_user_and_write_audit(db_client: TestClient, db_session: Session) -> None:
     create_user(db_session, username="lockme", password="Orig!nal-2026-Pass", role="viewer")
     for _ in range(5):

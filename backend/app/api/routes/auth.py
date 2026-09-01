@@ -13,7 +13,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import AuthContext, check_origin, get_audit_logger, get_auth_context, get_db, get_rate_limiter
@@ -162,7 +162,9 @@ def _authenticate(
     their own validation_failed reasons. Failed attempts and lock events are
     audited here because they happen before a session exists.
     """
-    user = db.scalar(select(User).where(User.username.ilike(username)).limit(1))
+    user = db.scalar(
+        select(User).where(func.lower(User.username) == username.lower()).limit(1)
+    )
     now = utcnow()
     if user is None:
         # Burn comparable verification time so unknown and known usernames

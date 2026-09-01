@@ -23,7 +23,7 @@ import secrets
 import string
 import sys
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.domain.password_policy import validate_password
@@ -70,7 +70,9 @@ def run(argv: list[str]) -> int:
     try:
         factory = create_session_factory(engine)
         with factory() as db:
-            existing = db.scalar(select(User).where(User.username.ilike(username)).limit(1))
+            existing = db.scalar(
+                select(User).where(func.lower(User.username) == username.lower()).limit(1)
+            )
             if existing is not None:
                 print(f"info: user '{username}' already exists; nothing to do")
                 return 0
