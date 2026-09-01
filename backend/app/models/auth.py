@@ -141,7 +141,9 @@ class AuditLog(Base):
     requirement_id: Mapped[str | None] = mapped_column(String(32))
     request_id: Mapped[str | None] = mapped_column(String(64))
     task_id: Mapped[uuid.UUID | None] = mapped_column()
-    result: Mapped[str] = mapped_column(String(16), nullable=False, default="success", server_default="success")
+    # String(32) since migration 0004: security events record stable error
+    # codes (e.g. "permission_denied") as the result value.
+    result: Mapped[str] = mapped_column(String(32), nullable=False, default="success", server_default="success")
     source_ip: Mapped[str | None] = mapped_column(String(64))
     user_agent_summary: Mapped[str | None] = mapped_column(String(255))
     detail_jsonb: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=False, default=dict)

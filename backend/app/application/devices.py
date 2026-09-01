@@ -46,6 +46,7 @@ from sqlalchemy import ColumnElement, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.application.security_events import security_sensitive_config_change
 from app.config import WardenSettings
 from app.domain.adapter import (
     DEFAULT_MANAGEMENT_PORT,
@@ -78,6 +79,7 @@ class DeviceUpdateResult:
     device: Device
     changed_fields: tuple[str, ...]
     credentials_digest_value: str | None
+    security_config_changes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -428,6 +430,7 @@ def update_device(
     if device.version != if_match_version:
         raise version_conflict(device.version)
     changed: list[str] = []
+    sensitive_changes: list[str] = []
     new_credentials_digest: str | None = None
     security_relevant = any(
         value is not None for value in (management_endpoint, adapter_key, connection_config, credentials)
@@ -469,6 +472,12 @@ def update_device(
             if failed is None:
                 raise validation_failed("probe", "设备探测失败")
             raise probe_stage_error(failed)
+        if connection_config is not None:
+            # Only after the fresh probe succeeded: the unverified change is
+            # never applied, so it must not be audited as applied (M1T4).
+            sensitive_changes = security_sensitive_config_change(
+                dict(device.connection_config), dict(profile.connection_config)
+            )
         device.management_endpoint = profile.management_endpoint
         device.adapter_key = profile.adapter_key
         device.connection_config = profile.connection_config
@@ -541,6 +550,7 @@ def update_device(
         device=device,
         changed_fields=tuple(changed),
         credentials_digest_value=new_credentials_digest,
+        security_config_changes=tuple(sensitive_changes),
     )
 
 

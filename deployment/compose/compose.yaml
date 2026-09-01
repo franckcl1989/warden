@@ -33,6 +33,7 @@ services:
       # 宿主机目录 ${WARDEN_DATA_DIR}/postgres 需预创建并 chown 999:999（DEPLOYMENT §4/§7）
       - ${WARDEN_DATA_DIR:-/srv/warden}/postgres:/var/lib/postgresql/data
       # 首次空数据目录时执行：创建最小权限 warden_app / warden_migrate 账号（SECURITY §11）
+      # 密码来自两个 DSN Secret（postgres_dsn=应用账号 warden_app；postgres_dsn_migrate=迁移账号）
       - ../postgres-init:/docker-entrypoint-initdb.d:ro
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_superuser_password:/run/secrets/postgres_superuser_password:ro
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn:/run/secrets/postgres_dsn:ro
@@ -64,7 +65,8 @@ services:
     security_opt: ["no-new-privileges:true"]
     env_file: [.env]
     environment:
-      # 迁移使用独立 warden_migrate 账号（SECURITY §11）
+      # 迁移使用独立 warden_migrate 账号（SECURITY §11），覆盖应用 DSN 配置；
+      # warden_migrate 无建库/超级用户权限，表级权限由迁移 0004 授予应用账号
       WARDEN_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_migrate
     volumes:
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn_migrate:/run/secrets/postgres_dsn_migrate:ro
@@ -87,7 +89,8 @@ services:
     security_opt: ["no-new-privileges:true"]
     env_file: [.env]
     volumes:
-      # 应用密钥与数据库 DSN：Docker secret 风格只读挂载，绝不明文内联（DEPLOYMENT §5）
+      # 应用密钥与数据库 DSN（应用账号 warden_app，最小权限且对 audit_logs 无
+      # UPDATE/DELETE，SECURITY §11/§12）：Docker secret 风格只读挂载，绝不明文内联
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/credential_master_key:/run/secrets/credential_master_key:ro
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/file_master_key:/run/secrets/file_master_key:ro
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/session_secret:/run/secrets/session_secret:ro
@@ -120,7 +123,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     env_file: [.env]
     volumes:
-      # Worker 需要凭据主密钥（解密设备凭据）、文件主密钥（加密产物）和数据库 DSN
+      # Worker 需要凭据主密钥（解密设备凭据）、文件主密钥（加密产物）和数据库 DSN（应用账号 warden_app）
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/credential_master_key:/run/secrets/credential_master_key:ro
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/file_master_key:/run/secrets/file_master_key:ro
       - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn:/run/secrets/postgres_dsn:ro

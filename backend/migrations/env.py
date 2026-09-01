@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from alembic import context
 import app.models  # noqa: F401  (registers ORM models for autogenerate parity)
+from alembic import context
 from app.config import get_settings
 from app.infrastructure.db import dsn_with_psycopg_dialect
 from app.models.base import Base

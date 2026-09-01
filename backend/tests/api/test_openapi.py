@@ -69,6 +69,11 @@ DEVICE_ENDPOINTS = {
     "device_capabilities_list": ("GET", "/devices/{id}/capabilities"),
 }
 
+AUDIT_ENDPOINTS = {
+    "audit_logs_list": ("GET", "/audit-logs"),
+    "audit_logs_get": ("GET", "/audit-logs/{id}"),
+}
+
 
 def _assert_operation_ids(
     schema: dict[str, object],
@@ -99,3 +104,9 @@ def test_exported_openapi_auth_users_roles_operation_ids_match_contract() -> Non
 def test_exported_openapi_device_operation_ids_match_contract() -> None:
     """M1T3 device endpoints carry the EXACT operationIds of http-api.json."""
     _assert_operation_ids(exported_schema(), DEVICE_ENDPOINTS)
+
+
+@pytest.mark.unit
+def test_exported_openapi_audit_operation_ids_match_contract() -> None:
+    """M1T4 read-only audit endpoints carry the EXACT operationIds of http-api.json."""
+    _assert_operation_ids(exported_schema(), AUDIT_ENDPOINTS)

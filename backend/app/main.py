@@ -6,7 +6,8 @@ middleware, unified exception handlers, health endpoints and an empty
 registered only when a database DSN is configured. M1T1 mounts the auth,
 users and roles routers and the session/rate-limit/audit services. M1T3 mounts
 the device onboarding router (probe/create/list/get/patch/re-probe/
-capabilities) and the lazy credential keyring dependency.
+capabilities) and the lazy credential keyring dependency. M1T4 mounts the
+read-only audit query router (audit_logs_list / audit_logs_get).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 
 from app.api.errors import register_exception_handlers
-from app.api.routes import auth, devices, roles, users
+from app.api.routes import audit, auth, devices, roles, users
 from app.api.routes.health import router as health_router
 from app.config import WardenSettings, get_settings
 from app.infrastructure.audit import AuditLogger
@@ -64,6 +65,7 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     api_v1_router.include_router(users.router)
     api_v1_router.include_router(roles.router)
     api_v1_router.include_router(devices.router)
+    api_v1_router.include_router(audit.router)
     app.include_router(api_v1_router)
     return app
 

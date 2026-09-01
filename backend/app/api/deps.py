@@ -26,6 +26,7 @@ from app.domain.auth_errors import (
     session_expired,
     unauthenticated,
 )
+from app.domain.errors import AppError
 from app.domain.roles import require_permission as matrix_require
 from app.infrastructure.audit import AuditLogger
 from app.infrastructure.crypto import CredentialCipher, CredentialKeyring
@@ -39,12 +40,16 @@ from app.infrastructure.rate_limit import RateLimiter
 from app.infrastructure.readiness import ReadinessRegistry
 from app.infrastructure.request_id import get_current_request_id
 from app.infrastructure.session_tokens import SESSION_COOKIE_NAME, hash_session_token
-from app.infrastructure.sessions import session_is_valid
+from app.infrastructure.sessions import client_summary, session_is_valid
 from app.infrastructure.time import utcnow
 from app.models.auth import Session as DBSession
 from app.models.auth import User
 
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# Security events on the request path carry the platform-auth support id
+# (docs/TRACEABILITY.md PLT-01: 本地认证与三类角色, SECURITY.md §2-3).
+PLT_01 = "PLT-01"
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,43 @@ def get_db(request: Request) -> Iterator[Session]:
 def get_audit_logger(request: Request) -> AuditLogger:
     logger: AuditLogger = request.app.state.audit_logger
     return logger
+
+
+def _audit_security_event(
+    request: Request,
+    *,
+    action: str,
+    result: str,
+    session: DBSession | None,
+    user: User | None,
+    detail: dict[str, object],
+) -> None:
+    """Write a security audit row for CSRF/permission failures (M1T4).
+
+    docs/SECURITY.md §12 / DATA_MODEL.md §9.1. Bounded to events that have a
+    resolved session so the row attributes to the actor; anonymous pre-session
+    failures (login-time Origin checks) stay covered by IP rate limiting
+    (documented decision in the M1T4 report). Uses the app-level AuditLogger
+    (its own transaction), never the request's session; a missing logger
+    (no DSN configured) is a no-op.
+    """
+    logger: AuditLogger | None = getattr(request.app.state, "audit_logger", None)
+    if logger is None:
+        return
+    source_ip = request.client.host if request.client else None
+    logger.record(
+        action=action,
+        actor_user_id=user.id if user is not None else (session.user_id if session is not None else None),
+        session_id=session.id if session is not None else None,
+        resource_type="request",
+        resource_id=request.url.path,
+        requirement_id=PLT_01,
+        request_id=str(request.scope.get("request_id") or ""),
+        result=result,
+        source_ip=source_ip,
+        user_agent_summary=client_summary(source_ip, request.headers.get("user-agent")),
+        detail=detail,
+    )
 
 
 def get_rate_limiter(request: Request) -> RateLimiter:
@@ -156,8 +198,27 @@ def get_auth_context(
     if request.method in MUTATING_METHODS:
         raw_token = request.headers.get(CSRF_HEADER_NAME, "")
         if not raw_token or not verify_csrf_token(raw_token, session.csrf_secret_hash):
+            _audit_security_event(
+                request,
+                action="csrf.failed",
+                result="failure",
+                session=session,
+                user=None,
+                detail={"reason": "invalid_token"},
+            )
             raise csrf_failed()
-        check_origin(request)
+        try:
+            check_origin(request)
+        except AppError:
+            _audit_security_event(
+                request,
+                action="csrf.failed",
+                result="failure",
+                session=session,
+                user=None,
+                detail={"reason": "origin_mismatch"},
+            )
+            raise
     limiter: RateLimiter = request.app.state.rate_limiter
     result = limiter.check_session(session.session_id_hash)
     if not result.allowed:
@@ -172,12 +233,31 @@ def get_auth_context(
 
 
 def require_permission(permission: str) -> Callable[..., AuthContext]:
-    """Dependency factory: resolve the auth context and check the matrix."""
+    """Dependency factory: resolve the auth context and check the matrix.
+
+    Denials on mutating endpoints (POST/PATCH/PUT/DELETE) are audited as
+    ``access.denied`` with result ``permission_denied`` (M1T4 decision: GET
+    denials are too noisy and stay un-audited — bounded per the brief).
+    """
 
     def _check(
         context: Annotated[AuthContext, Depends(get_auth_context)],
+        request: Request,
     ) -> AuthContext:
         if not matrix_require(context.user.role, permission):
+            if request.method in MUTATING_METHODS:
+                _audit_security_event(
+                    request,
+                    action="access.denied",
+                    result="permission_denied",
+                    session=context.session,
+                    user=context.user,
+                    detail={
+                        "permission": permission,
+                        "method": request.method,
+                        "path": request.url.path,
+                    },
+                )
             raise permission_denied(permission)
         return context
 

@@ -58,6 +58,10 @@ class FakeSimpleAdapter:
                 "type": ["string", "null"],
                 "pattern": "^[0-9a-fA-F]{64}$",
             },
+            # SECURITY.md §6 weak-protocol fields: dev/test only so M1T4 can
+            # exercise the security.config_changed audit path without hardware.
+            "snmp_version": {"type": "string", "enum": ["v3", "v2c"]},
+            "telnet": {"type": "boolean"},
             FAIL_CREDENTIALS_KEY: {"type": "boolean"},
             FAIL_TLS_KEY: {"type": "boolean"},
         },

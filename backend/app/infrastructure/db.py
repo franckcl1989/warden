@@ -6,6 +6,14 @@ DSNs arrive from ``WardenSettings.database_url``; they are never logged and
 never rendered with their password visible. Every connection in the API,
 worker and migration harness goes through this module so driver/URL handling
 stays in one place.
+
+Account split (docs/SECURITY.md §11/§12, DEPLOYMENT.md §5): the application
+engine (API/worker) always uses the ``warden_app`` DSN — the least-privilege
+role that has NO UPDATE/DELETE on ``audit_logs`` (migration 0004). Migrations
+run with the separate ``warden_migrate`` account: the deployment migrate
+container overrides ``WARDEN_POSTGRES_DSN_FILE`` with the migrate DSN secret
+(deployment/compose/compose.yaml), so schema changes never run as the app
+account.
 """
 
 from __future__ import annotations

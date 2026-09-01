@@ -567,7 +567,22 @@ def devices_update(
     detail: dict[str, object] = {"fields": list(result.changed_fields)}
     if result.credentials_digest_value is not None:
         detail["credentials_digest"] = result.credentials_digest_value
+        detail["credentials_replaced"] = True
     _audit(request, logger, context, action="device.update", device=device, detail=detail)
+    if result.security_config_changes:
+        # SECURITY.md §6: 所有协议弱化配置写安全审计 (SNMPv2c/Telnet/verify_tls/
+        # TLS 指纹/HTTP scheme), detected against the PREVIOUS stored config.
+        _audit(
+            request,
+            logger,
+            context,
+            action="security.config_changed",
+            device=device,
+            detail={
+                "changed_keys": list(result.security_config_changes),
+                "device_name": result.device.name,
+            },
+        )
     return DeviceView.model_validate(result.device, from_attributes=True)
 
 
