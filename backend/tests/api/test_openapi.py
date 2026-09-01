@@ -1,10 +1,11 @@
-"""OpenAPI export tests: health operationIds, error envelope schema, unique ids."""
+"""OpenAPI export tests: operationIds vs contracts/http-api.json, error envelope."""
 
 from __future__ import annotations
 
 import json
 
 import pytest
+from app.generated.http_api import HTTP_ENDPOINTS
 from app.tools.openapi_export import OPENAPI_PATH, run
 
 
@@ -43,3 +44,36 @@ def test_exported_openapi_operation_ids_are_unique() -> None:
     operation_ids = [operation["operationId"] for path in paths.values() for operation in path.values()]
     assert operation_ids
     assert len(operation_ids) == len(set(operation_ids))
+
+
+AUTH_USERS_ROLES_ENDPOINTS = {
+    "auth_login": ("POST", "/auth/login"),
+    "auth_logout": ("POST", "/auth/logout"),
+    "auth_get_me": ("GET", "/auth/me"),
+    "auth_change_password": ("POST", "/auth/password"),
+    "auth_reauthenticate": ("POST", "/auth/reauth"),
+    "users_list": ("GET", "/users"),
+    "users_create": ("POST", "/users"),
+    "users_get": ("GET", "/users/{id}"),
+    "users_update": ("PATCH", "/users/{id}"),
+    "roles_list": ("GET", "/roles"),
+}
+
+
+@pytest.mark.unit
+def test_exported_openapi_auth_users_roles_operation_ids_match_contract() -> None:
+    """The implemented endpoints carry the EXACT operationIds of http-api.json."""
+    schema = exported_schema()
+    paths = schema["paths"]
+    assert isinstance(paths, dict)
+    observed: dict[str, tuple[str, str]] = {}
+    for path, methods in paths.items():
+        for method, operation in methods.items():
+            if method.upper() in {"GET", "POST", "PATCH", "PUT", "DELETE"}:
+                observed[operation["operationId"]] = (method.upper(), path)
+    for operation_id, (method, path) in AUTH_USERS_ROLES_ENDPOINTS.items():
+        assert observed.get(operation_id) == (method, f"/api/v1{path}"), operation_id
+        contract_endpoint = HTTP_ENDPOINTS[operation_id]
+        assert contract_endpoint.path == path
+        assert contract_endpoint.operation_id == operation_id
+        assert contract_endpoint.method == method

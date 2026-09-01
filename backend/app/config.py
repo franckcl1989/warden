@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,6 +36,15 @@ class WardenSettings(BaseSettings):
     app_env: str = Field(default="production")
     public_url: str = Field(default="http://localhost")
     display_timezone: str = Field(default="Asia/Shanghai")
+
+    # Authentication and sessions (docs/SECURITY.md §2, API_CONTRACT.md §11)
+    session_idle_minutes: int = Field(default=30, ge=1)
+    session_absolute_hours: int = Field(default=12, ge=1)
+    reauth_ttl_minutes: int = Field(default=5, ge=1)
+    login_lockout_after_failures: int = Field(default=5, ge=1)
+    login_lockout_minutes: int = Field(default=15, ge=1)
+    login_rate_limit_per_minute: int = Field(default=5, ge=1)
+    session_rate_limit_per_minute: int = Field(default=300, ge=1)
 
     # Database
     postgres_dsn_file: Path | None = Field(default=None)
@@ -132,6 +142,12 @@ class WardenSettings(BaseSettings):
     @property
     def allowed_device_networks(self) -> list[str]:
         return [item.strip() for item in self.allowed_device_cidrs.split(",") if item.strip()]
+
+    @property
+    def session_cookie_secure(self) -> bool:
+        """Secure cookies everywhere except localhost development (SECURITY.md §2)."""
+        host = urlparse(self.public_url).hostname or ""
+        return not (self.app_env == "development" and host in {"localhost", "127.0.0.1"})
 
 
 _WardenSettings = Annotated[WardenSettings, WardenSettings]

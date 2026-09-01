@@ -12,8 +12,10 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
+import app.models  # noqa: F401  (registers ORM models for autogenerate parity)
 from app.config import get_settings
 from app.infrastructure.db import dsn_with_psycopg_dialect
+from app.models.base import Base
 from sqlalchemy import engine_from_config, pool
 
 config = context.config
@@ -27,9 +29,9 @@ config.set_main_option(
     "sqlalchemy.url", dsn_with_psycopg_dialect(get_settings().database_url).replace("%", "%%")
 )
 
-# No ORM models exist yet (M0T4 is the harness only); first business tables
-# arrive in M1/M2 and will supply target_metadata.
-target_metadata = None
+# Models registered in app.models (imported above via app.models.auth through
+# app.models.__init__) supply the metadata for autogenerate parity checks.
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
