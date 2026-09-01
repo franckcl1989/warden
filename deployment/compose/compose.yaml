@@ -1,0 +1,193 @@
+# Warden 0.1.0 单机部署（docs/DEPLOYMENT.md §2-5、docs/SECURITY.md §11；ADR-002/023/026/027）
+# 服务与名称严格对应 DEPLOYMENT §2 表格：nginx/api/worker/event-ingest/postgres/migrate（一次性），
+# 无副本、无 HA、无 Kubernetes。API 单进程（ARCHITECTURE §2 单进程理由）。
+#
+# 使用方式（DEPLOYMENT §6）：
+#   1. cp deployment/env/.env.example deployment/compose/.env  并填写；
+#   2. docker compose -f deployment/compose/compose.yaml up -d postgres   （等待健康）
+#   3. docker compose -f deployment/compose/compose.yaml run --rm migrate  （一次性迁移）
+#   4. docker compose -f deployment/compose/compose.yaml up -d
+#
+# 生产不编译代码、不联网拉取：镜像 digest 固定引用见 deployment/env/.env.example。
+# 本仓库环境无 Docker，该 Compose 只做静态校验，从未在本机执行过（deployment/README.md）。
+
+name: warden
+
+services:
+  postgres:
+    image: ${WARDEN_IMAGE_POSTGRES:-postgres:18} # 大版本固定 18（ARCHITECTURE §2）
+    restart: unless-stopped
+    init: true
+    user: "999:999" # 镜像内 postgres 系统用户，非 root（SECURITY §11）
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /var/run/postgresql:mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      POSTGRES_DB: warden
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+    volumes:
+      # 宿主机目录 ${WARDEN_DATA_DIR}/postgres 需预创建并 chown 999:999（DEPLOYMENT §4/§7）
+      - ${WARDEN_DATA_DIR:-/srv/warden}/postgres:/var/lib/postgresql/data
+      # 首次空数据目录时执行：创建最小权限 warden_app / warden_migrate 账号（SECURITY §11）
+      - ../postgres-init:/docker-entrypoint-initdb.d:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_superuser_password:/run/secrets/postgres_superuser_password:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn:/run/secrets/postgres_dsn:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn_migrate:/run/secrets/postgres_dsn_migrate:ro
+    healthcheck:
+      # 仅当 warden_app 账号创建完成（initdb 脚本跑完）才判健康，避免依赖方过早启动
+      test: ["CMD-SHELL", "psql -U postgres -d warden -tAc \"SELECT 1 FROM pg_roles WHERE rolname='warden_app'\" | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    # 资源限制占位：CPU/内存由现场验收负载确定（ADR-027），M6 容量基准后填写。
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "2.0"
+    #       memory: 4G
+
+  migrate:
+    # 一次性迁移（DATA_MODEL §12：Compose 启动时由独立一次性 migrate 容器执行，API 不抢跑）
+    image: ${WARDEN_IMAGE_APP:-warden-app:0.1.0}
+    restart: "no"
+    init: true
+    user: "1000:1000" # 镜像内 warden 用户，非 root
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file: [.env]
+    environment:
+      # 迁移使用独立 warden_migrate 账号（SECURITY §11）
+      WARDEN_POSTGRES_DSN_FILE: /run/secrets/postgres_dsn_migrate
+    volumes:
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn_migrate:/run/secrets/postgres_dsn_migrate:ro
+      - ../scripts:/entrypoints:ro
+    command: ["/entrypoints/entrypoint-migrate.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 资源限制占位：ADR-027，M6 填写。
+
+  api:
+    image: ${WARDEN_IMAGE_APP:-warden-app:0.1.0}
+    restart: unless-stopped
+    init: true
+    user: "1000:1000" # 镜像内 warden 用户，非 root
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file: [.env]
+    volumes:
+      # 应用密钥与数据库 DSN：Docker secret 风格只读挂载，绝不明文内联（DEPLOYMENT §5）
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/credential_master_key:/run/secrets/credential_master_key:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/file_master_key:/run/secrets/file_master_key:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/session_secret:/run/secrets/session_secret:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/csrf_secret:/run/secrets/csrf_secret:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn:/run/secrets/postgres_dsn:ro
+      # 受控文件存储（ARCHITECTURE §3.6、ADR-012）：PostgreSQL/文件卷不发布到宿主机网络
+      - ${WARDEN_DATA_DIR:-/srv/warden}/files:/data/files
+      - ../scripts:/entrypoints:ro
+    command: ["/entrypoints/entrypoint-api.sh"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 资源限制占位：ADR-027，M6 填写。
+
+  worker:
+    image: ${WARDEN_IMAGE_APP:-warden-app:0.1.0}
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file: [.env]
+    volumes:
+      # Worker 需要凭据主密钥（解密设备凭据）、文件主密钥（加密产物）和数据库 DSN
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/credential_master_key:/run/secrets/credential_master_key:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/file_master_key:/run/secrets/file_master_key:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn:/run/secrets/postgres_dsn:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/files:/data/files
+      - ../scripts:/entrypoints:ro
+    command: ["/entrypoints/entrypoint-worker.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 资源限制占位：ADR-027，M6 填写。
+
+  event-ingest:
+    # 与 api/worker/migrate 共用应用镜像，仅命令不同（接收 SNMP Trap / Syslog，ARCHITECTURE §3.4）
+    image: ${WARDEN_IMAGE_APP:-warden-app:0.1.0}
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file: [.env]
+    volumes:
+      - ${WARDEN_DATA_DIR:-/srv/warden}/secrets/postgres_dsn:/run/secrets/postgres_dsn:ro
+      - ../scripts:/entrypoints:ro
+    ports:
+      # 容器内非特权端口（WARDEN_SNMP_TRAP_PORT 默认 1162、WARDEN_SYSLOG_* 默认 1514）
+      - "162:${WARDEN_SNMP_TRAP_PORT:-1162}/udp"
+      - "514:${WARDEN_SYSLOG_UDP_PORT:-1514}/udp"
+      - "514:${WARDEN_SYSLOG_TCP_PORT:-1514}/tcp"
+    command: ["/entrypoints/entrypoint-ingest.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 资源限制占位：ADR-027，M6 填写。
+
+  nginx:
+    # warden-nginx 镜像：基于官方 nginx 稳定版并在发布流水线内置前端构建产物
+    # （生产不编译代码，DEPLOYMENT §1/§10）。本地验证可临时挂载 frontend/dist。
+    image: ${WARDEN_IMAGE_NGINX:-warden-nginx:0.1.0}
+    restart: unless-stopped
+    init: true
+    user: "101:101" # 镜像内 nginx 用户，非 root；需要 NET_BIND_SERVICE 绑定 443
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:mode=1777
+      - /var/run:mode=1777
+      - /tmp:mode=1777
+      - /etc/nginx/conf.d:mode=1777 # 官方镜像 envsubst 模板输出目录
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    env_file: [.env]
+    environment:
+      # 只替换 WARDEN_* 前缀变量（官方镜像 20-envsubst-on-templates.sh 机制）
+      NGINX_ENVSUBST_FILTER: "^WARDEN_"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # conf.d/warden.conf.template -> 启动时生成 /etc/nginx/conf.d/warden.conf
+      - ../nginx/conf.d:/etc/nginx/templates:ro
+      - ${WARDEN_DATA_DIR:-/srv/warden}/tls:/etc/nginx/tls:ro
+    ports:
+      - "443:443"
+      # TCP 80 可选（仅重定向到 443，DEPLOYMENT §3）；需要时取消注释：
+      # - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    # 资源限制占位：ADR-027，M6 填写。

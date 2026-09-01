@@ -1,0 +1,89 @@
+# Warden 443 入口服务器块（TLS 终止；SECURITY §10、DEPLOYMENT §3/§5）
+# 本文件是模板：官方 nginx 镜像启动时以 envsubst 替换 ${WARDEN_*} 变量后
+# 写入 /etc/nginx/conf.d/warden.conf（NGINX_ENVSUBST_FILTER=^WARDEN_）。
+# 证书路径来自环境变量 WARDEN_TLS_CERT_FILE / WARDEN_TLS_KEY_FILE。
+
+# TCP 80：仅重定向到 443（DEPLOYMENT §3 可选端口；默认不在 Compose 发布，
+# 需要时取消 deployment/compose/compose.yaml 中 "80:80" 注释即可生效）
+server {
+    listen 80;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     ${WARDEN_TLS_CERT_FILE};
+    ssl_certificate_key ${WARDEN_TLS_KEY_FILE};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # SECURITY §10 强制安全头
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header Content-Security-Policy "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # SPA：入口文档不缓存；assets 为哈希文件名，可长缓存
+    location = /index.html {
+        add_header Cache-Control "no-store" always;
+        try_files $uri =404;
+    }
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable" always;
+        access_log off;
+    }
+    location / {
+        add_header Cache-Control "no-store" always;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # SSE：关闭缓冲，长连接（ARCHITECTURE §5.3）
+    location /api/v1/events/stream {
+        proxy_pass http://api:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # 浏览器终端 WebSocket：Upgrade 升级，会话上限 2 小时（ARCHITECTURE §5.4）
+    location /api/v1/terminal/ {
+        proxy_pass http://api:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 7200s;
+        proxy_send_timeout 7200s;
+    }
+
+    # 普通 API：大文件上传流式转发（配额由应用检查），不缓冲
+    location /api/v1/ {
+        proxy_pass http://api:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_read_timeout 60s;
+    }
+}
