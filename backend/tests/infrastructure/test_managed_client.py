@@ -115,10 +115,10 @@ def test_client_refuses_unverified_tls() -> None:
 def test_client_refuses_pinned_mode_until_transport_wiring() -> None:
     # The pin check happens post-handshake (no ssl verify_callback on the
     # deployed interpreter); an httpx client cannot enforce it, so the factory
-    # refuses to silently build an unverified client. M1T3 wires sessions to
-    # open_pinned_connection.
+    # refuses to silently build an unverified client. M1T3 wires pinned
+    # sessions to PinnedTlsConnection.
     p = DeviceEndpointPolicy(["192.168.10.0/24"])
-    with pytest.raises(ValueError, match="open_pinned_connection"):
+    with pytest.raises(ValueError, match="PinnedTlsConnection"):
         build_managed_client(
             host_ip=ip_address("192.168.10.5"),
             port=443,

@@ -5,21 +5,22 @@
 - Self-signed devices pin the admin-confirmed SHA-256 fingerprint of the leaf
   certificate (``tls_fingerprint_sha256`` in connection config); a changed
   certificate is a ``tls_validation_failed``, never silently accepted.
-- There is NO permanent ``verify=false``: ``build_ssl_context`` refuses to
-  create an unverified context for credentials, and ``verify_peer_connection``
-  enforces the pin right after the handshake, before any data is exchanged.
+- There is NO permanent ``verify=false`` and NO exported bare pin-mode
+  context: pin mode is encapsulated in ``PinnedTlsConnection``, which only
+  hands out a socket AFTER the post-handshake fingerprint check passed — a
+  caller cannot connect unverified by accident. ``build_ssl_context`` handles
+  CA-validated contexts only and refuses pin mode with a pointer to
+  ``PinnedTlsConnection``.
 
 Implementation note (environment): the deployed interpreter's ``ssl`` module
 exposes no ``verify_callback``, so pinning cannot run inside OpenSSL's
 handshake. Instead the pin is verified application-layer: the pinned context
 accepts the peer certificate (the pin is the trust anchor for self-signed
-devices), and ``verify_peer_connection`` compares the SHA-256 fingerprint of
-the actual leaf certificate (``getpeercert(binary_form=True)``) with the
-pinned value using a constant-time compare. The connection must not send data
-before this check passes; ``open_pinned_connection`` combines handshake +
-pin check and returns only a verified socket. httpx cannot interpose this
-check, so ``build_managed_client`` only builds CA-validated clients; pinned
-sessions are wired to ``open_pinned_connection`` by M1T3's adapters.
+devices), and ``PinnedTlsConnection`` compares the SHA-256 fingerprint of the
+actual leaf certificate (``getpeercert(binary_form=True)``) with the pinned
+value using a constant-time compare before any data may flow. httpx cannot
+interpose this check, so ``build_managed_client`` only builds CA-validated
+clients; pinned sessions are wired to ``PinnedTlsConnection`` by the adapters.
 """
 
 from __future__ import annotations
@@ -116,19 +117,39 @@ def decide_verification(
     return TlsVerification(TlsDecisionState.MISMATCH, expected_fingerprint=pinned_fingerprint)
 
 
+def _build_pinned_context(pinned_fingerprint: str) -> ssl.SSLContext:
+    """Private: build the pin-mode TLS context.
+
+    The pin is the trust anchor for self-signed devices, so the context
+    accepts the peer certificate (CERT_NONE) and the handshake completes so
+    the certificate can be inspected. This context MUST NOT be exported or
+    used directly: the peer is unverified until ``PinnedTlsConnection`` runs
+    the post-handshake fingerprint check before any data flows. Use
+    ``PinnedTlsConnection`` instead.
+    """
+    if not validate_fingerprint(pinned_fingerprint):
+        msg = "fingerprint must be 64 hex characters"
+        raise ValueError(msg)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def build_ssl_context(
     *,
     verify_tls: bool,
     pinned_fingerprint: str | None,
     ca_bundle_path: Path | None,
 ) -> ssl.SSLContext:
-    """Build the TLS context for device connections.
+    """Build the CA-validated TLS context for device connections.
 
     - ``verify_tls=False`` is rejected: unverified device connections are
       never permitted for credentials (SECURITY.md §6).
-    - pin mode: the pin is the trust anchor, so the context accepts the peer
-      certificate and the pin is enforced post-handshake by
-      ``verify_peer_connection`` before any data flows.
+    - pin mode is NOT exported as a bare context: returning a CERT_NONE
+      context would let future callers connect before verifying the pin. Pin
+      mode lives inside ``PinnedTlsConnection``, which only hands out a
+      socket after the post-handshake fingerprint check passed.
     - CA mode: system store (or ``ca_bundle_path`` when given) + hostname
       verification, matching SECURITY.md's default certificate validation.
     """
@@ -136,17 +157,11 @@ def build_ssl_context(
         msg = "unverified TLS contexts are not allowed for device credentials (docs/SECURITY.md §6)"
         raise ValueError(msg)
     if pinned_fingerprint is not None:
-        if not validate_fingerprint(pinned_fingerprint):
-            msg = "fingerprint must be 64 hex characters"
-            raise ValueError(msg)
-        ctx = ssl.create_default_context()
-        # The pin is the trust anchor for self-signed devices: chain
-        # validation is off (CERT_NONE) so the handshake completes and the
-        # certificate can be inspected; verify_peer_connection() MUST run
-        # before any data is sent, otherwise this is an unverified connection.
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
+        msg = (
+            "pin-mode TLS contexts are not exported; use PinnedTlsConnection "
+            "(docs/SECURITY.md §6, M1T3)"
+        )
+        raise ValueError(msg)
     return ssl.create_default_context(cafile=str(ca_bundle_path) if ca_bundle_path else None)
 
 
@@ -179,6 +194,54 @@ def verify_peer_connection(
         raise TlsPinMismatch(stage="tls_fingerprint", fingerprint=expected_fingerprint, reason=msg)
 
 
+class PinnedTlsConnection:
+    """Opaque pinned-TLS connection (docs/SECURITY.md §6).
+
+    Encapsulates the pin-mode context so no caller can connect unverified:
+    ``open()`` (and the context-manager protocol) completes the TLS handshake,
+    runs the post-handshake fingerprint check, and only then returns a
+    verified ``SSLSocket``. ``host`` must already be a validated resolved IP
+    (see ``DeviceEndpointPolicy.resolve_endpoint``). The returned socket is
+    closed when the context manager exits, or by the caller when using
+    ``open()`` directly.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        expected_fingerprint: str,
+        *,
+        timeout: float = CONNECT_TIMEOUT_SECONDS,
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._expected_fingerprint = expected_fingerprint
+        self._timeout = timeout
+        self._context = _build_pinned_context(expected_fingerprint)
+
+    def open(self) -> ssl.SSLSocket:
+        """Open the connection; returns a socket only after the pin check passed."""
+        raw = socket.create_connection((self._host, self._port), timeout=self._timeout)
+        tls_socket = self._context.wrap_socket(raw, server_hostname=None)
+        try:
+            verify_peer_connection(tls_socket, self._expected_fingerprint)
+        except Exception:
+            tls_socket.close()
+            raise
+        return tls_socket
+
+    def __enter__(self) -> ssl.SSLSocket:
+        self._socket = self.open()
+        return self._socket
+
+    def __exit__(self, *exc_info: object) -> None:
+        del exc_info
+        sock = getattr(self, "_socket", None)
+        if sock is not None:
+            sock.close()
+
+
 def open_pinned_connection(
     host: str,
     port: int,
@@ -186,25 +249,14 @@ def open_pinned_connection(
     *,
     timeout: float = CONNECT_TIMEOUT_SECONDS,
 ) -> ssl.SSLSocket:
-    """Open a TLS connection to ``(host, port)`` and enforce the pin post-handshake.
+    """Open a pinned TLS connection via ``PinnedTlsConnection``.
 
-    Returns a verified ``SSLSocket``; the caller may speak the protocol only
-    after this returns. ``host`` must already be a validated resolved IP
-    (see ``DeviceEndpointPolicy.resolve_endpoint``).
+    Backward-compatible convenience: returns the verified socket; the
+    caller is responsible for closing it.
     """
-    ctx = build_ssl_context(
-        verify_tls=True,
-        pinned_fingerprint=expected_fingerprint,
-        ca_bundle_path=None,
-    )
-    raw = socket.create_connection((host, port), timeout=timeout)
-    tls_socket = ctx.wrap_socket(raw, server_hostname=None)
-    try:
-        verify_peer_connection(tls_socket, expected_fingerprint)
-    except Exception:
-        tls_socket.close()
-        raise
-    return tls_socket
+    return PinnedTlsConnection(
+        host, port, expected_fingerprint, timeout=timeout
+    ).open()
 
 
 def build_managed_client(
@@ -229,8 +281,8 @@ def build_managed_client(
 
     Only CA-validated HTTPS clients can be built here: httpx cannot run the
     post-handshake pin check, so pinned sessions must use
-    ``open_pinned_connection`` (M1T3 adapter wiring). Plain HTTP is refused:
-    it cannot carry credentials.
+    ``PinnedTlsConnection`` (adapter wiring). Plain HTTP is refused: it
+    cannot carry credentials.
     """
     if scheme != "https":
         msg = "plain http cannot carry credentials; only https device management is supported"
@@ -242,8 +294,8 @@ def build_managed_client(
     policy.validate_endpoint(host=None, ip=host_ip, port=port, allowed_ports=allowed_ports)
     if pinned_fingerprint is not None:
         msg = (
-            "pinned TLS requires the post-handshake check; use open_pinned_connection "
-            "(M1T3 session wiring)"
+            "pinned TLS requires the post-handshake check; use PinnedTlsConnection "
+            "(docs/SECURITY.md §6)"
         )
         raise ValueError(msg)
     ctx = build_ssl_context(

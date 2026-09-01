@@ -28,6 +28,7 @@ from app.domain.auth_errors import (
 )
 from app.domain.roles import require_permission as matrix_require
 from app.infrastructure.audit import AuditLogger
+from app.infrastructure.crypto import CredentialCipher, CredentialKeyring
 from app.infrastructure.csrf import (
     CSRF_HEADER_NAME,
     is_origin_allowed,
@@ -81,6 +82,27 @@ def get_audit_logger(request: Request) -> AuditLogger:
 def get_rate_limiter(request: Request) -> RateLimiter:
     limiter: RateLimiter = request.app.state.rate_limiter
     return limiter
+
+
+def get_credential_keyring(request: Request) -> CredentialKeyring:
+    """The credential keystore, built lazily from the mounted secret file.
+
+    SECURITY.md §5: the master key is derived from the read-only Secret file
+    (never env/logs). Built once per process on first use; a missing or too
+    short key surfaces as ``dependency_unavailable`` so device onboarding
+    fails loudly instead of writing unencryptable rows.
+    """
+    ring: CredentialKeyring | None = getattr(request.app.state, "credential_keyring", None)
+    if ring is not None:
+        return ring
+    settings: WardenSettings = request.app.state.settings
+    try:
+        material = settings.credential_master_key.get_secret_value().encode("utf-8")
+        ring = CredentialKeyring.from_current(CredentialCipher(material))
+    except ValueError as exc:
+        raise dependency_unavailable("credential_keyring") from exc
+    request.app.state.credential_keyring = ring
+    return ring
 
 
 def _allowed_origins(settings: WardenSettings) -> set[str]:

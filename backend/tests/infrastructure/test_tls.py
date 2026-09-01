@@ -15,9 +15,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from app.infrastructure.tls import (
+    PinnedTlsConnection,
     TlsDecisionState,
     TlsPinMismatch,
     TlsVerification,
+    _build_pinned_context,
     build_ssl_context,
     decide_verification,
     open_pinned_connection,
@@ -126,16 +128,36 @@ def test_build_ssl_context_ca_mode_validates_hostname_and_chain() -> None:
 
 
 @pytest.mark.unit
-def test_build_ssl_context_pin_mode_accepts_peer_for_post_handshake_check() -> None:
-    ctx = build_ssl_context(verify_tls=True, pinned_fingerprint="a" * 64, ca_bundle_path=None)
-    assert ctx.verify_mode == ssl.CERT_NONE
-    assert ctx.check_hostname is False
+def test_build_ssl_context_does_not_export_bare_pin_mode_context() -> None:
+    """M1T2 carried finding: pin mode is encapsulated in PinnedTlsConnection.
+
+    A bare CERT_NONE context would let a caller connect before the pin check
+    runs; build_ssl_context must refuse pin mode entirely.
+    """
+    with pytest.raises(ValueError, match="PinnedTlsConnection"):
+        build_ssl_context(verify_tls=True, pinned_fingerprint="a" * 64, ca_bundle_path=None)
+    with pytest.raises(ValueError, match="PinnedTlsConnection"):
+        build_ssl_context(verify_tls=True, pinned_fingerprint="bad", ca_bundle_path=None)
 
 
 @pytest.mark.unit
-def test_build_ssl_context_rejects_malformed_pin() -> None:
-    with pytest.raises(ValueError):
-        build_ssl_context(verify_tls=True, pinned_fingerprint="bad", ca_bundle_path=None)
+def test_pinned_tls_connection_open_success(self_signed: SelfSignedFixture) -> None:
+    with _tls_server(self_signed) as port, PinnedTlsConnection(
+        "127.0.0.1", port, self_signed.fingerprint, timeout=3.0
+    ) as tls:
+        assert tls_fingerprint(tls.getpeercert(binary_form=True)) == self_signed.fingerprint
+
+
+@pytest.mark.unit
+def test_pinned_tls_connection_open_wrong_pin_raises(self_signed: SelfSignedFixture) -> None:
+    with _tls_server(self_signed) as port, pytest.raises(TlsPinMismatch):
+        PinnedTlsConnection("127.0.0.1", port, "0" * 64, timeout=3.0).open()
+
+
+@pytest.mark.unit
+def test_pinned_tls_connection_rejects_malformed_pin() -> None:
+    with pytest.raises(ValueError, match="64 hex"):
+        PinnedTlsConnection("127.0.0.1", 443, "short")
 
 
 @pytest.mark.unit
@@ -246,6 +268,6 @@ def _tls_server(fixture: SelfSignedFixture):
 
 
 def _client_socket(port: int, pin: str) -> ssl.SSLSocket:
-    ctx = build_ssl_context(verify_tls=True, pinned_fingerprint=pin, ca_bundle_path=None)
+    ctx = _build_pinned_context(pin)
     raw = socket.create_connection(("127.0.0.1", port), timeout=3.0)
     return ctx.wrap_socket(raw, server_hostname=None)

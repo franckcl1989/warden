@@ -59,11 +59,21 @@ AUTH_USERS_ROLES_ENDPOINTS = {
     "roles_list": ("GET", "/roles"),
 }
 
+DEVICE_ENDPOINTS = {
+    "device_probes_create": ("POST", "/device-probes"),
+    "devices_create": ("POST", "/devices"),
+    "devices_list": ("GET", "/devices"),
+    "devices_get": ("GET", "/devices/{id}"),
+    "devices_update": ("PATCH", "/devices/{id}"),
+    "devices_probe": ("POST", "/devices/{id}/probe"),
+    "device_capabilities_list": ("GET", "/devices/{id}/capabilities"),
+}
 
-@pytest.mark.unit
-def test_exported_openapi_auth_users_roles_operation_ids_match_contract() -> None:
-    """The implemented endpoints carry the EXACT operationIds of http-api.json."""
-    schema = exported_schema()
+
+def _assert_operation_ids(
+    schema: dict[str, object],
+    expected: dict[str, tuple[str, str]],
+) -> None:
     paths = schema["paths"]
     assert isinstance(paths, dict)
     observed: dict[str, tuple[str, str]] = {}
@@ -71,9 +81,21 @@ def test_exported_openapi_auth_users_roles_operation_ids_match_contract() -> Non
         for method, operation in methods.items():
             if method.upper() in {"GET", "POST", "PATCH", "PUT", "DELETE"}:
                 observed[operation["operationId"]] = (method.upper(), path)
-    for operation_id, (method, path) in AUTH_USERS_ROLES_ENDPOINTS.items():
+    for operation_id, (method, path) in expected.items():
         assert observed.get(operation_id) == (method, f"/api/v1{path}"), operation_id
         contract_endpoint = HTTP_ENDPOINTS[operation_id]
         assert contract_endpoint.path == path
         assert contract_endpoint.operation_id == operation_id
         assert contract_endpoint.method == method
+
+
+@pytest.mark.unit
+def test_exported_openapi_auth_users_roles_operation_ids_match_contract() -> None:
+    """The implemented endpoints carry the EXACT operationIds of http-api.json."""
+    _assert_operation_ids(exported_schema(), AUTH_USERS_ROLES_ENDPOINTS)
+
+
+@pytest.mark.unit
+def test_exported_openapi_device_operation_ids_match_contract() -> None:
+    """M1T3 device endpoints carry the EXACT operationIds of http-api.json."""
+    _assert_operation_ids(exported_schema(), DEVICE_ENDPOINTS)

@@ -45,6 +45,7 @@ class WardenSettings(BaseSettings):
     login_lockout_minutes: int = Field(default=15, ge=1)
     login_rate_limit_per_minute: int = Field(default=5, ge=1)
     session_rate_limit_per_minute: int = Field(default=300, ge=1)
+    probe_rate_limit_per_minute: int = Field(default=10, ge=1)
 
     # Database
     postgres_dsn_file: Path | None = Field(default=None)

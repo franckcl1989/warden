@@ -65,7 +65,8 @@ class RateLimiter:
     """Named policies: login per source IP, authenticated requests per session.
 
     docs/API_CONTRACT.md §11: login 5/min per IP; ordinary reads and all
-    session-bearing requests 300/min per session.
+    session-bearing requests 300/min per session; device probes 10/min per
+    user.
     """
 
     def __init__(
@@ -73,13 +74,18 @@ class RateLimiter:
         *,
         login_per_minute: int = 5,
         session_per_minute: int = 300,
+        probe_per_minute: int = 10,
         clock: Clock | None = None,
     ) -> None:
         self._login = FixedWindowLimiter(limit=login_per_minute, window_seconds=60, clock=clock)
         self._session = FixedWindowLimiter(limit=session_per_minute, window_seconds=60, clock=clock)
+        self._probe = FixedWindowLimiter(limit=probe_per_minute, window_seconds=60, clock=clock)
 
     def check_login(self, source_ip: str) -> RateLimitResult:
         return self._login.check(f"login:{source_ip}")
 
     def check_session(self, session_id_hash: str) -> RateLimitResult:
         return self._session.check(f"session:{session_id_hash}")
+
+    def check_probe(self, user_id: str) -> RateLimitResult:
+        return self._probe.check(f"probe:{user_id}")
