@@ -212,11 +212,19 @@ def _encrypt_credentials(
     adapter_key: str,
     credentials: dict[str, object],
     secret_schema_version: int,
+    key_version: int | None = None,
 ) -> EncryptedSecret:
+    """Encrypt ``credentials`` under the AAD bound to ``adapter_key``.
+
+    ``key_version`` defaults to the keyring's current version (fresh writes);
+    pass the stored row's version to re-bind an existing ciphertext to a new
+    AAD (e.g. an adapter_key change) without switching the master key.
+    """
     plaintext = json.dumps(credentials, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return keyring.current_cipher().encrypt_secret(
+    version = keyring.current_version if key_version is None else key_version
+    return keyring.cipher_for(version).encrypt_secret(
         plaintext,
-        key_version=keyring.current_version,
+        key_version=version,
         aad=credential_aad(str(device_id), adapter_key, secret_schema_version),
     )
 
@@ -410,7 +418,10 @@ def update_device(
     changes (management_endpoint / adapter_key / connection_config /
     credentials) require a probe token bound to the NEW profile and a fresh
     probe; when the fresh probe fails the change is rejected with the stage
-    error — unverified configuration is never applied. The enabled check runs
+    error — unverified configuration is never applied. A kept-credentials
+    adapter_key change re-encrypts the stored ciphertext under the new AAD
+    (device_id + new adapter_key + same secret_schema_version) with the same
+    key_version, so later decrypts keep working. The enabled check runs
     after security changes so a PATCH that both fixes the config (re-probe ->
     ready) and enables the device works in one round trip.
     """
@@ -424,6 +435,7 @@ def update_device(
     if security_relevant:
         if probe_token is None:
             raise validation_failed("probe_token", "修改连接配置或凭据需要先重新探测")
+        previous_adapter_key = device.adapter_key
         effective_credentials = credentials
         if effective_credentials is None:
             credential_row = db.get(DeviceCredential, device.id)
@@ -433,7 +445,7 @@ def update_device(
                 keyring,
                 credential_row,
                 device_id=device.id,
-                adapter_key=device.adapter_key,
+                adapter_key=previous_adapter_key,
             )
         effective_endpoint = (
             management_endpoint if management_endpoint is not None else device.management_endpoint
@@ -492,6 +504,20 @@ def update_device(
                 credential_row.secret_schema_version = adapter.secret_schema_version
             changed.append("credentials")
             new_credentials_digest = credentials_digest(effective_credentials)
+        elif profile.adapter_key != previous_adapter_key:
+            credential_row = db.get(DeviceCredential, device.id)
+            if credential_row is None:
+                raise validation_failed("credentials", "设备凭据不存在")
+            encrypted = _encrypt_credentials(
+                keyring,
+                device_id=device.id,
+                adapter_key=profile.adapter_key,
+                credentials=effective_credentials,
+                secret_schema_version=credential_row.secret_schema_version,
+                key_version=credential_row.key_version,
+            )
+            credential_row.ciphertext = encrypted.ciphertext
+            credential_row.nonce = encrypted.nonce
         device.readiness = "ready"
         device.last_seen_at = utcnow()
         if outcome.discovery is not None:
