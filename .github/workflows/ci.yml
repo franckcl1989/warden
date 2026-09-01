@@ -44,18 +44,18 @@ jobs:
         run: uv run mypy app
       - name: Codegen
         run: uv run python -m app.tools.codegen
-      - name: Generated backend drift check
-        # must run from repo root so the backend/app/generated path resolves
+      - name: Generated drift check
+        # codegen emits backend/app/generated and frontend/src/api/generated
+        # (contracts.ts). openapi.ts drift is checked from M2 on; openapi-typescript
+        # requires the backend openapi export (backend/openapi.gen.json) first.
         working-directory: .
-        # frontend/src/api/generated drift joins this check after M0T5 creates the frontend.
-        run: git diff --exit-code -- backend/app/generated
+        run: git diff --exit-code -- backend/app/generated frontend/src/api/generated
       - name: Tests
         env:
           WARDEN_TEST_POSTGRES_DSN: postgresql://warden:warden@localhost:5432/warden_test
         run: uv run pytest -q
 
   frontend:
-    if: ${{ false }} # enable after M0T5 creates frontend/
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,6 +76,12 @@ jobs:
       - name: Test
         working-directory: frontend
         run: npm run test
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+      # test:e2e stays out of default CI until the M2 gate: Playwright browsers
+      # are heavy and e2e needs a running dev/backend stack. Run locally via
+      # `npx playwright install chromium` + `npm run test:e2e`.
 
   contracts:
     runs-on: ubuntu-latest

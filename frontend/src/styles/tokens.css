@@ -1,0 +1,20 @@
+/*
+ * Warden 0.1.0 设计令牌（UI_SPEC §3）。
+ * 状态颜色只作视觉强调，必须始终配合文字与图标，不单独承担含义。
+ */
+:root {
+  /* 状态语义色（UI_SPEC §3） */
+  --warden-status-healthy: #67c23a; /* 健康/成功 */
+  --warden-status-warning: #e6a23c; /* 警告/数据过期 */
+  --warden-status-critical: #f56c6c; /* 严重/失败 */
+  --warden-status-running: #409eff; /* 运行中 */
+  --warden-status-unknown: #909399; /* 未知/停用/不支持 */
+  --warden-status-verification: #a06be0; /* 结果待核验 */
+
+  /* 布局令牌（UI_SPEC §2） */
+  --warden-sidebar-width: 224px;
+  --warden-sidebar-collapsed-width: 64px;
+
+  /* Element Plus 主色与运行态一致 */
+  --el-color-primary: var(--warden-status-running);
+}
