@@ -74,7 +74,12 @@ markers = [
     "integration: requires a live PostgreSQL 18 instance",
     "unit: pure unit tests without external services",
 ]
-filterwarnings = ["error"]
+# starlette 1.6 prefers the httpx2 package for TestClient and warns on the httpx
+# fallback; httpx2 is not a lockfile dependency (M0T3: no new dependencies).
+filterwarnings = [
+    "error",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 
 [tool.coverage.run]
 source = ["app"]
