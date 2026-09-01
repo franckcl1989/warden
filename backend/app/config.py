@@ -14,11 +14,18 @@ from typing import Annotated
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# env_file is resolved to the repo-root .env so every invocation works no
+# matter the working directory (alembic, pytest and uvicorn all run from
+# backend/; tasks.ps1 and Makefile call them with backend as CWD).
+_APP_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _APP_DIR.parent.parent
+_REPO_ENV_FILE = _REPO_ROOT / ".env"
+
 
 class WardenSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="WARDEN_",
-        env_file=".env",
+        env_file=_REPO_ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
