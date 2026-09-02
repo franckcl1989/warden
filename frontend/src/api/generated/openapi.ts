@@ -263,6 +263,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices/{id}/components": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Device Components List */
+        get: operations["device_components_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Device Events List */
+        get: operations["device_events_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit-logs": {
         parameters: {
             query?: never;
@@ -297,10 +331,544 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices/{id}/metrics/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Device Metrics Latest */
+        get: operations["device_metrics_latest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{id}/metrics/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Device Metrics Series */
+        get: operations["device_metrics_series"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{id}/collection-runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Device Collection Runs List */
+        get: operations["device_collection_runs_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Overview Get */
+        get: operations["overview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Alerts List */
+        get: operations["alerts_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alerts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Alerts Get */
+        get: operations["alerts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{id}/operation-previews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Device Operation Previews Create */
+        post: operations["device_operation_previews_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{id}/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Device Operations Create */
+        post: operations["device_operations_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Operations List */
+        get: operations["operations_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Operations Get */
+        get: operations["operations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operations/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Operations Cancel */
+        post: operations["operations_cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operations/{id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Operations Verify */
+        post: operations["operations_verify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operations/{id}/resolve-verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Operations Resolve Verification */
+        post: operations["operations_resolve_verification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/events/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Events Stream
+         * @description Stream ui_events as server-sent events (PLT-09, monitor.read).
+         */
+        get: operations["events_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files/uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** File Uploads Create */
+        post: operations["file_uploads_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files/uploads/{id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * File Uploads Put Content
+         * @description Stream the raw body to the upload spool (quota enforced mid-stream).
+         *
+         *     Async endpoint: the body is consumed chunk by chunk instead of buffered,
+         *     so a declared-oversized or hostile body aborts on the first chunk past
+         *     the declaration (SECURITY.md §9). Each flushed chunk runs its DB check +
+         *     append on a worker thread with its own session.
+         */
+        put: operations["file_uploads_put_content"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files/uploads/{id}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** File Uploads Complete */
+        post: operations["file_uploads_complete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Files List */
+        get: operations["files_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Files Get */
+        get: operations["files_get"];
+        put?: never;
+        post?: never;
+        /** Files Delete */
+        delete: operations["files_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/files/{id}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Files Download */
+        get: operations["files_download"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-file-access/{ticket}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Device File Access Get
+         * @description Serve the bound file to the bound device (direct peer IP exact match).
+         */
+        get: operations["device_file_access_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AlertDetailItem
+         * @description Single-record view: the full engine-created row plus its timeline.
+         */
+        AlertDetailItem: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            device: components["schemas"]["AlertDeviceRef"];
+            /** Component Id */
+            component_id: string | null;
+            /** Rule Key */
+            rule_key: string;
+            /** Severity */
+            severity: string;
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * First Occurred At
+             * Format: date-time
+             */
+            first_occurred_at: string;
+            /**
+             * Last Occurred At
+             * Format: date-time
+             */
+            last_occurred_at: string;
+            /** Resolved At */
+            resolved_at: string | null;
+            /** Dedupe Key */
+            dedupe_key: string;
+            /** Signal Count */
+            signal_count: number;
+            /** Version */
+            version: number;
+            /** Evidence */
+            evidence: {
+                [key: string]: unknown;
+            };
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** AlertDeviceRef */
+        AlertDeviceRef: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Device Type */
+            device_type: string;
+        };
+        /** AlertListItem */
+        AlertListItem: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            device: components["schemas"]["AlertDeviceRef"];
+            /** Component Id */
+            component_id: string | null;
+            /** Rule Key */
+            rule_key: string;
+            /** Severity */
+            severity: string;
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * First Occurred At
+             * Format: date-time
+             */
+            first_occurred_at: string;
+            /**
+             * Last Occurred At
+             * Format: date-time
+             */
+            last_occurred_at: string;
+            /** Resolved At */
+            resolved_at: string | null;
+        };
+        /** AlertsListResponse */
+        AlertsListResponse: {
+            /** Items */
+            items: components["schemas"]["AlertListItem"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total */
+            total: number;
+        };
+        /** AttentionDevice */
+        AttentionDevice: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Device Type */
+            device_type: string;
+            /** Vendor */
+            vendor: string | null;
+            /** Model */
+            model: string | null;
+        };
+        /**
+         * AttentionItem
+         * @description PRODUCT_DESIGN.md §3.3: 设备名称、类型/型号、问题摘要、首次发生时间、
+         *     最近采集时间和详情入口. ``rank`` mirrors the sort order (0=offline).
+         */
+        AttentionItem: {
+            device: components["schemas"]["AttentionDevice"];
+            /** Problems */
+            problems: components["schemas"]["AttentionProblem"][];
+            /** Last Collected At */
+            last_collected_at: string | null;
+            /** Rank */
+            rank: number;
+        };
+        /** AttentionProblem */
+        AttentionProblem: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Rule Key */
+            rule_key: string;
+            /** Severity */
+            severity: string;
+            /** Title */
+            title: string;
+            /**
+             * First Occurred At
+             * Format: date-time
+             */
+            first_occurred_at: string;
+            /**
+             * Last Occurred At
+             * Format: date-time
+             */
+            last_occurred_at: string;
+        };
         /**
          * AuditLogDetailItem
          * @description Single-record view: adds the session id and the sanitized detail.
@@ -443,6 +1011,37 @@ export interface components {
             /** New Password */
             new_password: string;
         };
+        /** CollectionRunView */
+        CollectionRunView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Collection Type */
+            collection_type: string;
+            /**
+             * Scheduled At
+             * Format: date-time
+             */
+            scheduled_at: string;
+            /** Started At */
+            started_at: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** State */
+            state: string;
+            /** Attempt Count */
+            attempt_count: number;
+            /** Success Count */
+            success_count: number;
+            /** Failure Count */
+            failure_count: number;
+            /** Error Code */
+            error_code: string | null;
+            /** Error Summary */
+            error_summary: string | null;
+        };
         /** ComponentObservedView */
         ComponentObservedView: {
             /** Kind */
@@ -457,6 +1056,92 @@ export interface components {
             properties: {
                 [key: string]: unknown;
             };
+        };
+        /** ComponentRef */
+        ComponentRef: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Native Id */
+            native_id: string;
+            /** Name */
+            name: string;
+        };
+        /**
+         * ComponentView
+         * @description Current component (API_CONTRACT.md §4: 当前组件，按 kind/status 过滤).
+         */
+        ComponentView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Native Id */
+            native_id: string;
+            /** Name */
+            name: string;
+            /** Status */
+            status: string;
+            /** Properties */
+            properties: {
+                [key: string]: unknown;
+            };
+            /**
+             * First Seen At
+             * Format: date-time
+             */
+            first_seen_at: string;
+            /**
+             * Last Seen At
+             * Format: date-time
+             */
+            last_seen_at: string;
+        };
+        /** ConfirmationView */
+        ConfirmationView: {
+            /** Kind */
+            kind: string;
+            /** Expected */
+            expected: string;
+        };
+        /** DeviceCollectionRunsListResponse */
+        DeviceCollectionRunsListResponse: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            device_id: string;
+            /** Items */
+            items: components["schemas"]["CollectionRunView"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total */
+            total: number;
+        };
+        /** DeviceComponentsListResponse */
+        DeviceComponentsListResponse: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            device_id: string;
+            /** Items */
+            items: components["schemas"]["ComponentView"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total */
+            total: number;
         };
         /** DeviceCreateRequest */
         DeviceCreateRequest: {
@@ -486,6 +1171,58 @@ export interface components {
             /** Probe Token */
             probe_token: string;
         };
+        /**
+         * DeviceEventView
+         * @description One device event (API_CONTRACT.md §4: SEL、DSM、Trap、Syslog 等).
+         *
+         *     The JSONB detail blob stays on the write path; the read view carries the
+         *     message and its provenance (DATA_MODEL.md §5.5).
+         */
+        DeviceEventView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Component Id */
+            component_id: string | null;
+            /** Event Type */
+            event_type: string;
+            /** Severity */
+            severity: string;
+            /** Message */
+            message: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /** Source */
+            source: string;
+            /** Native Event Id */
+            native_event_id: string | null;
+        };
+        /** DeviceEventsListResponse */
+        DeviceEventsListResponse: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            device_id: string;
+            /** Items */
+            items: components["schemas"]["DeviceEventView"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total */
+            total: number;
+        };
         /** DeviceListResponse */
         DeviceListResponse: {
             /** Items */
@@ -496,6 +1233,49 @@ export interface components {
             page_size: number;
             /** Total */
             total: number;
+        };
+        /** DeviceMetricsLatestResponse */
+        DeviceMetricsLatestResponse: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            device_id: string;
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /** Items */
+            items: components["schemas"]["LatestComponentGroup"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total */
+            total: number;
+        };
+        /** DeviceMetricsSeriesResponse */
+        DeviceMetricsSeriesResponse: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            device_id: string;
+            /** Metric Key */
+            metric_key: string;
+            /** Series */
+            series: string;
+            /** Value Type */
+            value_type: string;
+            /** Unit */
+            unit: string | null;
+            /** Component Id */
+            component_id: string | null;
+            /** Resolution */
+            resolution: string;
+            /** Points */
+            points: components["schemas"]["SeriesPointView"][];
         };
         /** DeviceProbeExistingResponse */
         DeviceProbeExistingResponse: {
@@ -546,6 +1326,17 @@ export interface components {
              * Format: date-time
              */
             expires_at: string;
+        };
+        /** DeviceTypeSummary */
+        DeviceTypeSummary: {
+            /** Reachability */
+            reachability: {
+                [key: string]: number;
+            };
+            /** Health */
+            health: {
+                [key: string]: number;
+            };
         };
         /** DeviceUpdateRequest */
         DeviceUpdateRequest: {
@@ -660,6 +1451,98 @@ export interface components {
         ErrorEnvelope: {
             error: components["schemas"]["ErrorBody"];
         };
+        /** FileLinkView */
+        FileLinkView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Device Id */
+            device_id: string | null;
+            /** Task Id */
+            task_id: string | null;
+            /** Purpose */
+            purpose: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /** FileListResponse */
+        FileListResponse: {
+            /** Items */
+            items: components["schemas"]["FileView"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total */
+            total: number;
+        };
+        /** FileUploadContentView */
+        FileUploadContentView: {
+            /** Received Bytes */
+            received_bytes: number;
+        };
+        /** FileUploadCreateRequest */
+        FileUploadCreateRequest: {
+            /** File Type */
+            file_type: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Original Filename */
+            original_filename: string;
+        };
+        /**
+         * FileView
+         * @description Metadata view (never content): hash/size/type/status + links.
+         */
+        FileView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** File Type */
+            file_type: string;
+            /** Original Filename */
+            original_filename: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Mime Type */
+            mime_type: string | null;
+            /** Sha256 */
+            sha256: string | null;
+            /** Storage Backend */
+            storage_backend: string;
+            /** Encrypted */
+            encrypted: boolean;
+            /** Key Version */
+            key_version: number | null;
+            /** Status */
+            status: string;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            uploaded_by: components["schemas"]["UploaderView"];
+            /** Links */
+            links?: components["schemas"]["FileLinkView"][];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -669,6 +1552,32 @@ export interface components {
         HealthStatus: {
             /** Status */
             status: string;
+        };
+        /** LatestComponentGroup */
+        LatestComponentGroup: {
+            component: components["schemas"]["ComponentRef"] | null;
+            /** Metrics */
+            metrics: components["schemas"]["LatestMetricItem"][];
+        };
+        /** LatestMetricItem */
+        LatestMetricItem: {
+            /** Metric Key */
+            metric_key: string;
+            /** Value */
+            value: number | string | boolean | null;
+            /** Unit */
+            unit: string | null;
+            /** Quality */
+            quality: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Source */
+            source: string;
+            /** Freshness */
+            freshness: string;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -703,6 +1612,284 @@ export interface components {
         OkResponse: {
             /** Ok */
             ok: boolean;
+        };
+        /** OperationEventView */
+        OperationEventView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** State */
+            state: string;
+            /** Step */
+            step: string | null;
+            /** Progress Percent */
+            progress_percent: number | null;
+            /** Message */
+            message: string | null;
+            /** Device Job Id */
+            device_job_id: string | null;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+        };
+        /** OperationPreviewRequest */
+        OperationPreviewRequest: {
+            /** Capability Key */
+            capability_key: string;
+            /** Parameters */
+            parameters?: {
+                [key: string]: unknown;
+            };
+        };
+        /** OperationPreviewResponse */
+        OperationPreviewResponse: {
+            /** Requirement Id */
+            requirement_id: string;
+            /** Capability Key */
+            capability_key: string;
+            /** Risk Level */
+            risk_level: string;
+            target: components["schemas"]["TargetDeviceView"];
+            /** Normalized Parameters */
+            normalized_parameters: {
+                [key: string]: unknown;
+            };
+            /** Impact */
+            impact: string;
+            /** Steps */
+            steps: string[];
+            confirmation: components["schemas"]["ConfirmationView"];
+            /** Preview Token */
+            preview_token: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+        };
+        /** OperationResolveRequest */
+        OperationResolveRequest: {
+            /**
+             * Outcome
+             * @default
+             */
+            outcome: string;
+            /**
+             * Evidence Type
+             * @default
+             */
+            evidence_type: string;
+            /**
+             * Reference
+             * @default
+             */
+            reference: string;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+        };
+        /** OperationSubmitRequest */
+        OperationSubmitRequest: {
+            /** Preview Token */
+            preview_token: string;
+            /** Confirmation Text */
+            confirmation_text: string;
+        };
+        /**
+         * OperationTaskDetail
+         * @description Single-task view: the task plus its timeline (DATA_MODEL.md §7.3).
+         *
+         *     File links land in M2T5 (files API); the M2T4 detail carries task fields,
+         *     events and result/evidence rows.
+         */
+        OperationTaskDetail: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Requirement Id */
+            requirement_id: string;
+            /** Capability Key */
+            capability_key: string;
+            /** Risk Level */
+            risk_level: string;
+            /** State */
+            state: string;
+            device: components["schemas"]["TargetDeviceView"];
+            requested_by: components["schemas"]["OperationUserRef"];
+            /** Progress Percent */
+            progress_percent: number;
+            /** Current Step */
+            current_step: string | null;
+            /** Dispatch Started At */
+            dispatch_started_at: string | null;
+            /** Device Job Id */
+            device_job_id: string | null;
+            /** Timeout At */
+            timeout_at: string | null;
+            /** Result Summary */
+            result_summary: string | null;
+            /** Error Code */
+            error_code: string | null;
+            /** Error Detail */
+            error_detail: string | null;
+            /** Verification State */
+            verification_state: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+            /** Conflict Scope */
+            conflict_scope: string;
+            /** Parameters */
+            parameters: {
+                [key: string]: unknown;
+            };
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Plan Hash */
+            plan_hash: string | null;
+            /** Parameter Hash */
+            parameter_hash: string | null;
+            /** Adapter Version */
+            adapter_version: string | null;
+            /** Evidence */
+            evidence: {
+                [key: string]: unknown;
+            } | null;
+            /** Events */
+            events: components["schemas"]["OperationEventView"][];
+        };
+        /**
+         * OperationTaskView
+         * @description Task view shared by list/get/cancel/verify/resolve/confirm responses.
+         */
+        OperationTaskView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Requirement Id */
+            requirement_id: string;
+            /** Capability Key */
+            capability_key: string;
+            /** Risk Level */
+            risk_level: string;
+            /** State */
+            state: string;
+            device: components["schemas"]["TargetDeviceView"];
+            requested_by: components["schemas"]["OperationUserRef"];
+            /** Progress Percent */
+            progress_percent: number;
+            /** Current Step */
+            current_step: string | null;
+            /** Dispatch Started At */
+            dispatch_started_at: string | null;
+            /** Device Job Id */
+            device_job_id: string | null;
+            /** Timeout At */
+            timeout_at: string | null;
+            /** Result Summary */
+            result_summary: string | null;
+            /** Error Code */
+            error_code: string | null;
+            /** Error Detail */
+            error_detail: string | null;
+            /** Verification State */
+            verification_state: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version */
+            version: number;
+        };
+        /** OperationUserRef */
+        OperationUserRef: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Username */
+            username: string;
+        };
+        /** OperationsListResponse */
+        OperationsListResponse: {
+            /** Items */
+            items: components["schemas"]["OperationTaskView"][];
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Total */
+            total: number;
+        };
+        /** OverviewResponse */
+        OverviewResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            stats: components["schemas"]["OverviewStats"];
+            /** Device Types */
+            device_types: {
+                [key: string]: components["schemas"]["DeviceTypeSummary"];
+            };
+            /** Attention */
+            attention: components["schemas"]["AttentionItem"][];
+            /** Recent Operations */
+            recent_operations: unknown[];
+        };
+        /** OverviewStats */
+        OverviewStats: {
+            /** Device Total */
+            device_total: number;
+            /** Reachability */
+            reachability: {
+                [key: string]: number;
+            };
+            /** Health */
+            health: {
+                [key: string]: number;
+            };
+            /** Active Critical Alerts */
+            active_critical_alerts: number;
+            /** Operations Running */
+            operations_running: number;
+            /** Operations Verification Required */
+            operations_verification_required: number;
         };
         /** ProbeStageView */
         ProbeStageView: {
@@ -758,6 +1945,51 @@ export interface components {
         RolesListResponse: {
             /** Roles */
             roles: components["schemas"]["RoleView"][];
+        };
+        /**
+         * SeriesPointView
+         * @description One series point; rollup points carry the window statistics too.
+         */
+        SeriesPointView: {
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Value */
+            value: number | string | boolean | null;
+            /** Quality */
+            quality: string;
+            /** Source */
+            source?: string | null;
+            /** Min Value */
+            min_value?: number | null;
+            /** Max Value */
+            max_value?: number | null;
+            /** Last Value */
+            last_value?: number | null;
+            /** Count */
+            count?: number | null;
+        };
+        /** TargetDeviceView */
+        TargetDeviceView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+        };
+        /** UploaderView */
+        UploaderView: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Username */
+            username: string;
         };
         /** UserCreateRequest */
         UserCreateRequest: {
@@ -1627,6 +2859,109 @@ export interface operations {
             };
         };
     };
+    device_components_list: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                kind?: string | null;
+                status?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceComponentsListResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    device_events_list: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                severity?: string | null;
+                event_type?: string | null;
+                source?: string | null;
+                from?: string | null;
+                to?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceEventsListResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     audit_logs_list: {
         parameters: {
             query?: {
@@ -1714,6 +3049,1071 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    device_metrics_latest: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceMetricsLatestResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    device_metrics_series: {
+        parameters: {
+            query: {
+                metric: string;
+                from: string;
+                to: string;
+                component_id?: string | null;
+                resolution?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceMetricsSeriesResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    device_collection_runs_list: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                collection_type?: string | null;
+                state?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceCollectionRunsListResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    overview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OverviewResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    alerts_list: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                status?: string | null;
+                device_id?: string | null;
+                severity?: string | null;
+                rule_key?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertsListResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alerts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertDetailItem"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    device_operation_previews_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OperationPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationPreviewResponse"];
+                };
+            };
+            /** @description unauthenticated/session_expired/reauthentication_required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description device_busy */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed / unsupported_operation / not_configured */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description rate_limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    device_operations_create: {
+        parameters: {
+            query?: never;
+            header?: {
+                "idempotency-key"?: string | null;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OperationSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationTaskView"];
+                };
+            };
+            /** @description unauthenticated/session_expired/reauthentication_required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description preview_stale / idempotency_conflict / device_busy */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed / unsupported_operation / not_configured */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description rate_limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operations_list: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                device_id?: string | null;
+                requirement_id?: string | null;
+                capability_key?: string | null;
+                requested_by?: string | null;
+                state?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationsListResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    operations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationTaskDetail"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    operations_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationTaskView"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description preview_stale（fence 后或状态不允许） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    operations_verify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationTaskDetail"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description preview_stale（任务不在 verification_required） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed / adapter error codes */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operations_resolve_verification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OperationResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperationTaskDetail"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description preview_stale（任务不在 verification_required） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    events_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description unauthenticated/session_expired */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description permission_denied / password_change_required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description dependency_unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    file_uploads_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileUploadCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileView"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed（类型/大小/名称/配额） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description rate_limited（每用户最多 2 个并发上传） */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description storage_unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    file_uploads_put_content: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileUploadContentView"];
+                };
+            };
+            /** @description resource_not_found（会话不存在/不属于当前用户/已完成） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed（超过声明的文件大小，会话已中止） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description storage_unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    file_uploads_complete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileView"];
+                };
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed（大小不一致/魔数不符） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description storage_unavailable / dependency_unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    files_list: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                file_type?: string | null;
+                status?: string | null;
+                uploader_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileListResponse"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    files_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileView"];
+                };
+            };
+            /** @description permission_denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    files_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileView"];
+                };
+            };
+            /** @description permission_denied（仅管理员） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description device_busy（被运行中任务引用） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    files_download: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description ready 文件流式下载 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description permission_denied（观察员不可下载） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description validation_failed（文件未就绪） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description storage_unavailable / dependency_unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    device_file_access_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                ticket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 完整文件流 (200) 或 Range 部分内容 (206) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description resource_not_found（票据无效/过期/已撤销/来源 IP 不符） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Range 不满足 */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description storage_unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
