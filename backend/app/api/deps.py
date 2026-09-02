@@ -262,3 +262,39 @@ def require_permission(permission: str) -> Callable[..., AuthContext]:
         return context
 
     return _check
+
+
+def require_password_changed(
+    context: Annotated[AuthContext, Depends(get_auth_context)],
+    request: Request,
+) -> AuthContext:
+    """Gate every protected router except auth: forced password change first.
+
+    SECURITY.md §2 (管理员创建时要求首次登录修改) and §3 (服务端每次请求重新
+    校验是安全边界, 前端隐藏按钮只改善体验). A user with
+    ``must_change_password`` must reach only the auth router (``/auth/me``
+    reports the flag, ``/auth/password``, ``/auth/logout`` and ``/auth/reauth``
+    stay callable); any other endpoint is denied with ``permission_denied``
+    and ``details.permission="password_change_required"`` — the only contract
+    code whose ``safe_detail_fields`` include ``permission``, so the client
+    can route to the forced-change view without new error codes (contracts are
+    immutable without an ADR). Mutating denials are audited like permission
+    denials (M1T4 pattern). ``/health/*`` lives outside ``/api/v1`` and is not
+    gated.
+    """
+    if not context.user.must_change_password:
+        return context
+    if request.method in MUTATING_METHODS:
+        _audit_security_event(
+            request,
+            action="access.denied",
+            result="permission_denied",
+            session=context.session,
+            user=context.user,
+            detail={
+                "permission": "password_change_required",
+                "method": request.method,
+                "path": request.url.path,
+            },
+        )
+    raise permission_denied("password_change_required")

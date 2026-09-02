@@ -407,3 +407,72 @@ def test_login_never_returns_the_session_token(db_client: TestClient, db_session
     assert cookie not in response.text
     me = db_client.get(f"{API}/auth/me")
     assert cookie not in me.text
+
+
+@pytest.mark.integration
+def test_must_change_password_user_gated_on_protected_routers(db_client: TestClient, db_session: Session) -> None:
+    """SECURITY §2/§3: 首次登录强制改密是服务端门禁，前端隐藏只是 UX。
+
+    must_change_password 用户只能访问 auth 路由（me/password/logout/reauth）；
+    其它路由一律 403 permission_denied（permission=password_change_required）；
+    改密后访问恢复。
+    """
+    create_user(
+        db_session,
+        username="fresh.user",
+        password="Init!al-2026-Pass",
+        role="admin",
+        must_change_password=True,
+    )
+    response, csrf = login_csrf(db_client, "fresh.user", "Init!al-2026-Pass")
+    assert response.status_code == 200
+    assert response.json()["user"]["must_change_password"] is True
+
+    # auth 路由保持可用：me 报告标志位
+    me = db_client.get(f"{API}/auth/me")
+    assert me.status_code == 200
+    assert me.json()["user"]["must_change_password"] is True
+
+    # 非 auth 路由被门禁拦截（所有角色都有 device.read，
+    # 403 只可能来自改密门禁而非权限矩阵）
+    devices = db_client.get(f"{API}/devices")
+    assert devices.status_code == 403
+    error = devices.json()["error"]
+    assert error["code"] == "permission_denied"
+    assert error["details"]["permission"] == "password_change_required"
+
+    users = db_client.get(f"{API}/users")
+    assert users.status_code == 403
+    assert users.json()["error"]["details"]["permission"] == "password_change_required"
+
+    # 变更类请求同样被拦截，并按 M1T4 模式写 access.denied 审计
+    patch = db_client.patch(
+        f"{API}/devices/d-1",
+        headers={"If-Match": "1", "X-CSRF-Token": csrf},
+        json={"name": "x"},
+    )
+    assert patch.status_code == 403
+    assert patch.json()["error"]["details"]["permission"] == "password_change_required"
+    assert _count_audit(db_session, "access.denied") == 1
+
+    # reauth 属于 auth 路由，仍然可用
+    reauth = db_client.post(
+        f"{API}/auth/reauth",
+        json={"password": "Init!al-2026-Pass"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert reauth.status_code == 200
+
+    # 改密（auth 路由）成功且清除标志位后，其它路由访问恢复
+    change = db_client.post(
+        f"{API}/auth/password",
+        json={"current_password": "Init!al-2026-Pass", "new_password": "Br@nd-New-2026-Pass"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert change.status_code == 200
+    assert db_client.get(f"{API}/devices").status_code == 200
+    assert db_client.get(f"{API}/auth/me").json()["user"]["must_change_password"] is False
+
+    # logout 始终可用
+    logout = db_client.post(f"{API}/auth/logout", headers={"X-CSRF-Token": csrf})
+    assert logout.status_code == 200

@@ -15,8 +15,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 
+from app.api.deps import require_password_changed
 from app.api.errors import register_exception_handlers
 from app.api.routes import audit, auth, devices, roles, users
 from app.api.routes.health import router as health_router
@@ -62,10 +63,13 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     app.include_router(health_router)
     api_v1_router = APIRouter(prefix="/api/v1")
     api_v1_router.include_router(auth.router)
-    api_v1_router.include_router(users.router)
-    api_v1_router.include_router(roles.router)
-    api_v1_router.include_router(devices.router)
-    api_v1_router.include_router(audit.router)
+    # SECURITY.md §2/§3: must_change_password 用户只能访问 auth 路由
+    # (me/password/logout/reauth)；其余受保护路由一律被强制改密门禁拦截，
+    # 服务端强制执行，前端隐藏只是 UX。
+    api_v1_router.include_router(users.router, dependencies=[Depends(require_password_changed)])
+    api_v1_router.include_router(roles.router, dependencies=[Depends(require_password_changed)])
+    api_v1_router.include_router(devices.router, dependencies=[Depends(require_password_changed)])
+    api_v1_router.include_router(audit.router, dependencies=[Depends(require_password_changed)])
     app.include_router(api_v1_router)
     return app
 

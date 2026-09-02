@@ -27,6 +27,17 @@ export function setSessionExpiredHandler(handler: (() => void) | null): void {
   sessionExpiredHandler = handler;
 }
 
+/**
+ * 强制改密处理槽：403 permission_denied（permission=password_change_required）
+ * 说明服务端已把该会话的 must_change_password 置位（SECURITY §2/§3 服务端
+ * 门禁，前端隐藏只是 UX），由调用方（router 层）注入跳转强制改密页的逻辑。
+ */
+let passwordChangeRequiredHandler: (() => void) | null = null;
+
+export function setPasswordChangeRequiredHandler(handler: (() => void) | null): void {
+  passwordChangeRequiredHandler = handler;
+}
+
 /** 会话或 CSRF 失效：这类错误只能通过重新登录恢复。 */
 export function isSessionRecoverableError(error: ApiError): boolean {
   return (
@@ -138,6 +149,11 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       const error = await parseError(response);
       if (isSessionRecoverableError(error)) {
         sessionExpiredHandler?.();
+      } else if (
+        error.code === 'permission_denied' &&
+        error.details['permission'] === 'password_change_required'
+      ) {
+        passwordChangeRequiredHandler?.();
       }
       throw error;
     }

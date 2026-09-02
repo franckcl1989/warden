@@ -59,6 +59,14 @@ export const useAuthStore = defineStore('auth', () => {
     mustChangePassword.value = false;
   }
 
+  /**
+   * 服务端门禁确认强制改密（403 permission=password_change_required）。
+   * 客户端本地状态与 /auth/me 不同步时以服务端为准（SECURITY §3）。
+   */
+  function markPasswordChangeRequired(): void {
+    mustChangePassword.value = true;
+  }
+
   async function login(username: string, password: string): Promise<void> {
     const payload = await request<LoginResponse>('/auth/login', {
       method: 'POST',
@@ -110,5 +118,6 @@ export const useAuthStore = defineStore('auth', () => {
     changePassword,
     reauthenticate,
     resetSession,
+    markPasswordChangeRequired,
   };
 });

@@ -191,4 +191,137 @@ describe('设备详情（PLT-02）', () => {
     const body = JSON.parse(String(patchCall[1].body)) as Record<string, unknown>;
     expect(body).toEqual({ name: 'server-01-new' });
   });
+
+  it('connection_config 缺省端口/协议/校验键时按适配器默认值比较，不误触发重新探测', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).includes('/capabilities')) return jsonResponse(CAPABILITIES);
+        return jsonResponse(
+          deviceView({ connection_config: { protocol: 'https', verify_tls: true } }),
+        );
+      }),
+    );
+    const { wrapper } = await mountDetail();
+    await flushAll();
+    await wrapper.get('[data-testid="edit-device"]').trigger('click');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="reprobe-gate"]').exists()).toBe(false);
+  });
+
+  it('清空 TLS 指纹后，探测与保存载荷都从 connection_config 移除该键', async () => {
+    const FINGERPRINT = 'a'.repeat(64);
+    const STORED_DEVICE = deviceView({
+      connection_config: {
+        protocol: 'https',
+        port: 443,
+        verify_tls: true,
+        tls_fingerprint_sha256: FINGERPRINT,
+      },
+    });
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      void init;
+      if (String(url).includes('/capabilities')) return jsonResponse(CAPABILITIES);
+      if (String(url).endsWith('/device-probes')) {
+        return jsonResponse({
+          ok: true,
+          stages: [
+            { stage: 'network', ok: true, error_code: null, detail: null },
+            { stage: 'tls', ok: true, error_code: null, detail: null },
+            { stage: 'auth', ok: true, error_code: null, detail: null },
+            { stage: 'identity', ok: true, error_code: null, detail: null },
+            { stage: 'capabilities', ok: true, error_code: null, detail: null },
+          ],
+          discovery: null,
+          probe_token: 'token-ok',
+          expires_at: '2026-09-01T08:10:00Z',
+        });
+      }
+      if (String(url).includes('/devices/d-1')) {
+        return jsonResponse(STORED_DEVICE);
+      }
+      return jsonResponse(STORED_DEVICE);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { wrapper } = await mountDetail();
+    await flushAll();
+    await wrapper.get('[data-testid="edit-device"]').trigger('click');
+    await wrapper.vm.$nextTick();
+    const fingerprintInput = wrapper.get('input[placeholder^="SHA-256"]');
+    expect((fingerprintInput.element as HTMLInputElement).value).toBe(FINGERPRINT);
+    await fingerprintInput.setValue('');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="reprobe-gate"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="edit-run-probe"]').trigger('click');
+    await flushAll();
+    const probeCall = fetchMock.mock.calls.find((call) =>
+      String(call[0]).endsWith('/device-probes'),
+    ) as unknown as [string, RequestInit];
+    expect(probeCall).toBeDefined();
+    const probeBody = JSON.parse(String(probeCall[1].body)) as Record<string, unknown>;
+    expect(
+      (probeBody['connection_config'] as Record<string, unknown>)['tls_fingerprint_sha256'],
+    ).toBeUndefined();
+    await wrapper.get('[data-testid="save-edit"]').trigger('click');
+    await flushAll();
+    const patchCall = fetchMock.mock.calls.find(
+      (call) => call[1]?.method === 'PATCH',
+    ) as unknown as [string, RequestInit];
+    expect(patchCall).toBeDefined();
+    const patchBody = JSON.parse(String(patchCall[1].body)) as Record<string, unknown>;
+    expect(
+      (patchBody['connection_config'] as Record<string, unknown>)['tls_fingerprint_sha256'],
+    ).toBeUndefined();
+  });
+
+  it('关闭 TLS 校验后，探测载荷不携带残留的 TLS 指纹', async () => {
+    const FINGERPRINT = 'b'.repeat(64);
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes('/capabilities')) return jsonResponse(CAPABILITIES);
+      if (String(url).endsWith('/device-probes')) {
+        return jsonResponse({
+          ok: true,
+          stages: [
+            { stage: 'network', ok: true, error_code: null, detail: null },
+            { stage: 'tls', ok: true, error_code: null, detail: null },
+            { stage: 'auth', ok: true, error_code: null, detail: null },
+            { stage: 'identity', ok: true, error_code: null, detail: null },
+            { stage: 'capabilities', ok: true, error_code: null, detail: null },
+          ],
+          discovery: null,
+          probe_token: 'token-ok',
+          expires_at: '2026-09-01T08:10:00Z',
+        });
+      }
+      return jsonResponse(
+        deviceView({
+          connection_config: {
+            protocol: 'https',
+            port: 443,
+            verify_tls: true,
+            tls_fingerprint_sha256: FINGERPRINT,
+          },
+        }),
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { wrapper } = await mountDetail();
+    await flushAll();
+    await wrapper.get('[data-testid="edit-device"]').trigger('click');
+    await wrapper.vm.$nextTick();
+    const checkbox = wrapper.findComponent({ name: 'ElCheckbox' });
+    checkbox.vm.$emit('update:modelValue', false);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('input[placeholder^="SHA-256"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="edit-run-probe"]').trigger('click');
+    await flushAll();
+    const probeCall = fetchMock.mock.calls.find((call) =>
+      String(call[0]).endsWith('/device-probes'),
+    ) as unknown as [string, RequestInit];
+    expect(probeCall).toBeDefined();
+    const probeBody = JSON.parse(String(probeCall[1].body)) as Record<string, unknown>;
+    const config = probeBody['connection_config'] as Record<string, unknown>;
+    expect(config['verify_tls']).toBe(false);
+    expect(config['tls_fingerprint_sha256']).toBeUndefined();
+  });
 });

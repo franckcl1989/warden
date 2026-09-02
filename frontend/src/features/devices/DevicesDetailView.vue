@@ -156,6 +156,10 @@ function openEdit(): void {
   editForm.verifyTls = typeof config['verify_tls'] === 'boolean' ? config['verify_tls'] : true;
   editForm.tlsFingerprintSha256 =
     typeof config['tls_fingerprint_sha256'] === 'string' ? config['tls_fingerprint_sha256'] : '';
+  // 未启用证书校验时指纹无意义且会被隐藏，清空避免下次勾选时残留旧值
+  if (!editForm.verifyTls) {
+    editForm.tlsFingerprintSha256 = '';
+  }
   editForm.credentialMode = 'keep';
   editForm.credentialUsername = '';
   editForm.credentialPassword = '';
@@ -168,11 +172,16 @@ function openEdit(): void {
 function configChanged(): boolean {
   if (device.value === null) return false;
   const config = device.value.connection_config as Record<string, unknown>;
+  // 与 openEdit 相同的缺省归一：存储配置省略的键按适配器默认值比较
+  // （端口默认 443、协议默认 https、默认启用证书校验），避免误判为已修改
+  const storedPort = typeof config['port'] === 'number' ? config['port'] : 443;
+  const storedProtocol = typeof config['protocol'] === 'string' ? config['protocol'] : 'https';
+  const storedVerifyTls = typeof config['verify_tls'] === 'boolean' ? config['verify_tls'] : true;
   return (
     editForm.managementEndpoint.trim() !== device.value.management_endpoint ||
-    editForm.port !== config['port'] ||
-    editForm.protocol !== config['protocol'] ||
-    editForm.verifyTls !== config['verify_tls'] ||
+    editForm.port !== storedPort ||
+    editForm.protocol !== storedProtocol ||
+    editForm.verifyTls !== storedVerifyTls ||
     editForm.tlsFingerprintSha256.trim() !== (config['tls_fingerprint_sha256'] ?? '')
   );
 }
@@ -206,7 +215,9 @@ async function runEditProbe(): Promise<void> {
             }
           : { username: '', password: '' },
     };
-    if (editForm.tlsFingerprintSha256.trim()) {
+    // TLS 指纹仅在启用证书校验且填写时携带；清空或关闭校验都让该键从
+    // connection_config 中消失（服务端安全变更会整体替换存储配置，缺键即清除）
+    if (editForm.verifyTls && editForm.tlsFingerprintSha256.trim()) {
       (body.connection_config as Record<string, unknown>)['tls_fingerprint_sha256'] =
         editForm.tlsFingerprintSha256.trim();
     }
@@ -231,7 +242,7 @@ async function saveEdit(): Promise<void> {
     if (securityRelevantChanged.value) {
       body.management_endpoint = editForm.managementEndpoint.trim();
       body.connection_config = editConfigPayload();
-      if (editForm.tlsFingerprintSha256.trim()) {
+      if (editForm.verifyTls && editForm.tlsFingerprintSha256.trim()) {
         (body.connection_config as Record<string, unknown>)['tls_fingerprint_sha256'] =
           editForm.tlsFingerprintSha256.trim();
       }
