@@ -116,6 +116,7 @@ class MaintenanceReport:
     operation_logs_deleted: int = 0
     config_backups_deleted: int = 0
     abandoned_uploads_deleted: int = 0
+    orphaned_upload_spools_removed: int = 0
     tickets_deleted: int = 0
     physical_files_removed: int = 0
 
@@ -198,6 +199,7 @@ class MaintenanceLoop:
                         operation_logs_deleted=report.operation_logs_deleted,
                         config_backups_deleted=report.config_backups_deleted,
                         abandoned_uploads_deleted=report.abandoned_uploads_deleted,
+                        orphaned_upload_spools_removed=report.orphaned_upload_spools_removed,
                         tickets_deleted=report.tickets_deleted,
                         physical_files_removed=report.physical_files_removed,
                     )
@@ -250,6 +252,7 @@ class MaintenanceLoop:
             report.operation_logs_deleted = file_report.operation_logs_deleted
             report.config_backups_deleted = file_report.config_backups_deleted
             report.abandoned_uploads_deleted = file_report.abandoned_uploads_deleted
+            report.orphaned_upload_spools_removed = file_report.orphaned_upload_spools_removed
             report.tickets_deleted = file_report.tickets_deleted
             report.physical_files_removed = file_report.physical_files_removed
         self._next_retention_at = now + datetime.timedelta(seconds=self._retention_cadence)

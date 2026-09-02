@@ -89,8 +89,12 @@ def device_file_access_get(
     )
     if byte_range is not None and byte_range.start >= serve.file.size_bytes:
         # RFC 7233 §4.4: a single unsatisfiable range gets a plain 416 (the
-        # device-facing endpoint is binary, not the JSON error envelope).
-        return Response(status_code=416)
+        # device-facing endpoint is binary, not the JSON error envelope) with
+        # the unsatisfied-range marker so clients know the total size.
+        return Response(
+            status_code=416,
+            headers={"Content-Range": f"bytes */{serve.file.size_bytes}"},
+        )
     headers = {
         "Content-Type": serve.file.mime_type or "application/octet-stream",
         "Content-Disposition": file_service.attachment_header(serve.file.original_filename),

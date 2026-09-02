@@ -251,6 +251,40 @@ class TestDownloadAndDeleteApi:
         assert response.status_code == 200
         assert response.content == content
 
+    def test_non_ascii_filename_download_serves_200_with_a_valid_header(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        # Regression (M2T5 review): raw non-latin-1 characters in the
+        # Content-Disposition filename crashed header serialization (500);
+        # the original name must ride as RFC 5987 filename*.
+        operator, csrf = _signin(
+            client, db_session, username="file-operator", password=OPERATOR_PASSWORD, role="operator"
+        )
+        original = "固件升级包-v2.zip"
+        content = _zip_bytes()
+        created = client.post(
+            f"{UPLOADS_PATH}",
+            json={"file_type": "firmware", "size_bytes": len(content), "original_filename": original},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert created.status_code == 201
+        upload_id = str(created.json()["id"])
+        put = client.put(f"{UPLOADS_PATH}/{upload_id}/content", content=content, headers={"X-CSRF-Token": csrf})
+        assert put.status_code == 200
+        completed = client.post(f"{UPLOADS_PATH}/{upload_id}/complete", headers={"X-CSRF-Token": csrf})
+        assert completed.status_code == 200
+        assert completed.json()["original_filename"] == original
+        response = client.get(f"{FILES_PATH}/{upload_id}/download")
+        assert response.status_code == 200
+        assert response.content == content
+        disposition = response.headers["content-disposition"]
+        assert disposition.startswith("attachment")
+        assert all(ord(char) < 128 for char in disposition)  # latin-1 serializable
+        assert "filename*=UTF-8''" in disposition
+        from urllib.parse import unquote
+
+        assert unquote(disposition.split("filename*=UTF-8''", 1)[1]) == original
+
     def test_viewer_is_metadata_only(self, client: TestClient, db_session: Session) -> None:
         operator, csrf = _signin(
             client, db_session, username="file-operator", password=OPERATOR_PASSWORD, role="operator"

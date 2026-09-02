@@ -39,9 +39,29 @@ ARCHITECTURE.md §3.6):
       31+L    4     random nonce prefix
       35+L    ...   payload: per chunk AES-GCM(nonce||index).encrypt(chunk)
 
-  Decryption verifies every chunk tag and the total plaintext length against
-  the logical size recorded in the files row (truncation at a chunk boundary
-  is therefore detected too). Memory stays bounded: one chunk in flight.
+  Decryption verifies every chunk tag and — on a FULL pass (no window /
+  window to EOF) — the total plaintext length against the logical size
+  recorded in the files row (truncation at a chunk boundary is therefore
+  detected too). A WINDOWED read stops as soon as its window is served:
+  data beyond the window is never decrypted, so a range ending on a chunk
+  boundary of a longer file ends cleanly. Memory stays bounded: one chunk
+  in flight.
+
+Streaming SHA-256: ``write_upload_chunk`` accumulates the spool digest as
+chunks arrive (in-memory per process, keyed by upload id — the upload
+session row is the durable state), so ``complete_upload`` never re-reads
+the spool for hashing. The digest state is per storage instance: after a
+process restart it is simply absent and the application falls back to one
+spool re-read. Per-upload serialization is the caller's job (the service
+shard lock); this module is not thread-safe per upload.
+
+Finalize publishes atomically: bytes are written to a temp file under
+``tmp/`` and ``os.replace``d onto the sharded key path (same volume, so
+the rename is atomic) — a crash mid-copy can never truncate a ready file
+that another row already published under the same key. Plain content
+keys are the content SHA-256, so an existing target is byte-identical by
+construction and the copy is skipped (dedup); an existing target with a
+DIFFERENT size is an integrity anomaly and is refused, never rewritten.
 
 Quotas: ``write_upload_chunk`` enforces the declared size BEFORE writing —
 a chunk that would exceed the declaration is rejected and nothing is written
@@ -52,12 +72,15 @@ validated against the type quota at session creation (settings only).
 from __future__ import annotations
 
 import datetime
+import hashlib
+import os
 import re
 import secrets
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -82,6 +105,8 @@ _UPLOAD_ID_PATTERN = re.compile(
 _STORAGE_KEY_PATTERN = re.compile(
     r"^[0-9a-f]{64}(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$"
 )
+# Crash residue of a finalize publish (temp under tmp/, see store_final).
+_FINALIZE_TEMP_PATTERN = re.compile(r"^finalize-[0-9a-f]{32}$")
 
 
 class FileStorageError(RuntimeError):
@@ -126,6 +151,11 @@ class FileStorage:
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
+        # Running spool SHA-256 per upload (module docstring: streaming
+        # digest so complete never re-reads the spool). State is per
+        # instance — a restart simply reports None via ``upload_digest``.
+        self._upload_digests: dict[str, Any] = {}
+        self._digest_lock = threading.Lock()
 
     @property
     def root(self) -> Path:
@@ -149,7 +179,13 @@ class FileStorage:
         return self._root / "data" / storage_key[:2] / storage_key
 
     def write_upload_chunk(self, upload_id: str, chunk: bytes, *, declared_size: int) -> None:
-        """Append one chunk of the spooled upload; quota checked BEFORE writing."""
+        """Append one chunk of the spooled upload; quota checked BEFORE writing.
+
+        The running SHA-256 is advanced with the same bytes, so the digest
+        tracks the spool exactly. Callers serialize per upload (the service
+        shard lock); concurrent unsynchronized writes could interleave the
+        digest with the appends.
+        """
         if not chunk:
             return
         target = self._tmp_path(upload_id)
@@ -164,6 +200,33 @@ class FileStorage:
                 handle.flush()
         except OSError as exc:
             raise FileStorageError(f"upload write failed: {exc}") from exc
+        self._spool_digester(upload_id).update(chunk)
+
+    def _spool_digester(self, upload_id: str) -> Any:
+        """Return (creating on first use) this upload's running sha256."""
+        with self._digest_lock:
+            digester = self._upload_digests.get(upload_id)
+            if digester is None:
+                digester = hashlib.sha256()
+                self._upload_digests[upload_id] = digester
+            return digester
+
+    def _drop_digest(self, upload_id: str) -> None:
+        with self._digest_lock:
+            self._upload_digests.pop(upload_id, None)
+
+    def upload_digest(self, upload_id: str) -> str | None:
+        """Running spool SHA-256 (hex) accumulated while this process streamed.
+
+        ``None`` when the spool was written by another process/instance (the
+        process-restart case) — the caller then falls back to one spool
+        re-read instead of trusting stale state. Serialization note: read
+        only while holding the per-upload lock (as complete_upload does).
+        """
+        _validate_upload_id(upload_id)
+        with self._digest_lock:
+            digester = self._upload_digests.get(upload_id)
+        return digester.hexdigest() if digester is not None else None
 
     def upload_size(self, upload_id: str) -> int:
         """Bytes currently spooled for the upload (0 when absent/empty)."""
@@ -172,12 +235,31 @@ class FileStorage:
             return 0
         return target.stat().st_size
 
+    def read_head(self, upload_id: str, max_bytes: int) -> bytes:
+        """First ``max_bytes`` of the spooled upload (magic sniffing).
+
+        Bounded by construction — the spool is never loaded whole into
+        memory (the ISO sniff offset is ~32 KiB; a multi-GiB upload stays
+        on disk).
+        """
+        if max_bytes <= 0:
+            return b""
+        source = self._tmp_path(upload_id)
+        if not source.exists():
+            raise FileStorageError(f"upload has no spooled content: {upload_id}")
+        try:
+            with source.open("rb") as handle:
+                return handle.read(max_bytes)
+        except OSError as exc:
+            raise FileStorageError(f"upload read failed: {exc}") from exc
+
     def remove_upload(self, upload_id: str) -> None:
         """Drop the spooled upload (abort/oversize/abandoned sessions)."""
         try:
             self._tmp_path(upload_id).unlink(missing_ok=True)
         except OSError as exc:
             raise FileStorageError(f"upload removal failed: {exc}") from exc
+        self._drop_digest(upload_id)
 
     def read_upload_chunks(self, upload_id: str) -> Iterator[bytes]:
         """Bounded reads of the spooled upload (hashing/sniffing at complete)."""
@@ -201,12 +283,21 @@ class FileStorage:
         *,
         key_cipher: FileKeyCipher | None,
     ) -> StoredFile:
-        """Move the spooled upload to its final sharded path.
+        """Move the spooled upload to its final sharded path (atomic publish).
 
         ``key_cipher=None`` stores the raw bytes (firmware/ISO: plain on
         disk, content-hash-named, volume-private — ARCHITECTURE.md §3.6);
         a cipher encrypts the envelope described in the module docstring.
         The spool file is consumed on success.
+
+        The bytes are written to a temp file under ``tmp/`` and
+        ``os.replace``d onto the key path — the rename is atomic on the
+        same volume, so a crash can never leave a truncated file where a
+        ready row points (a concurrent duplicate upload of the same content
+        cannot destroy the first row's bytes either). Plain content keys
+        ARE the content SHA-256: when the target already exists the copy is
+        skipped (byte-identical by construction); an existing target of a
+        DIFFERENT size is refused, never overwritten.
         """
         _validate_storage_key(storage_key)
         source = self._tmp_path(upload_id)
@@ -214,22 +305,35 @@ class FileStorage:
             raise FileStorageError(f"upload has no spooled content: {upload_id}")
         plaintext_size = source.stat().st_size
         target = self._data_path(storage_key)
+        temp = self._root / "tmp" / f"finalize-{secrets.token_hex(16)}"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             if key_cipher is None:
-                _copy_plain(source, target)
                 key_version: int | None = None
+                if target.exists():
+                    if target.stat().st_size != plaintext_size:
+                        raise FileStorageError(
+                            f"finalize refused: {storage_key} already holds a file of "
+                            f"size {target.stat().st_size}, new content is {plaintext_size}"
+                        )
+                else:
+                    _copy_plain(source, temp)
+                    os.replace(temp, target)
             else:
-                key_version = _write_envelope(source, target, key_cipher=key_cipher)
+                key_version = _write_envelope(
+                    source, temp, key_cipher=key_cipher, storage_name=target.name
+                )
+                os.replace(temp, target)
         except FileStorageError:
             raise
         except OSError as exc:
-            target.unlink(missing_ok=True)
+            temp.unlink(missing_ok=True)
             raise FileStorageError(f"finalize failed: {exc}") from exc
         try:
             source.unlink(missing_ok=True)
         except OSError as exc:
             raise FileStorageError(f"spool cleanup failed: {exc}") from exc
+        self._drop_digest(upload_id)
         return StoredFile(
             storage_key=storage_key,
             encrypted=key_cipher is not None,
@@ -258,11 +362,16 @@ class FileStorage:
         return True
 
     def delete_stale_uploads(self, *, cutoff: datetime.datetime) -> int:
-        """Remove abandoned spool files older than ``cutoff`` (mtime); count.
+        """Remove abandoned spool files + finalize residue older than ``cutoff``; count.
 
-        Used by the retention sweep for upload sessions that never finished
-        (client vanished mid-stream) — the files row side is handled by
-        ``application/maintenance.py``.
+        Used by the retention sweep as the volume backstop for upload
+        sessions that never finished AND for finalize temp files orphaned by
+        a crash between copy and rename. The files-row side of abandoned
+        uploads is handled by ``application/maintenance.py``; this sweep
+        only ever touches files in ``tmp/`` whose name matches the upload-id
+        or finalize-temp patterns, and drops the digest state of removed
+        spools. Anything newer than the cutoff belongs to a live session or
+        an in-flight finalize and is left alone.
         """
         removed = 0
         tmp_dir = self._root / "tmp"
@@ -270,11 +379,18 @@ class FileStorage:
             return 0
         cutoff_ts = cutoff.timestamp()
         for entry in tmp_dir.iterdir():
-            if not entry.is_file() or _UPLOAD_ID_PATTERN.fullmatch(entry.name) is None:
+            if not entry.is_file():
+                continue
+            if (
+                _UPLOAD_ID_PATTERN.fullmatch(entry.name) is None
+                and _FINALIZE_TEMP_PATTERN.fullmatch(entry.name) is None
+            ):
                 continue
             try:
                 if entry.stat().st_mtime < cutoff_ts:
                     entry.unlink()
+                    if _UPLOAD_ID_PATTERN.fullmatch(entry.name) is not None:
+                        self._drop_digest(entry.name)
                     removed += 1
             except OSError:
                 continue
@@ -292,9 +408,12 @@ class FileStorage:
 
         ``start`` inclusive; ``limit`` = number of bytes (HTTP Range end is
         converted by the caller to ``limit = end - start + 1``). Encrypted
-        files authenticate every chunk they are read through (the reader is a
-        full sequential pass; plain files seek directly). Ranges are bounds
-        checked against the LOGICAL size.
+        files authenticate every chunk they are read through (the reader is
+        a sequential pass; plain files seek directly). A windowed read ends
+        cleanly at its edge — a range whose end falls on a chunk boundary of
+        a longer file is NOT an integrity failure; only FULL passes (no
+        window / window to EOF) verify the decrypted total. Ranges are
+        bounds checked against the LOGICAL size.
         """
         if not 0 <= start <= stored.size_bytes:
             raise FileStorageError(f"range start {start} outside size {stored.size_bytes}")
@@ -354,11 +473,16 @@ def _chunk_nonce(nonce_prefix: bytes, index: int) -> bytes:
     return nonce_prefix + index.to_bytes(CHUNK_INDEX_BYTES, "big")
 
 
-def _write_envelope(source: Path, target: Path, *, key_cipher: FileKeyCipher) -> int:
-    """Write the encrypted envelope (module docstring format) and stream the
-    spooled upload through the chunked AEAD. Returns the master key_version."""
+def _write_envelope(
+    source: Path, temp: Path, *, key_cipher: FileKeyCipher, storage_name: str
+) -> int:
+    """Write the encrypted envelope (module docstring format) to ``temp`` and
+    stream the spooled upload through the chunked AEAD. Returns the master
+    key_version. The caller atomically renames ``temp`` onto the final key
+    path; the wrap AAD binds to the FINAL storage name.
+    """
     file_key = secrets.token_bytes(FILE_KEY_BYTES)
-    wrapped = key_cipher.wrap(file_key, storage_name=target.name)
+    wrapped = key_cipher.wrap(file_key, storage_name=storage_name)
     nonce_prefix = secrets.token_bytes(NONCE_PREFIX_BYTES)
     header = b"".join(
         (
@@ -373,21 +497,17 @@ def _write_envelope(source: Path, target: Path, *, key_cipher: FileKeyCipher) ->
             nonce_prefix,
         )
     )
-    try:
-        aesgcm = AESGCM(file_key)
-        with source.open("rb") as src, target.open("wb") as dst:
-            dst.write(header)
-            index = 0
-            while True:
-                chunk = src.read(CONTENT_CHUNK_SIZE)
-                if not chunk:
-                    break
-                dst.write(aesgcm.encrypt(_chunk_nonce(nonce_prefix, index), chunk, None))
-                index += 1
-            dst.flush()
-    except OSError as exc:
-        target.unlink(missing_ok=True)
-        raise FileStorageError(f"envelope write failed: {exc}") from exc
+    aesgcm = AESGCM(file_key)
+    with source.open("rb") as src, temp.open("wb") as dst:
+        dst.write(header)
+        index = 0
+        while True:
+            chunk = src.read(CONTENT_CHUNK_SIZE)
+            if not chunk:
+                break
+            dst.write(aesgcm.encrypt(_chunk_nonce(nonce_prefix, index), chunk, None))
+            index += 1
+        dst.flush()
     return wrapped.key_version
 
 
@@ -457,22 +577,39 @@ def _envelope_chunks(
     start: int,
     limit: int | None,
 ) -> Iterator[bytes]:
-    """Sequential envelope reader: every chunk through the window is
-    authenticated, and the decrypted total must match the metadata size
-    (truncation at a chunk boundary cannot hide)."""
+    """Sequential envelope reader over a byte window of ``stored``.
+
+    Every chunk the reader passes through is authenticated. A FULL pass
+    (no window / window to EOF) runs to the end of the file and verifies the
+    decrypted total against the metadata size — truncation at a chunk
+    boundary cannot hide, and appended garbage fails chunk authentication.
+    A WINDOWED pass stops as soon as its window is served (the window edge
+    lies on or after a chunk boundary): data beyond the window is never
+    decrypted or counted, so ranges over a longer file end cleanly instead
+    of raising a spurious size mismatch mid-stream. An end-of-file reached
+    before the window is served is a truncated file and still fails.
+    """
     try:
         with path.open("rb") as handle:
             nonce_prefix, aesgcm, chunk_size = _read_header(
                 handle, key_cipher, storage_key=stored.storage_key
             )
             window_end = stored.size_bytes if limit is None else start + limit
+            full_pass = limit is None
             position = 0
-            total = 0
             index = 0
             while True:
+                if not full_pass and position >= window_end:
+                    return  # window fully served on a chunk boundary
                 encoded = handle.read(chunk_size + GCM_TAG_BYTES)
                 if not encoded:
-                    break
+                    if full_pass:
+                        if position != stored.size_bytes:
+                            raise FileCorruptionError(
+                                f"decrypted size {position} != metadata size {stored.size_bytes}"
+                            )
+                        return
+                    raise FileCorruptionError("stored file truncated inside the requested range")
                 if len(encoded) < GCM_TAG_BYTES:
                     raise FileCorruptionError("truncated payload chunk")
                 try:
@@ -480,19 +617,10 @@ def _envelope_chunks(
                 except Exception as exc:
                     raise FileCorruptionError("payload chunk authentication failed") from exc
                 index += 1
-                total += len(plain)
                 if position + len(plain) <= start:
                     position += len(plain)
                     continue
-                if position >= window_end:
-                    break
-                slice_start = max(0, start - position)
-                slice_end = min(len(plain), window_end - position)
-                yield plain[slice_start:slice_end]
+                yield plain[max(0, start - position) : min(len(plain), window_end - position)]
                 position += len(plain)
-            if total != stored.size_bytes:
-                raise FileCorruptionError(
-                    f"decrypted size {total} != metadata size {stored.size_bytes}"
-                )
     except OSError as exc:
         raise FileStorageError(f"envelope read failed: {exc}") from exc

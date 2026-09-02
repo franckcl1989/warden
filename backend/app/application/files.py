@@ -16,12 +16,17 @@ docs/API_CONTRACT.md §8, DATA_MODEL.md §8, SECURITY.md §9, ARCHITECTURE.md
   the retention sweep closes rows + spool older than 24 h; a network drop
   mid-stream therefore forces a fresh session (documented).
 - ``complete_upload``: size consistency + server-side SHA-256 + magic sniff
-  (``domain/file_types.py``); magic mismatch for archive-typed payloads
-  quarantines the row (content retained, never usable); success moves the
-  spool to the final hash-addressed path and records encrypted/key_version
-  for sensitive types (AES-GCM envelope, ``infrastructure/files.py``). The
-  row only becomes ``ready`` after the content is durably on the volume
-  (DATA_MODEL.md §11: 文件元数据 ready 只在内容落盘后提交).
+  (``domain/file_types.py``); the SHA-256 was ACCUMULATED while the chunks
+  streamed (``FileStorage.write_upload_chunk`` keeps a running digest — the
+  up-to-50 GiB spool is never re-read at complete; after a process restart
+  the digest state is gone and complete falls back to exactly one spool
+  re-read). Magic mismatch for archive-typed payloads quarantines the row
+  (content retained, never usable); success moves the spool to the final
+  hash-addressed path (atomic publish, never a truncate of a shared ready
+  file) and records encrypted/key_version for sensitive types (AES-GCM
+  envelope, ``infrastructure/files.py``). The row only becomes ``ready``
+  after the content is durably on the volume (DATA_MODEL.md §11: 文件元数据
+  ready 只在内容落盘后提交).
 - ``storage_key``: plain rows are stored under their content SHA-256;
   encrypted rows under ``<sha256>-<row-id>`` — per-file AES-GCM keys mean
   identical plaintexts encrypt differently, so each row owns its physical
@@ -417,6 +422,12 @@ def complete_upload(
     Raises validation errors for size/hash inconsistency (row aborted) and
     returns the row ``ready`` (verified) or ``quarantined`` (unexpected
     magic — content retained for inspection but never usable).
+
+    Hashing uses the digest accumulated while the chunks streamed
+    (``FileStorage.upload_digest``); when that state is absent (process
+    restart) it falls back to one spool re-read. The sniff prefix is a
+    bounded head read — neither path ever loads the whole spool into
+    memory.
     """
     parsed = parse_uuid(upload_id)
     if parsed is None:
@@ -447,13 +458,15 @@ def complete_upload(
                     logger=logger,
                     audit=audit,
                 )
-            digest = hashlib.sha256()
-            for data in storage.read_upload_chunks(upload_id):
-                digest.update(data)
-            content_hash = digest.hexdigest()
-            prefix = b"".join(storage.read_upload_chunks(upload_id))[
-                :SNIFF_PREFIX_BYTES
-            ]
+            content_hash = storage.upload_digest(upload_id)
+            if content_hash is None:
+                # Restart lost the in-stream digest state: one bounded
+                # re-read recomputes it from the spool (size-verified above).
+                digest = hashlib.sha256()
+                for data in storage.read_upload_chunks(upload_id):
+                    digest.update(data)
+                content_hash = digest.hexdigest()
+            prefix = storage.read_head(upload_id, SNIFF_PREFIX_BYTES)
             verdict = sniff_magic(prefix, row.file_type)
             encrypted = file_type_is_sensitive(row.file_type)
             if encrypted and key_cipher is None:
@@ -984,20 +997,24 @@ def stream_chunks(
 
 
 def attachment_header(original_filename: str) -> str:
-    """Content-Disposition value with header-injection-safe filename.
+    """Content-Disposition value that stays header-serializable for ANY name.
 
-    CR/LF/quotes/backslashes are stripped for the plain filename; non-ASCII
-    names additionally ride as RFC 5987 ``filename*=`` (display escapes live
-    in the UI; the header must never carry raw control characters).
+    Header serialization is latin-1: raw non-latin-1 characters (Chinese
+    upload names are legal) would raise UnicodeEncodeError, so the plain
+    ``filename=`` carries an ASCII-safe fallback (non-ASCII replaced by
+    ``?``, RFC 6266 §5) and the ORIGINAL name rides percent-encoded as RFC
+    5987 ``filename*=UTF-8''...`` (``safe=''`` — the header-value specials
+    ``; " \\`` and control characters are all encoded). CR/LF/quotes/
+    backslashes never survive into either value.
     """
     safe = _NAME_CONTROL_RE.sub("_", original_filename or "warden-file")
     safe = safe.strip() or "warden-file"
     try:
         safe.encode("ascii")
-        return f'attachment; filename="{safe[:160]}"'
     except UnicodeEncodeError:
-        fallback = _NAME_CONTROL_RE.sub("_", original_filename).strip()[:160] or "warden-file"
+        fallback = safe.encode("ascii", "replace").decode("ascii")[:160] or "warden-file"
         return (
             f'attachment; filename="{fallback}"; '
-            f"filename*=UTF-8''{quote(original_filename or 'warden-file')}"
+            f"filename*=UTF-8''{quote(original_filename or 'warden-file', safe='')}"
         )
+    return f'attachment; filename="{safe[:160]}"'

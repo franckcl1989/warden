@@ -19,6 +19,7 @@ from app.infrastructure.crypto import FileKeyCipher
 from app.infrastructure.files import (
     CONTENT_CHUNK_SIZE,
     ENVELOPE_MAGIC,
+    GCM_TAG_BYTES,
     FileCorruptionError,
     FileStorage,
     FileStorageError,
@@ -43,10 +44,32 @@ def _cipher() -> FileKeyCipher:
 
 
 def _upload_bytes(storage: FileStorage, payload: bytes, *, declared: int | None = None) -> None:
+    _spool_bytes(storage, UPLOAD_ID, payload, declared=declared)
+
+
+def _spool_bytes(
+    storage: FileStorage, upload_id: str, payload: bytes, *, declared: int | None = None
+) -> None:
     limit = declared if declared is not None else len(payload)
     step = 8191  # non-round chunking still exercises the multi-chunk path
     for start in range(0, len(payload), step):
-        storage.write_upload_chunk(UPLOAD_ID, payload[start : start + step], declared_size=limit)
+        storage.write_upload_chunk(upload_id, payload[start : start + step], declared_size=limit)
+
+
+def _multichunk_encrypted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[FileStorage, bytes, StoredFile]:
+    """A 4-chunk + tail encrypted file whose envelope payload chunks are 4096 B.
+
+    Patching the module chunk size makes multi-chunk envelopes cheap; the
+    envelope header records the chunk size, so reads are independent of the
+    current global.
+    """
+    monkeypatch.setattr("app.infrastructure.files.CONTENT_CHUNK_SIZE", 4096)
+    storage = _storage(tmp_path)
+    payload = (bytes(range(251)) * 200)[: 4096 * 4 + 1234]
+    _spool_bytes(storage, UPLOAD_ID, payload)
+    return storage, payload, storage.store_final(UPLOAD_ID, STORAGE_KEY, key_cipher=_cipher())
 
 
 class TestStreamingWrites:
@@ -337,3 +360,171 @@ class TestBoundedStreaming:
         for start, limit in ((-1, 10), (100, 1), (50, 100)):
             with pytest.raises(FileStorageError):
                 list(storage.open_chunks(stored, key_cipher=None, start=start, limit=limit))
+
+
+class TestEnvelopeWindows:
+    """Regression (M2T5 review): windowed reads of ENCRYPTED files must end
+    cleanly at the window edge.
+
+    The old reader kept decrypting one chunk past the window and then raised
+    FileCorruptionError (decrypted total != metadata size) whenever the file
+    had data beyond the window — a mid-stream failure after 206 headers.
+    """
+
+    def test_window_ending_on_a_chunk_boundary_serves_exact_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage, payload, stored = _multichunk_encrypted(tmp_path, monkeypatch)
+        for start, limit in ((0, 4096), (4096, 4096), (8192, 4096)):
+            window = b"".join(
+                storage.open_chunks(stored, key_cipher=_cipher(), start=start, limit=limit)
+            )
+            assert window == payload[start : start + limit]
+
+    def test_window_ending_mid_chunk_serves_exact_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage, payload, stored = _multichunk_encrypted(tmp_path, monkeypatch)
+        for start, limit in ((6000, 1000), (4096, 2048), (0, 4096 + 100)):
+            window = b"".join(
+                storage.open_chunks(stored, key_cipher=_cipher(), start=start, limit=limit)
+            )
+            assert window == payload[start : start + limit]
+
+    def test_full_read_still_verifies_the_decrypted_total(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage, payload, stored = _multichunk_encrypted(tmp_path, monkeypatch)
+        assert b"".join(storage.open_chunks(stored, key_cipher=_cipher())) == payload
+        # A file truncated exactly at a chunk boundary must still fail a FULL
+        # pass (the total-length cross-check stays on full reads).
+        path = tmp_path / "files" / "data" / STORAGE_KEY[:2] / STORAGE_KEY
+        path.write_bytes(path.read_bytes()[: -(1234 + GCM_TAG_BYTES)])
+        with pytest.raises(FileCorruptionError):
+            list(storage.open_chunks(stored, key_cipher=_cipher()))
+        # A window fully inside the surviving chunks still serves.
+        window = b"".join(
+            storage.open_chunks(stored, key_cipher=_cipher(), start=0, limit=4096)
+        )
+        assert window == payload[:4096]
+
+
+class TestIncrementalDigest:
+    """The spool SHA-256 accumulates while chunks stream (no full re-read at
+    complete); the in-memory state is per storage instance (a process restart
+    loses it and the caller falls back to a re-read)."""
+
+    def test_digest_accumulates_across_chunked_writes(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        payload = bytes(range(256)) * 1000
+        _upload_bytes(storage, payload)
+        assert storage.upload_digest(UPLOAD_ID) == hashlib.sha256(payload).hexdigest()
+
+    def test_digest_follows_the_spool_lifecycle(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        _upload_bytes(storage, b"x" * 512)
+        assert storage.upload_digest(UPLOAD_ID) is not None
+        storage.remove_upload(UPLOAD_ID)
+        assert storage.upload_digest(UPLOAD_ID) is None
+        _upload_bytes(storage, b"y" * 512)
+        stored = storage.store_final(UPLOAD_ID, STORAGE_KEY, key_cipher=None)
+        assert stored.size_bytes == 512
+        assert storage.upload_digest(UPLOAD_ID) is None
+
+    def test_digest_state_is_lost_on_a_fresh_instance(self, tmp_path: Path) -> None:
+        first = _storage(tmp_path)
+        payload = b"z" * 777
+        _upload_bytes(first, payload)
+        # A second instance over the same root has no in-memory digest state
+        # (the process-restart case): it must report unknown so the caller
+        # falls back to a spool re-read instead of trusting stale state.
+        second = _storage(tmp_path)
+        assert second.upload_digest(UPLOAD_ID) is None
+        assert first.upload_digest(UPLOAD_ID) == hashlib.sha256(payload).hexdigest()
+
+    def test_digest_ignores_rejected_quota_writes(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        _upload_bytes(storage, b"abc", declared=3)
+        with pytest.raises(QuotaExceededError):
+            storage.write_upload_chunk(UPLOAD_ID, b"more", declared_size=3)
+        assert storage.upload_digest(UPLOAD_ID) == hashlib.sha256(b"abc").hexdigest()
+
+
+class TestReadHead:
+    def test_read_head_returns_only_the_requested_prefix(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        payload = bytes(range(256)) * 100
+        _upload_bytes(storage, payload)
+        assert storage.read_head(UPLOAD_ID, 17) == payload[:17]
+        assert storage.read_head(UPLOAD_ID, 4096) == payload[:4096]
+        # A request larger than the spool returns the whole file, never raises.
+        assert storage.read_head(UPLOAD_ID, 10**9) == payload
+
+    def test_read_head_missing_upload_raises(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        with pytest.raises(FileStorageError):
+            storage.read_head(UPLOAD_ID, 10)
+
+
+class TestAtomicFinalize:
+    """Regression (M2T5 review): finalizing over a shared content-addressed
+    key must never truncate a live ready file — writes go to a temp + atomic
+    rename, and an existing target is dedup-skipped (identical by hash
+    construction) or refused (size anomaly) instead of being overwritten."""
+
+    def test_duplicate_plain_finalize_skips_copy_and_consumes_both_spools(
+        self, tmp_path: Path
+    ) -> None:
+        storage = _storage(tmp_path)
+        payload = b"dup-content" * 5000
+        key = hashlib.sha256(payload).hexdigest()
+        first, second = str(uuid7()), str(uuid7())
+        _spool_bytes(storage, first, payload)
+        _spool_bytes(storage, second, payload)
+        first_stored = storage.store_final(first, key, key_cipher=None)
+        second_stored = storage.store_final(second, key, key_cipher=None)
+        assert first_stored.size_bytes == second_stored.size_bytes == len(payload)
+        target = tmp_path / "files" / "data" / key[:2] / key
+        assert target.read_bytes() == payload
+        assert storage.upload_size(first) == 0
+        assert storage.upload_size(second) == 0
+
+    def test_finalize_never_truncates_an_existing_ready_file(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        key = "b" * 64
+        ready_bytes = b"ready-bytes-" * 10
+        ready_id = str(uuid7())
+        _spool_bytes(storage, ready_id, ready_bytes)
+        storage.store_final(ready_id, key, key_cipher=None)
+        assert storage.exists(key)
+        # A second spool claiming the same key with a DIFFERENT size is an
+        # integrity anomaly: fail fast and leave the ready bytes untouched.
+        hostile = str(uuid7())
+        _spool_bytes(storage, hostile, b"other-size-" * 20)
+        with pytest.raises(FileStorageError):
+            storage.store_final(hostile, key, key_cipher=None)
+        target = tmp_path / "files" / "data" / key[:2] / key
+        assert target.read_bytes() == ready_bytes
+
+    def test_finalize_leaves_no_temp_residue(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        tmp_dir = tmp_path / "files" / "tmp"
+        for _ in range(2):
+            upload_id = str(uuid7())
+            _spool_bytes(storage, upload_id, b"enc-finalize" * 500)
+            storage.store_final(upload_id, STORAGE_KEY + "-" + str(uuid7()), key_cipher=_cipher())
+        assert list(tmp_dir.iterdir()) == []
+
+    def test_stale_finalize_residue_is_removed_by_age(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path)
+        residue = tmp_path / "files" / "tmp" / ("finalize-" + "ab" * 16)
+        residue.write_bytes(b"partial")
+        old = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=2)
+        import os
+
+        os.utime(residue, (old.timestamp(), old.timestamp()))
+        removed = storage.delete_stale_uploads(
+            cutoff=datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=1)
+        )
+        assert removed == 1
+        assert not residue.exists()

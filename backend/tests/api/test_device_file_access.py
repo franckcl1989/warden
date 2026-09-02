@@ -167,7 +167,7 @@ class TestTicketServe:
         assert suffix.status_code == 206
         assert suffix.content == _zip_bytes()[-5:]
 
-    def test_unsatisfiable_range_is_416(self, client: TestClient, db_session: Session) -> None:
+    def test_unsatisfiable_range_is_416_with_size_marker(self, client: TestClient, db_session: Session) -> None:
         file_row = _seed_ready_file(client, db_session)
         device = make_device(db_session, index=93)
         ticket = _seed_ticket(db_session, file_row=file_row, device_id=device.id)
@@ -175,6 +175,8 @@ class TestTicketServe:
             TICKET_PATH.format(ticket=ticket.id), headers={"Range": "bytes=999999-"}
         )
         assert response.status_code == 416
+        # RFC 7233 §4.4: the unsatisfied-range marker carries the total size.
+        assert response.headers["content-range"] == f"bytes */{file_row.size_bytes}"
 
     def test_malformed_range_falls_back_to_full_200(self, client: TestClient, db_session: Session) -> None:
         file_row = _seed_ready_file(client, db_session)

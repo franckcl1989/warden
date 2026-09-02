@@ -838,6 +838,7 @@ class FileRetentionReport:
     operation_logs_deleted: int = 0
     config_backups_deleted: int = 0
     abandoned_uploads_deleted: int = 0
+    orphaned_upload_spools_removed: int = 0
     tickets_deleted: int = 0
     physical_files_removed: int = 0
 
@@ -1031,8 +1032,28 @@ def _close_abandoned_uploads(
                 detail={"created_at": row.created_at.isoformat()},
             )
             with contextlib.suppress(FileStorageError):
-                storage.remove_upload(str(row.id))  # spool sweep retries otherwise
+                storage.remove_upload(str(row.id))  # volume sweep retries otherwise
             report.abandoned_uploads_deleted += 1
+
+
+def _sweep_orphaned_spools(
+    *,
+    now: datetime.datetime,
+    storage: FileStorage,
+    report: FileRetentionReport,
+) -> None:
+    """Volume backstop for spool residue no row references any more.
+
+    A crash between the row close-out commit and the spool unlink leaves an
+    orphaned ``tmp/<upload-id>`` (and a crash between a finalize copy and
+    its atomic rename leaves ``tmp/finalize-*`` residue). The row-driven
+    pass above ran first, so by now every spool of a live uploading row is
+    younger than the abandoned margin — an mtime sweep with the same cutoff
+    can only remove true residue.
+    """
+    report.orphaned_upload_spools_removed = storage.delete_stale_uploads(
+        cutoff=now - ABANDONED_UPLOAD_DELAY
+    )
 
 
 def _physically_clean_deleted_files(
@@ -1167,6 +1188,7 @@ def enforce_file_retention(
     _prune_expired_files(db, now=now, settings=settings, audit=audit, report=report)
     _prune_config_backups(db, now=now, settings=settings, audit=audit, report=report)
     _close_abandoned_uploads(db, now=now, storage=storage, audit=audit, report=report)
+    _sweep_orphaned_spools(now=now, storage=storage, report=report)
     _physically_clean_deleted_files(db, now=now, storage=storage, audit=audit, report=report)
     _purge_expired_tickets(db, now=now, report=report)
     return report

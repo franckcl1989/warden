@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import io
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -422,6 +423,161 @@ class TestUploadLifecycle:
                 db_session, file_id=str(completed.id), user=operator, storage=storage, key_cipher=cipher
             )
         assert error.value.code == "validation_failed"
+
+
+class TestCompleteHashSemantics:
+    """M2T5 review regression: the spool SHA-256 accumulates while chunks
+    stream — complete_upload must NOT re-read the (up to 50 GiB) spool for
+    hashing; a process restart loses the in-memory state and complete falls
+    back to exactly one re-read."""
+
+    def test_complete_uses_the_incremental_digest_not_a_spool_reread(
+        self, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        storage = _storage(tmp_path)
+        operator = _role_user(db_session, role="operator", index=101)
+        content = _zip_bytes()
+        row = file_service.create_upload(
+            db_session,
+            user=operator,
+            file_type="firmware",
+            size_bytes=len(content),
+            original_filename="fw.bin",
+            settings=SETTINGS,
+        )
+        db_session.commit()
+        upload_id = str(row.id)
+        for start in range(0, len(content), 4093):
+            file_service.stream_upload_chunk(
+                db_session,
+                upload_id=upload_id,
+                user_id=operator.id,
+                chunk=content[start : start + 4093],
+                storage=storage,
+            )
+        db_session.commit()
+        assert storage.upload_digest(upload_id) == hashlib.sha256(content).hexdigest()
+
+        def _explode(*args: object, **kwargs: object) -> object:
+            raise AssertionError("complete must not re-read the spool for hashing")
+
+        monkeypatch.setattr(storage, "read_upload_chunks", _explode)
+        completed = file_service.complete_upload(
+            db_session, upload_id=upload_id, user=operator, storage=storage, key_cipher=None
+        )
+        db_session.commit()
+        assert completed.status == "ready"
+        assert completed.sha256 == hashlib.sha256(content).hexdigest()
+
+    def test_complete_after_a_process_restart_rehashes_from_the_spool(
+        self, db_session: Session, tmp_path: Path
+    ) -> None:
+        writer = _storage(tmp_path)
+        operator = _role_user(db_session, role="operator", index=102)
+        content = _zip_bytes()
+        row = file_service.create_upload(
+            db_session,
+            user=operator,
+            file_type="firmware",
+            size_bytes=len(content),
+            original_filename="fw.bin",
+            settings=SETTINGS,
+        )
+        db_session.commit()
+        upload_id = str(row.id)
+        file_service.stream_upload_chunk(
+            db_session, upload_id=upload_id, user_id=operator.id, chunk=content, storage=writer
+        )
+        db_session.commit()
+        # A fresh instance over the same root simulates the restart: the
+        # incremental digest state is gone (upload_digest -> None) and the
+        # fallback re-read must still record the exact content hash.
+        restarted = _storage(tmp_path)
+        assert restarted.upload_digest(upload_id) is None
+        completed = file_service.complete_upload(
+            db_session, upload_id=upload_id, user=operator, storage=restarted, key_cipher=None
+        )
+        db_session.commit()
+        assert completed.status == "ready"
+        assert completed.sha256 == hashlib.sha256(content).hexdigest()
+        assert restarted.exists(completed.storage_name) is True
+
+
+class TestEncryptedRangeWindows:
+    """M2T5 review regression: windowed reads of ENCRYPTED files (the 206
+    byte window of a download) end cleanly at the window edge instead of
+    raising FileCorruptionError ~one chunk past the window."""
+
+    def test_windows_end_cleanly_on_and_inside_chunk_boundaries(
+        self, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("app.infrastructure.files.CONTENT_CHUNK_SIZE", 4096)
+        storage = _storage(tmp_path)
+        cipher = _cipher()
+        operator = _role_user(db_session, role="operator", index=103)
+        content = _zip_bytes(name="window.zip", payload=bytes(range(251)) * 200)
+        assert len(content) > 4096 * 4  # several envelope payload chunks
+        ready = _upload_ready(
+            db_session, storage, user=operator, file_type="support_bundle",
+            content=content, key_cipher=cipher,
+        )
+        download = file_service.prepare_download(
+            db_session, file_id=str(ready.id), user=operator, storage=storage, key_cipher=cipher
+        )
+        # (a) A range whose END falls on a chunk boundary of a longer file.
+        body = b"".join(
+            file_service.stream_chunks(
+                storage, download,
+                byte_range=file_service.ByteRange(0, 4095), key_cipher=cipher,
+            )
+        )
+        assert body == content[:4096]
+        # (b) A window ending mid-chunk, with content beyond it.
+        body = b"".join(
+            file_service.stream_chunks(
+                storage, download,
+                byte_range=file_service.ByteRange(6000, 6999), key_cipher=cipher,
+            )
+        )
+        assert body == content[6000:7000]
+        # (c) Full reads still round-trip (the total check stays on).
+        full = b"".join(
+            file_service.stream_chunks(storage, download, byte_range=None, key_cipher=cipher)
+        )
+        assert full == content
+
+
+class TestAttachmentHeader:
+    """Content-Disposition must stay latin-1 serializable for ANY legal
+    original_filename (a Chinese name used to 500 at header serialization)."""
+
+    def test_plain_ascii_name_uses_a_quoted_filename_only(self) -> None:
+        assert file_service.attachment_header("fw-image.bin") == 'attachment; filename="fw-image.bin"'
+
+    def test_non_ascii_name_uses_ascii_fallback_plus_rfc5987(self) -> None:
+        original = "固件升级包-v2.zip"
+        header = file_service.attachment_header(original)
+        header.encode("latin-1")  # must stay header-serializable
+        assert all(ord(char) < 128 for char in header)
+        assert header.startswith('attachment; filename="')
+        assert "filename*=UTF-8''" in header
+        from urllib.parse import unquote
+
+        star = header.split("filename*=UTF-8''", 1)[1]
+        assert unquote(star) == original
+        fallback = header.split(";", 1)[1].split('filename="', 1)[1].split('"', 1)[0]
+        assert fallback.isascii()
+        assert "固" not in header
+
+    def test_non_ascii_name_with_header_specials_is_fully_escaped(self) -> None:
+        original = 'a;b=c 固件 d\\x.zip'
+        header = file_service.attachment_header(original)
+        header.encode("latin-1")
+        star = header.split("filename*=UTF-8''", 1)[1]
+        assert ";" not in star and '"' not in star and "\\" not in star
+        from urllib.parse import unquote
+
+        assert unquote(star) == original
 
 
 class TestUploadValidationAndPermissions:
@@ -843,6 +999,37 @@ class TestRetentionRules:
         report = enforce_file_retention(db_session, now=NOW, settings=SETTINGS, storage=storage)
         assert report.storage_unavailable is True
         assert report.support_bundles_deleted == 0
+
+    def test_orphaned_spools_are_swept_and_live_sessions_survive(
+        self, db_session: Session, tmp_path: Path
+    ) -> None:
+        storage = _storage(tmp_path)
+        # A spool whose row no longer exists (crash between the row delete
+        # and the spool removal) is the volume sweep's job — mtime-aged out.
+        orphan = str(uuid.uuid4())
+        storage.write_upload_chunk(orphan, b"residue-bytes", declared_size=13)
+        import os
+
+        spool = tmp_path / "files" / "tmp" / orphan
+        old = NOW - datetime.timedelta(days=2)
+        os.utime(spool, (old.timestamp(), old.timestamp()))
+        report = enforce_file_retention(db_session, now=NOW, settings=SETTINGS, storage=storage)
+        assert report.orphaned_upload_spools_removed == 1
+        assert storage.upload_size(orphan) == 0
+        # A live uploading session with a fresh spool survives the same pass.
+        operator = _role_user(db_session, role="operator", index=104)
+        live = file_service.create_upload(
+            db_session, user=operator, file_type="firmware", size_bytes=10,
+            original_filename="live.bin", settings=SETTINGS,
+        )
+        file_service.stream_upload_chunk(
+            db_session, upload_id=str(live.id), user_id=operator.id,
+            chunk=b"0123456789", storage=storage,
+        )
+        db_session.commit()
+        again = enforce_file_retention(db_session, now=NOW, settings=SETTINGS, storage=storage)
+        assert again.orphaned_upload_spools_removed == 0
+        assert storage.upload_size(str(live.id)) == 10
 
 
 class TestDeviceFileTickets:
