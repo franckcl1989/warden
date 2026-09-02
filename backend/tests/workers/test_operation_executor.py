@@ -20,7 +20,7 @@ from app.adapters import get_adapter
 from app.adapters.fake import FAKE_DEVICE_JOB_ID, SimulatedWorkerCrash
 from app.application.operations import build_snapshot
 from app.config import WardenSettings
-from app.domain.adapter import OperationProgress
+from app.domain.adapter import AdapterError, OperationProgress
 from app.domain.operation import TaskState
 from app.domain.operation_plan import OperationRequest, plan_operation
 from app.infrastructure.audit import AuditLogger
@@ -178,6 +178,20 @@ def _audit_finishes(db: Session, task_id: uuid.UUID) -> list[AuditLog]:
             select(AuditLog)
             .where(AuditLog.action == "operation.finish", AuditLog.task_id == task_id)
             .order_by(AuditLog.created_at)
+        ).all()
+    )
+
+
+def _count_failed_ambiguous(db: Session) -> int:
+    """Rows in terminal failed that carry the ambiguity code — the exact
+    corruption the executor must never produce (DEVICE_ADAPTERS.md §7:
+    ambiguous_result -> 禁止重放，进入待核验)."""
+    return len(
+        db.scalars(
+            select(OperationTask).where(
+                OperationTask.state == TaskState.FAILED.value,
+                OperationTask.error_code == "ambiguous_result",
+            )
         ).all()
     )
 
@@ -363,6 +377,92 @@ class TestExecutionPaths:
                 assert row.error_code == "ambiguous_result"
                 assert row.finished_at is None
                 assert len(_audit_finishes(db, task.id)) == 1
+        finally:
+            engine.dispose()
+
+    def test_execute_ambiguous_result_enters_verification_required_never_failed(
+        self, fresh_test_db_dsn: str, monkeypatch
+    ) -> None:
+        """Execute returns ok=False + ambiguous_result (DEVICE_ADAPTERS.md §7:
+        连接中断且无法确认是否执行): verification_required, NEVER failed, and
+        never replayed — execute called exactly once."""
+        engine = _pool_engine(fresh_test_db_dsn)
+        factory = create_session_factory(engine)
+        settings = _executor_settings(fresh_test_db_dsn)
+        fake = get_adapter("fake.simple")
+        execute_calls: list[int] = []
+        original_execute = fake.execute_operation
+
+        def counting_execute(session, plan, progress: OperationProgress):
+            execute_calls.append(1)
+            return original_execute(session, plan, progress)
+
+        monkeypatch.setattr(fake, "execute_operation", counting_execute)
+        try:
+            with factory() as db:
+                _, task = _seed_execution_task(
+                    db, connection_config={"execute_ambiguous_mode": True}
+                )
+            claimed = _claim_one(factory)
+            assert claimed is not None
+            self._executor(factory, settings)(claimed)
+            with factory() as db:
+                row = _refresh(db, task.id)
+                assert row.state == "verification_required"
+                assert row.error_code == "ambiguous_result"
+                assert row.dispatch_started_at is not None
+                assert row.finished_at is None
+                assert row.evidence is not None
+                assert row.evidence["execution"]["mode"] == "execute_ambiguous"
+                # state + audit + ui_events in the same transaction.
+                finishes = _audit_finishes(db, task.id)
+                assert len(finishes) == 1 and finishes[0].result == "verification_required"
+                assert _ui_event_types(db, task.id) == ["operation.updated", "operation.updated"]
+                # No failed row may carry the ambiguity code.
+                assert _count_failed_ambiguous(db) == 0
+            assert len(execute_calls) == 1
+            # No auto-retry: nothing is claimable afterwards.
+            assert _claim_one(factory) is None
+        finally:
+            engine.dispose()
+
+    def test_execute_ambiguous_adapter_error_enters_verification_required_never_failed(
+        self, fresh_test_db_dsn: str, monkeypatch
+    ) -> None:
+        """Execute raises AdapterError(ambiguous_result): the same §7 rule
+        applies — verification_required, never failed, no replay."""
+        engine = _pool_engine(fresh_test_db_dsn)
+        factory = create_session_factory(engine)
+        settings = _executor_settings(fresh_test_db_dsn)
+        fake = get_adapter("fake.simple")
+        execute_calls: list[int] = []
+
+        def raising_execute(session, plan, progress: OperationProgress):
+            execute_calls.append(1)
+            raise AdapterError(
+                "ambiguous_result",
+                "连接中断且无法确认设备是否已执行（模拟）",
+                stage="execute",
+            )
+
+        monkeypatch.setattr(fake, "execute_operation", raising_execute)
+        try:
+            with factory() as db:
+                _, task = _seed_execution_task(db)
+            claimed = _claim_one(factory)
+            assert claimed is not None
+            self._executor(factory, settings)(claimed)
+            with factory() as db:
+                row = _refresh(db, task.id)
+                assert row.state == "verification_required"
+                assert row.error_code == "ambiguous_result"
+                assert row.dispatch_started_at is not None
+                assert row.finished_at is None
+                finishes = _audit_finishes(db, task.id)
+                assert len(finishes) == 1 and finishes[0].result == "verification_required"
+                assert _count_failed_ambiguous(db) == 0
+            assert len(execute_calls) == 1
+            assert _claim_one(factory) is None
         finally:
             engine.dispose()
 
@@ -809,5 +909,110 @@ class TestCrashRecovery:
             with factory() as db:
                 row = _refresh(db, task.id)
                 assert row.state == "succeeded"
+        finally:
+            engine.dispose()
+
+
+class TestAmbiguityInvariant:
+    """NO executor path may map ``ambiguous_result`` onto terminal failed.
+
+    DEVICE_ADAPTERS.md §7: ``ambiguous_result``（连接中断且无法确认是否执行）
+    禁止重放，进入待核验 — the code may only ever rest on a
+    verification_required row. This matrix runs EVERY stage surface where the
+    executor can receive the sanctioned code (execute returns it, execute
+    raises it, the adapter timeout path produces it, verification reports it
+    or raises it) and then scans the whole database for the corrupted shape
+    (state=failed AND error_code=ambiguous_result).
+    """
+
+    def _run_claimed(self, factory: sessionmaker[Session], settings: WardenSettings) -> None:
+        claimed = _claim_one(factory)
+        assert claimed is not None
+        self._executor(factory, settings)(claimed)
+
+    def _executor(
+        self,
+        factory: sessionmaker[Session],
+        settings: WardenSettings,
+    ) -> OperationExecutor:
+        return OperationExecutor(
+            session_factory=factory,
+            lease_owner=OWNER,
+            lease_seconds=300,
+            settings=settings,
+            keyring=make_keyring(),
+            audit_logger=AuditLogger(factory),
+        )
+
+    def test_no_path_maps_ambiguous_result_to_failed(
+        self, fresh_test_db_dsn: str, monkeypatch
+    ) -> None:
+        engine = _pool_engine(fresh_test_db_dsn)
+        factory = create_session_factory(engine)
+        settings = _executor_settings(fresh_test_db_dsn)
+        fake = get_adapter("fake.simple")
+        original_execute = fake.execute_operation
+        original_verify = fake.verify_operation
+
+        def matrix_execute(session, plan, progress: OperationProgress):
+            if session.connection_config.get("_raise_ambiguous_execute"):
+                raise AdapterError(
+                    "ambiguous_result",
+                    "连接中断且无法确认是否执行（模拟）",
+                    stage="execute",
+                )
+            return original_execute(session, plan, progress)
+
+        def matrix_verify(session, plan, result):
+            if session.connection_config.get("_raise_ambiguous_verify"):
+                raise AdapterError(
+                    "ambiguous_result",
+                    "回读连接中断，无法证明结果（模拟）",
+                    stage="verify",
+                )
+            return original_verify(session, plan, result)
+
+        monkeypatch.setattr(fake, "execute_operation", matrix_execute)
+        monkeypatch.setattr(fake, "verify_operation", matrix_verify)
+        try:
+            surfaces: list[tuple[str, dict[str, object]]] = [
+                # execute returns ok=False + ambiguous_result (mode).
+                ("execute-result", {"execute_ambiguous_mode": True}),
+                # execute raises AdapterError(ambiguous_result).
+                ("execute-raise", {"_raise_ambiguous_execute": True}),
+                # adapter timeout after the fence (fenced side-effect).
+                ("execute-timeout", {"execute_timeout_mode": True}),
+                # verification reports ambiguous.
+                ("verify-ambiguous", {"verify_ambiguous_mode": True}),
+                # verification raises AdapterError(ambiguous_result).
+                ("verify-raise", {"_raise_ambiguous_verify": True}),
+            ]
+            task_ids: list[uuid.UUID] = []
+            with factory() as db:
+                for _name, config in surfaces:
+                    _device, task = _seed_execution_task(db, connection_config=config)
+                    task_ids.append(task.id)
+            for _task_id in task_ids:
+                self._run_claimed(factory, settings)
+            with factory() as db:
+                for task_id in task_ids:
+                    row = _refresh(db, task_id)
+                    assert row.state == "verification_required", (
+                        f"task {task_id} ended {row.state}, never failed"
+                    )
+                    assert row.error_code == "ambiguous_result"
+                # The DB-wide invariant: every ambiguous_result row is
+                # verification_required; no failed row carries the code.
+                assert _count_failed_ambiguous(db) == 0
+                ambiguous_rows = db.scalars(
+                    select(OperationTask).where(
+                        OperationTask.error_code == "ambiguous_result"
+                    )
+                ).all()
+                assert len(ambiguous_rows) == len(task_ids)
+                assert all(
+                    row.state == TaskState.VERIFICATION_REQUIRED.value
+                    for row in ambiguous_rows
+                )
         finally:
             engine.dispose()

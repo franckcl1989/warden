@@ -36,6 +36,9 @@ fail_credentials/fail_tls pattern):
   plan (validation_failed) or signals device-version drift;
 - ``execute_fail_mode``: the device explicitly rejects the action
   (operation_failed);
+- ``execute_ambiguous_mode``: the connection drops before the device can
+  confirm whether the action executed (ok=False + ambiguous_result — §7:
+  连接中断且无法确认是否执行 -> 禁止重放，进入待核验);
 - ``execute_timeout_mode``: the device call times out after ~1 s
   (AdapterTimeoutError — worker wiring in M2T6 decides the outcome);
 - ``ambiguous_mode``: the action is accepted but the connection drops before
@@ -95,6 +98,7 @@ NO_DATA_MODE_KEY = "no_data_mode"
 FAIL_PREFLIGHT_MODE_KEY = "fail_preflight_mode"
 STALE_PREFLIGHT_MODE_KEY = "stale_preflight_mode"
 EXECUTE_FAIL_MODE_KEY = "execute_fail_mode"
+EXECUTE_AMBIGUOUS_MODE_KEY = "execute_ambiguous_mode"
 EXECUTE_TIMEOUT_MODE_KEY = "execute_timeout_mode"
 AMBIGUOUS_MODE_KEY = "ambiguous_mode"
 DEVICE_JOB_MODE_KEY = "device_job_mode"
@@ -208,6 +212,7 @@ class FakeSimpleAdapter:
             FAIL_PREFLIGHT_MODE_KEY: {"type": "boolean"},
             STALE_PREFLIGHT_MODE_KEY: {"type": "boolean"},
             EXECUTE_FAIL_MODE_KEY: {"type": "boolean"},
+            EXECUTE_AMBIGUOUS_MODE_KEY: {"type": "boolean"},
             EXECUTE_TIMEOUT_MODE_KEY: {"type": "boolean"},
             AMBIGUOUS_MODE_KEY: {"type": "boolean"},
             DEVICE_JOB_MODE_KEY: {"type": "boolean"},
@@ -393,6 +398,9 @@ class FakeSimpleAdapter:
 
         Success by default with device-side evidence. Mode flags:
         execute_fail_mode -> explicit device failure (operation_failed);
+        execute_ambiguous_mode -> the connection dropped before the device
+        confirmed the action: ok=False + ambiguous_result (DEVICE_ADAPTERS.md
+        §7 — 连接中断且无法确认是否执行：禁止重放，进入待核验);
         execute_timeout_mode -> AdapterTimeoutError after ~1 s;
         ambiguous_mode -> accepted but unverifiable (disconnected, no job);
         device_job_mode -> returns the persisted vendor job id (fake-job-1);
@@ -428,6 +436,13 @@ class FakeSimpleAdapter:
                 ok=True,
                 evidence={"command": "fake-ok", "job": FAKE_DEVICE_JOB_ID},
                 device_job_id=FAKE_DEVICE_JOB_ID,
+            )
+        if config.get(EXECUTE_AMBIGUOUS_MODE_KEY):
+            return OperationResult(
+                ok=False,
+                error_code="ambiguous_result",
+                error_detail="execute_ambiguous_mode：连接中断且无法确认设备是否已执行",
+                evidence={"command": "fake-unknown", "mode": "execute_ambiguous"},
             )
         if config.get(EXECUTE_FAIL_MODE_KEY):
             return OperationResult(

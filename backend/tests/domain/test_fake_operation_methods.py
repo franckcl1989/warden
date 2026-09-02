@@ -18,6 +18,7 @@ from app.adapters.fake import (
     CRASH_AFTER_FENCE_MODE_KEY,
     CRASH_BEFORE_FENCE_MODE_KEY,
     DEVICE_JOB_MODE_KEY,
+    EXECUTE_AMBIGUOUS_MODE_KEY,
     EXECUTE_FAIL_MODE_KEY,
     EXECUTE_TIMEOUT_MODE_KEY,
     FAIL_PREFLIGHT_MODE_KEY,
@@ -165,6 +166,16 @@ def test_execute_fail_mode_returns_explicit_device_failure() -> None:
     )
     assert result.ok is False
     assert result.error_code == "operation_failed"
+
+
+@pytest.mark.unit
+def test_execute_ambiguous_mode_returns_unprovable_outcome() -> None:
+    result = FAKE.execute_operation(
+        _session(**{EXECUTE_AMBIGUOUS_MODE_KEY: True}), _power_on_plan(), _noop_progress
+    )
+    assert result.ok is False
+    assert result.error_code == "ambiguous_result"
+    assert result.evidence.get("mode") == "execute_ambiguous"
 
 
 @pytest.mark.unit

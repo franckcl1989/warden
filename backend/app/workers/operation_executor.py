@@ -30,7 +30,11 @@ Outcome rules that MUST never be violated (AGENTS.md, M2T1 gate):
 - fenced side-effect tasks are never executed twice; the crash-after-fence
   recovery only consumes ``verify_operation`` (E2E enforces execute_count=1);
 - ambiguous NEVER becomes failed + auto-replay; verification_required is only
-  left via the admin verify/resolve flows;
+  left via the admin verify/resolve flows; this holds for EVERY stage that
+  surfaces the ``ambiguous_result`` code — including the execute stage, where
+  an adapter may report 连接中断且无法确认是否执行 (ok=False/ambiguous_result
+  or an AdapterError with that code) and the executor must route it through
+  ``_verification_required``, never ``_fail_task``;
 - adapter errors are never swallowed into success; a timeout error maps per
   ``timeout_transition`` (fenced side-effect -> verification_required).
 
@@ -265,6 +269,17 @@ class OperationExecutor:
             self._handle_timeout_like(session, task, profile, reason=f"设备调用超时：{exc.message}")
             return
         except AdapterError as exc:
+            if exc.code == "ambiguous_result":
+                # DEVICE_ADAPTERS.md §7: 连接中断且无法确认是否执行 ->
+                # 禁止重放，进入待核验. The fence is committed, so this task
+                # may never be failed + auto-replayed.
+                self._verification_required(
+                    session,
+                    task,
+                    f"设备调用结果不明（ambiguous_result）：{self._safe(exc.message, exc.stage)}；"
+                    "等待核验（不自动重放）",
+                )
+                return
             self._fail_task(
                 session,
                 task,
@@ -273,6 +288,18 @@ class OperationExecutor:
             )
             return
         if not result.ok:
+            if result.error_code == "ambiguous_result":
+                # Explicit device ambiguity is NOT a clean failure: the device
+                # may have executed the action (DEVICE_ADAPTERS.md §7/§9).
+                self._verification_required(
+                    session,
+                    task,
+                    "设备调用结果不明（ambiguous_result）："
+                    + (result.error_detail or "连接中断且无法确认是否执行")
+                    + "；等待核验（不自动重放）",
+                    evidence={"execution": dict(result.evidence)} if result.evidence else None,
+                )
+                return
             # Explicit device failure: terminal failed, NEVER retried
             # (DEVICE_ADAPTERS.md §7: operation_failed 不自动重试).
             self._fail_task(

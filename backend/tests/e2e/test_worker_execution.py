@@ -440,6 +440,58 @@ class TestFaultInjection:
             row = session.get(OperationTask, task_id)
             assert row is not None and row.state == "failed"
 
+    def test_execute_ambiguous_result_enters_verification_required_never_failed(
+        self, rig_env, monkeypatch
+    ) -> None:
+        """End-to-end: execute returns ok=False + ambiguous_result (the device
+        connection dropped before the action could be confirmed —
+        DEVICE_ADAPTERS.md §7). The pool must leave the task
+        verification_required with error ambiguous_result — NEVER failed —
+        execute exactly once, and no later pool pass may replay it."""
+        rig, db = rig_env
+        with db() as session:
+            task = _seed_task(session, connection_config={"execute_ambiguous_mode": True})
+            task_id = task.id
+        calls = _count_executes(monkeypatch)
+        rig.start_pool()
+        try:
+            row = rig.wait_terminal(task_id, states=("verification_required",))
+        finally:
+            rig.stop_pool()
+        assert row.state == "verification_required"
+        assert row.error_code == "ambiguous_result"
+        assert row.dispatch_started_at is not None
+        assert row.finished_at is None
+        assert row.evidence is not None
+        assert row.evidence["execution"]["mode"] == "execute_ambiguous"
+        with db() as session:
+            assert len(calls) == 1
+            finishes = [a for a in _audit_rows(session, task_id) if a.action == "operation.finish"]
+            assert len(finishes) == 1 and finishes[0].result == "verification_required"
+            assert [e.event_type for e in _ui_event_rows(session, task_id)] == [
+                "operation.updated",
+                "operation.updated",
+            ]
+        # No auto-retry/replay: a second pool pass claims nothing and the
+        # device is never called again.
+        rig.start_pool()
+        try:
+            time.sleep(1.0)
+        finally:
+            rig.stop_pool()
+        assert len(calls) == 1
+        with db() as session:
+            row = session.get(OperationTask, task_id)
+            assert row is not None and row.state == "verification_required"
+            # DB-wide invariant: no failed row carries the ambiguity code.
+            corrupt = session.scalars(
+                select(OperationTask).where(
+                    OperationTask.state == "failed",
+                    OperationTask.error_code == "ambiguous_result",
+                )
+            ).all()
+            assert corrupt == []
+
     def test_adapter_timeout_after_fence_enters_verification_required(self, rig_env) -> None:
         rig, db = rig_env
         with db() as session:
