@@ -101,7 +101,7 @@ _PARTITION_TRANSFER_SQL = (
         END LOOP;
     END
     $$;
-    """
+    """  # noqa: S608 - interpolates only the WARDEN_APP_ROLE constant; identifiers go through format('%I')
 )
 
 
@@ -180,7 +180,7 @@ def upgrade() -> None:
             END IF;
         END
         $$;
-        """
+        """  # noqa: S608 - interpolates only the WARDEN_APP_ROLE constant; no user input
     )
 
 
@@ -219,5 +219,5 @@ def downgrade() -> None:
             END LOOP;
         END
         $$;
-        """
+        """  # noqa: S608 - interpolates only role-name constants; identifiers go through format('%I')
     )

@@ -138,7 +138,7 @@ def upgrade() -> None:
             END IF;
         END
         $$;
-        """
+        """  # noqa: S608 - interpolates only the WARDEN_APP_ROLE constant; no user input
     )
 
 

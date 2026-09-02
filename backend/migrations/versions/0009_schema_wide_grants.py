@@ -203,7 +203,7 @@ def upgrade() -> None:
             END LOOP;
         END
         $$;
-        """
+        """  # noqa: S608 - interpolates only the WARDEN_APP_ROLE constant; no user input
     )
 
 
@@ -215,4 +215,6 @@ def downgrade() -> None:
     # 0009 — a blanket sequence revoke is exact here.
     for table in _UNGRANTED_BEFORE_0009:
         op.execute(f"REVOKE SELECT, INSERT, UPDATE ON {table} FROM {WARDEN_APP_ROLE};")
-    op.execute(f"REVOKE USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public FROM {WARDEN_APP_ROLE};")
+    op.execute(
+        f"REVOKE USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public FROM {WARDEN_APP_ROLE};"  # noqa: S608 - interpolates only the WARDEN_APP_ROLE constant; no user input
+    )
