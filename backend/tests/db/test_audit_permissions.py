@@ -160,3 +160,21 @@ def test_warden_app_still_has_select_insert_update_on_other_tables(warden_app_ds
     privileges = _privileges_for_app(base_dsn, "users")
     assert {"SELECT", "INSERT", "UPDATE"} <= privileges
     assert "DELETE" not in privileges
+
+
+@pytest.mark.integration
+def test_warden_app_privilege_state_as_migration_verification_expects(warden_app_dsn: str) -> None:
+    """The has_*_privilege queries migration 0004's verification block runs
+    must report the expected state for warden_app: USAGE on schema public and
+    INSERT on audit_logs true, UPDATE on audit_logs false. If these queries
+    ever flip, the migration's RAISE WARNING fires and the broken account
+    becomes visible instead of failing silently at runtime."""
+    with psycopg.connect(warden_app_dsn) as connection:
+        schema_usage, audit_insert, audit_update = connection.execute(
+            "SELECT has_schema_privilege('warden_app', 'public', 'USAGE'), "
+            "has_table_privilege('warden_app', 'audit_logs', 'INSERT'), "
+            "has_table_privilege('warden_app', 'audit_logs', 'UPDATE')"
+        ).fetchone()
+    assert schema_usage is True
+    assert audit_insert is True
+    assert audit_update is False

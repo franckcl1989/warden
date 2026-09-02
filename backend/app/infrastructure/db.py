@@ -9,9 +9,13 @@ stays in one place.
 
 Account split (docs/SECURITY.md §11/§12, DEPLOYMENT.md §5): the application
 engine (API/worker) always uses the ``warden_app`` DSN — the least-privilege
-role that has NO UPDATE/DELETE on ``audit_logs`` (migration 0004). Migrations
-run with the separate ``warden_migrate`` account: the deployment migrate
-container overrides ``WARDEN_POSTGRES_DSN_FILE`` with the migrate DSN secret
+role that has NO UPDATE/DELETE on ``audit_logs``. Migration 0004 applies the
+table/sequence grants best-effort and warns when the expected privilege state
+is missing; the authoritative provisioning is the deployment init script
+(``deployment/postgres-init/01-accounts.sh``), which must run before the
+migrate container. Migrations run with the separate ``warden_migrate``
+account: the deployment migrate container overrides
+``WARDEN_POSTGRES_DSN_FILE`` with the migrate DSN secret
 (deployment/compose/compose.yaml), so schema changes never run as the app
 account.
 """
