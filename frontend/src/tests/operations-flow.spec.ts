@@ -292,4 +292,105 @@ describe('操作发起流程（PLT-05）', () => {
     expect(keys[1]).toBeTruthy();
     expect(wrapper.emitted('created')?.[0]?.[0]).toBe('task-2');
   });
+
+  it('preview_stale 提交失败后回到可重新生成状态，不陷入失效确认循环', async () => {
+    let previewCount = 0;
+    let submitCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes('/operation-previews')) {
+        previewCount += 1;
+        return jsonResponse(PREVIEW);
+      }
+      if (String(url).includes('/operations') && init?.method === 'POST') {
+        submitCount += 1;
+        if (submitCount === 1) {
+          return jsonResponse(
+            {
+              error: {
+                code: 'preview_stale',
+                message: '预览已失效',
+                details: {},
+                request_id: 'r-9',
+              },
+            },
+            409,
+          );
+        }
+        return jsonResponse(
+          {
+            id: 'task-9',
+            requirement_id: 'SRV-ACT-02',
+            capability_key: 'power.on',
+            risk_level: 'high',
+            state: 'queued',
+            device: { id: 'd-1', name: 'server-01' },
+            requested_by: { id: 'u-1', username: 'admin' },
+            progress_percent: 0,
+            current_step: null,
+            dispatch_started_at: null,
+            device_job_id: null,
+            timeout_at: null,
+            result_summary: null,
+            error_code: null,
+            error_detail: null,
+            verification_state: null,
+            started_at: null,
+            finished_at: null,
+            created_at: '2099-01-01T08:10:00Z',
+            updated_at: '2099-01-01T08:10:00Z',
+            version: 1,
+          },
+          202,
+        );
+      }
+      return jsonResponse({});
+    });
+    const { wrapper } = await mountDialog(fetchMock);
+    await wrapper.get('[data-testid="preview-generate"]').trigger('click');
+    await flushAll();
+    await wrapper.get('[data-testid="confirm-name-input"]').setValue('server-01');
+    await wrapper.get('[data-testid="confirm-submit"]').trigger('click');
+    await flushAll();
+    expect(submitCount).toBe(1);
+    expect(wrapper.find('[data-testid="flow-error"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain('预览已过期，请重新生成预览。');
+    // 旧预览已作废：此刻只允许重新生成或修改参数，不再出现"重新确认"
+    expect(wrapper.find('[data-testid="confirm-retry"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="regenerate-preview"]').trigger('click');
+    await flushAll();
+    expect(previewCount).toBe(2);
+    expect(wrapper.text()).toContain('服务器将从关机状态上电启动');
+    // 重新生成后是新预览：重新输入设备名后可以成功提交，循环被打破
+    await wrapper.get('[data-testid="confirm-name-input"]').setValue('server-01');
+    await wrapper.get('[data-testid="confirm-submit"]').trigger('click');
+    await flushAll();
+    expect(submitCount).toBe(2);
+    expect(wrapper.emitted('created')?.[0]?.[0]).toBe('task-9');
+  });
+
+  it('预览令牌在确认页过期时提交禁用，可直接重新生成预览', async () => {
+    let previewCount = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes('/operation-previews')) {
+        previewCount += 1;
+        if (previewCount === 1) {
+          return jsonResponse({ ...PREVIEW, expires_at: '2020-01-01T00:00:00Z' });
+        }
+        return jsonResponse(PREVIEW);
+      }
+      return jsonResponse({});
+    });
+    const { wrapper } = await mountDialog(fetchMock);
+    await wrapper.get('[data-testid="preview-generate"]').trigger('click');
+    await flushAll();
+    expect(wrapper.text()).toContain('（已过期，需重新生成）');
+    expect(wrapper.get('[data-testid="confirm-submit"]').attributes('disabled')).toBeDefined();
+    await wrapper.get('[data-testid="regenerate-preview"]').trigger('click');
+    await flushAll();
+    expect(previewCount).toBe(2);
+    // 新预览有效：填入设备名后提交按钮恢复可用
+    await wrapper.get('[data-testid="confirm-name-input"]').setValue('server-01');
+    await flushAll();
+    expect(wrapper.get('[data-testid="confirm-submit"]').attributes('disabled')).toBeUndefined();
+  });
 });

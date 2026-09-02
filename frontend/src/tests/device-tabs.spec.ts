@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { deviceTabsFor, monitoringRequirementIds } from '@/features/devices/deviceTabs';
+import {
+  OVERVIEW_MON_REQUIREMENTS,
+  deviceTabsFor,
+  monitoringRequirementIds,
+} from '@/features/devices/deviceTabs';
 
 /**
  * 设备详情页签结构（PRODUCT_DESIGN §5.2-5.5）：四类设备都含通用页签组，
@@ -35,6 +39,20 @@ describe('设备详情页签配置（PRODUCT_DESIGN §5）', () => {
       'components',
       'metric-groups',
     ]);
+  });
+
+  it('服务器概览承载 综合健康/温度摘要/资产与入侵 需求（PRODUCT_DESIGN §5.2）', () => {
+    const overview = deviceTabsFor('server').find((tab) => tab.id === 'overview');
+    const overviewIds = overview?.sections[0]?.requirementIds ?? [];
+    expect(overviewIds).toContain('SRV-MON-01');
+    expect(overviewIds).toContain('SRV-MON-02');
+    expect(overviewIds).toContain('SRV-MON-07');
+    expect(OVERVIEW_MON_REQUIREMENTS['server']).toEqual(expect.arrayContaining(overviewIds));
+    // 概览页签承载的温度需求与「温度与内存」页签一致，避免页签归属漂移
+    const tempMemory = deviceTabsFor('server').find((tab) => tab.id === 'temp-memory');
+    expect(
+      tempMemory?.sections.some((section) => section.requirementIds?.includes('SRV-MON-02')),
+    ).toBe(true);
   });
 
   it('群晖 NAS：磁盘/存储/任务与日志（PRODUCT_DESIGN §5.3）', () => {

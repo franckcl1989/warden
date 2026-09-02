@@ -94,6 +94,7 @@ function parseParamsJson(): Record<string, unknown> {
 async function createPreview(): Promise<void> {
   const parameters = parseParamsJson();
   if (paramsError.value !== null) {
+    phase.value = 'params';
     return;
   }
   phase.value = 'previewing';
@@ -137,13 +138,20 @@ async function confirmReauth(): Promise<void> {
   }
 }
 
+/** 预览失效：清空失效预览回到"可重新生成"状态，绝不让确认按钮再次提交失效令牌。 */
+function discardPreview(error: ApiError | null): void {
+  preview.value = null;
+  confirmationText.value = '';
+  flowError.value = error;
+  phase.value = 'error';
+}
+
 async function submitOperation(): Promise<void> {
   if (preview.value === null || !nameMatched.value) {
     return;
   }
   if (previewExpired.value) {
-    flowError.value = null;
-    phase.value = 'error';
+    discardPreview(null);
     return;
   }
   phase.value = 'submitting';
@@ -169,9 +177,8 @@ async function submitOperation(): Promise<void> {
       return;
     }
     if (error.code === 'preview_stale') {
-      // 令牌过期/参数变化：回到参数页重新预览（单次使用令牌已被消费）
-      flowError.value = error;
-      phase.value = 'error';
+      // 令牌过期/参数变化：清空失效预览，用户从错误页直接重新生成（单次使用令牌已被消费）
+      discardPreview(error);
       return;
     }
     flowError.value = error;
@@ -179,12 +186,24 @@ async function submitOperation(): Promise<void> {
   }
 }
 
+/** 错误页"重新生成预览"：保留已填参数，立即发起新预览。 */
+function regeneratePreview(): void {
+  preview.value = null;
+  confirmationText.value = '';
+  flowError.value = null;
+  void createPreview();
+}
+
+function editParamsAfterError(): void {
+  flowError.value = null;
+  phase.value = 'params';
+}
+
+/** 预览仍有效但提交失败（如瞬时网络错误）：回到预览页让用户重新确认。 */
 function retryAfterError(): void {
   if (preview.value !== null) {
     phase.value = 'preview';
-    return;
   }
-  phase.value = 'params';
 }
 
 function paramEntries(): [string, unknown][] {
@@ -328,9 +347,14 @@ onMounted(() => {
       </template>
 
       <template v-if="phase === 'error'">
-        <p v-if="previewExpired" class="operation-flow__hint">预览令牌已过期，请重新生成预览。</p>
+        <p
+          v-if="flowError === null || flowError.code === 'preview_stale'"
+          class="operation-flow__expired-notice"
+          data-testid="preview-expired-notice"
+        >
+          预览已过期，请重新生成预览。
+        </p>
         <ErrorDetail v-if="flowError" :error="flowError" data-testid="flow-error" />
-        <p v-else class="operation-flow__hint">预览已失效，请重新生成预览。</p>
       </template>
     </div>
 
@@ -354,6 +378,14 @@ onMounted(() => {
         确认并提交任务
       </el-button>
       <el-button
+        v-if="phase === 'preview' && previewExpired"
+        plain
+        data-testid="regenerate-preview"
+        @click="regeneratePreview"
+      >
+        重新生成预览
+      </el-button>
+      <el-button
         v-if="phase === 'reauth'"
         type="primary"
         :disabled="reauthPassword.trim() === '' || reauthBusy"
@@ -362,9 +394,27 @@ onMounted(() => {
       >
         验证并继续
       </el-button>
-      <el-button v-if="phase === 'error'" type="primary" @click="retryAfterError">
-        {{ previewExpired || preview === null ? '重新生成预览' : '重新确认' }}
-      </el-button>
+      <template v-if="phase === 'error'">
+        <el-button
+          v-if="preview !== null"
+          type="primary"
+          data-testid="confirm-retry"
+          @click="retryAfterError"
+        >
+          重新确认
+        </el-button>
+        <el-button v-else data-testid="edit-params-after-error" @click="editParamsAfterError">
+          修改参数
+        </el-button>
+        <el-button
+          v-if="preview === null"
+          type="primary"
+          data-testid="regenerate-preview"
+          @click="regeneratePreview"
+        >
+          重新生成预览
+        </el-button>
+      </template>
     </template>
   </el-dialog>
 </template>
@@ -414,6 +464,11 @@ onMounted(() => {
 }
 .operation-flow__expired-text {
   color: var(--warden-status-critical);
+}
+.operation-flow__expired-notice {
+  color: var(--warden-status-critical);
+  font-size: 13px;
+  margin: 4px 0;
 }
 .operation-flow__error {
   color: var(--warden-status-critical);

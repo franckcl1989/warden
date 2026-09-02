@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElButton, ElInput, ElOption, ElSelect, ElTable, ElTableColumn } from 'element-plus';
-import { onMounted, reactive, ref } from 'vue';
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
 import AsyncState from '@/components/AsyncState.vue';
@@ -13,6 +13,7 @@ import type { DeviceListResponse, DeviceView } from '@/api/types';
 import { DEVICE_TYPES } from '@/api/generated/contracts';
 import { DEVICE_TYPE_LABELS, HEALTH_LABELS, REACHABILITY_LABELS, label } from '@/lib/labels';
 import { formatDateTime } from '@/lib/format';
+import { registerCacheEntry } from '@/lib/query-cache';
 import { useAuthStore } from '@/stores/auth';
 
 // 设备列表（PLT-02，PRODUCT_DESIGN §4.1）。筛选与排序全部由服务端完成。
@@ -61,15 +62,20 @@ function queryString(): string {
   return params.toString();
 }
 
-async function load(): Promise<void> {
-  state.value = 'loading';
+async function load(silent = false): Promise<void> {
+  if (!silent) {
+    state.value = 'loading';
+  }
   error.value = null;
   try {
-    list.value = await request<DeviceListResponse>(`/devices?${queryString()}`);
-    state.value = list.value.total === 0 ? 'empty' : 'ready';
+    const result = await request<DeviceListResponse>(`/devices?${queryString()}`);
+    list.value = result;
+    state.value = result.total === 0 ? 'empty' : 'ready';
   } catch (caught) {
     error.value = caught as ApiError;
-    state.value = error.value.code === 'permission_denied' ? 'permission_denied' : 'error';
+    if (!silent) {
+      state.value = error.value.code === 'permission_denied' ? 'permission_denied' : 'error';
+    }
   }
 }
 
@@ -139,8 +145,17 @@ function onEmptyAction(): void {
   }
 }
 
+let unregisterCache: (() => void) | null = null;
+
 onMounted(() => {
   void load();
+  // SSE device.updated → 静默重取列表（UI_SPEC §11：局部刷新不清空旧数据）
+  unregisterCache = registerCacheEntry({ kind: 'devices', refetch: () => void load(true) });
+});
+
+onBeforeUnmount(() => {
+  unregisterCache?.();
+  unregisterCache = null;
 });
 </script>
 

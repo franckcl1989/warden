@@ -19,14 +19,27 @@ import SeverityBadge from '@/components/SeverityBadge.vue';
 import type { ApiError } from '@/api/client';
 import { request } from '@/api/client';
 import type { AlertDetailItem, AlertListItem, AlertsListResponse } from '@/api/types';
+import { ENUM_SETS } from '@/api/generated/contracts';
 import { formatDateTime } from '@/lib/format';
-import { label, DEVICE_TYPE_LABELS, ALERT_STATUS_LABELS } from '@/lib/labels';
+import {
+  ALERT_SEVERITY_LABELS,
+  ALERT_STATUS_LABELS,
+  DEVICE_TYPE_LABELS,
+  label,
+} from '@/lib/labels';
 import { registerCacheEntry } from '@/lib/query-cache';
 
 // 当前问题页（PLT-04，PRODUCT_DESIGN §6.4）：未恢复/已恢复切换 + 筛选；
 // 行 → 详情抽屉（证据 + 时间线）。当前问题由引擎状态/离线/过期产生。
 const route = useRoute();
 const router = useRouter();
+
+// 严重级别筛选项：取自契约 alarm_state 枚举中"会成为当前问题"的级别
+// （引擎只对 warning/critical 开盘，与后端 alerts 路由校验一致），
+// 中文文案由 ALERT_SEVERITY_LABELS 提供，未知值原样显示。
+const SEVERITY_OPTIONS: string[] = (ENUM_SETS['alarm_state'] as readonly string[]).filter((value) =>
+  Object.prototype.hasOwnProperty.call(ALERT_SEVERITY_LABELS, value),
+);
 
 const status = ref<string>(
   typeof route.query['status'] === 'string' ? String(route.query['status']) : 'active',
@@ -222,8 +235,12 @@ onBeforeUnmount(() => {
         data-testid="filter-severity"
         @change="onSeverityChange"
       >
-        <el-option value="critical" label="严重" />
-        <el-option value="warning" label="警告" />
+        <el-option
+          v-for="severity in SEVERITY_OPTIONS"
+          :key="severity"
+          :value="severity"
+          :label="label(ALERT_SEVERITY_LABELS, severity)"
+        />
       </el-select>
       <el-input
         v-model="ruleFilter"

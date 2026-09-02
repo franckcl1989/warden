@@ -271,6 +271,9 @@ async function finishUpload(
 }
 
 // ---------- 删除 ----------
+// 列表载荷的 links 只含引用关系（FileLinkView：id/device_id/task_id/purpose，
+// 无任务运行状态），无法在本地判断"被运行中任务引用"；因此删除按钮不做本地
+// 禁用猜测，由服务端 409 device_busy 兜底并在提示后刷新（files_delete 契约）。
 async function deleteFile(row: FileView): Promise<void> {
   try {
     await ElMessageBox.confirm(

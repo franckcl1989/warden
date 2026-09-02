@@ -1,11 +1,14 @@
 import { createPinia, setActivePinia } from 'pinia';
-import { mount } from '@vue/test-utils';
+import { enableAutoUnmount, mount } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryHistory } from 'vue-router';
 
 import DevicesListView from '@/features/devices/DevicesListView.vue';
 import { createAppRouter } from '@/router';
+import { useRealtimeStore } from '@/stores/realtime';
 import { useAuthStore } from '@/stores/auth';
+
+enableAutoUnmount(afterEach);
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -65,13 +68,14 @@ function seedAdmin() {
 }
 
 async function mountList() {
-  setActivePinia(createPinia());
+  const pinia = createPinia();
+  setActivePinia(pinia);
   seedAdmin();
   const router = createAppRouter(createMemoryHistory());
   await router.push('/devices');
   await router.isReady();
   const wrapper = mount(DevicesListView, {
-    global: { plugins: [createPinia(), router] },
+    global: { plugins: [pinia, router] },
   });
   await flushAll();
   return { wrapper, router };
@@ -170,5 +174,54 @@ describe('设备列表（PLT-02）', () => {
     );
     const { wrapper } = await mountList();
     expect(wrapper.text()).toContain('无权限查看该页面');
+  });
+
+  it('device.updated 事件触发列表静默重取（SSE → 查询缓存注册链路）', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/devices?')) {
+        return jsonResponse(listResponse([deviceRow('d-1', 'server-01')], 1));
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    class FakeEventSource {
+      static instances: FakeEventSource[] = [];
+      listeners = new Map<string, ((event: MessageEvent) => void)[]>();
+      closed = false;
+      constructor(url: string) {
+        void url;
+        FakeEventSource.instances.push(this);
+      }
+      addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+        const list = this.listeners.get(type) ?? [];
+        list.push(listener);
+        this.listeners.set(type, list);
+      }
+      close(): void {
+        this.closed = true;
+        this.listeners.clear();
+      }
+      fire(type: string, data: string): void {
+        for (const listener of this.listeners.get(type) ?? []) {
+          listener({ data, type } as MessageEvent);
+        }
+      }
+    }
+    vi.stubGlobal('EventSource', FakeEventSource);
+    FakeEventSource.instances = [];
+    const { wrapper } = await mountList();
+    const listCalls = () =>
+      fetchMock.mock.calls.filter((call) => String(call[0]).includes('/devices?'));
+    expect(listCalls()).toHaveLength(1);
+    const realtime = useRealtimeStore();
+    realtime.start();
+    const source = FakeEventSource.instances[0];
+    expect(source).toBeDefined();
+    source?.fire('device.updated', JSON.stringify({ entity_id: 'd-1', version: 2 }));
+    await flushAll();
+    expect(listCalls().length).toBeGreaterThanOrEqual(2);
+    expect(wrapper.text()).toContain('server-01');
+    realtime.stop();
   });
 });

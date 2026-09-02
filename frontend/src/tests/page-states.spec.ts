@@ -292,6 +292,74 @@ describe('audit 页（PLT-07）', () => {
   });
 });
 
+describe('audit 页 URL query 筛选同步（UI_SPEC §2）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function auditFetchMock() {
+    return vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/audit-logs?')) {
+        return jsonResponse({ items: [], page: 1, page_size: 20, total: 0 });
+      }
+      if (u.includes('/users?')) {
+        return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+      }
+      if (u.includes('/devices?')) {
+        return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+      }
+      return jsonResponse({});
+    });
+  }
+
+  it('资源类型筛选变更写入 URL query 并以该参数重取', async () => {
+    const fetchMock = auditFetchMock();
+    const { wrapper, router } = await mountPage(AuditView, '/audit', fetchMock);
+    const resourceSelect = wrapper
+      .get('[data-testid="filter-resource"]')
+      .findComponent({ name: 'ElSelect' });
+    await resourceSelect.vm.$emit('update:modelValue', 'operation');
+    await resourceSelect.vm.$emit('change', 'operation');
+    await flushAll();
+    expect(router.currentRoute.value.query['resource_type']).toBe('operation');
+    const url = String(fetchMock.mock.calls.at(-1)?.[0] ?? '');
+    expect(new URLSearchParams(url.split('?')[1] ?? '').get('resource_type')).toBe('operation');
+  });
+
+  it('动作前缀筛选写入 URL query', async () => {
+    const fetchMock = auditFetchMock();
+    const { wrapper, router } = await mountPage(AuditView, '/audit', fetchMock);
+    await wrapper.get('input[data-testid="filter-action"]').setValue('device.');
+    await wrapper.get('input[data-testid="filter-action"]').trigger('keyup.enter');
+    await flushAll();
+    expect(router.currentRoute.value.query['action']).toBe('device.');
+    const url = String(fetchMock.mock.calls.at(-1)?.[0] ?? '');
+    expect(new URLSearchParams(url.split('?')[1] ?? '').get('action')).toBe('device.');
+  });
+
+  it('带筛选的 URL 深链进入时直接以 query 参数请求', async () => {
+    const fetchMock = auditFetchMock();
+    await mountPage(AuditView, '/audit?resource_type=file&action=auth.', fetchMock);
+    const auditCall = fetchMock.mock.calls.find((call) =>
+      String(call[0]).includes('/audit-logs?'),
+    ) as unknown as [string] | undefined;
+    const query = new URLSearchParams(String(auditCall?.[0] ?? '').split('?')[1] ?? '');
+    expect(query.get('resource_type')).toBe('file');
+    expect(query.get('action')).toBe('auth.');
+  });
+
+  it('清除筛选移除全部筛选 query 参数', async () => {
+    const fetchMock = auditFetchMock();
+    const { wrapper, router } = await mountPage(AuditView, '/audit?resource_type=file', fetchMock);
+    await wrapper.get('[data-testid="filter-reset"]').trigger('click');
+    await flushAll();
+    expect(router.currentRoute.value.query['resource_type']).toBeUndefined();
+    const url = String(fetchMock.mock.calls.at(-1)?.[0] ?? '');
+    expect(new URLSearchParams(url.split('?')[1] ?? '').has('resource_type')).toBe(false);
+  });
+});
+
 describe('files 页上传向导（PLT-06）', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

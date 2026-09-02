@@ -69,8 +69,10 @@ function tabFromQuery(): string | null {
   return typeof query === 'string' && query !== '' ? query : null;
 }
 
-async function loadAll(): Promise<void> {
-  state.value = 'loading';
+async function loadAll(silent = false): Promise<void> {
+  if (!silent) {
+    state.value = 'loading';
+  }
   error.value = null;
   try {
     const [deviceResult, capabilitiesResult] = await Promise.all([
@@ -86,12 +88,14 @@ async function loadAll(): Promise<void> {
     state.value = 'ready';
   } catch (caught) {
     error.value = caught as ApiError;
-    if (error.value.code === 'permission_denied') {
-      state.value = 'permission_denied';
-    } else if (error.value.code === 'resource_not_found') {
-      state.value = 'not_found';
-    } else {
-      state.value = 'error';
+    if (!silent) {
+      if (error.value.code === 'permission_denied') {
+        state.value = 'permission_denied';
+      } else if (error.value.code === 'resource_not_found') {
+        state.value = 'not_found';
+      } else {
+        state.value = 'error';
+      }
     }
   }
 }
@@ -104,7 +108,8 @@ function onTabChange(tabName: string | number): void {
   void router.replace({ query: { ...route.query, tab: name } });
 }
 
-// SSE：device.updated → 重取设备与能力（实时层按 device-detail + id 失效）
+// SSE：device.updated → 静默重取设备与能力（UI_SPEC §11 局部刷新不清空旧数据；
+// 不置全页 loading，避免骨架屏闪烁与页签重挂载）
 let unregisterCache: (() => void) | null = null;
 
 watch(
@@ -114,7 +119,7 @@ watch(
       unregisterCache = registerCacheEntry({
         kind: 'device-detail',
         id: deviceId.value,
-        refetch: () => void loadAll(),
+        refetch: () => void loadAll(true),
       });
     }
   },

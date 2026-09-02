@@ -8,7 +8,8 @@ import {
   ElTable,
   ElTableColumn,
 } from 'element-plus';
-import { onMounted, ref } from 'vue';
+import { onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
 import AsyncState from '@/components/AsyncState.vue';
 import PaginationBar from '@/components/PaginationBar.vue';
@@ -25,21 +26,40 @@ import { formatDateTime } from '@/lib/format';
 
 // 审计页（PLT-07，管理员）：筛选（操作者/动作前缀/资源/设备/时间段）+
 // 详情对话框展示脱敏 detail_jsonb。只读，无删除/导出。
+// 页面级筛选写入 URL query（UI_SPEC §2）：本地变更 → pushQuery → 路由变化 →
+// 统一重取；浏览器前进/后退也走同一条路径。
+const route = useRoute();
+const router = useRouter();
+
 const state = ref<'loading' | 'ready' | 'empty' | 'error' | 'permission_denied'>('loading');
 const error = ref<ApiError | null>(null);
 const response = ref<AuditLogListResponse | null>(null);
 
 const actorOptions = ref<{ id: string; username: string }[]>([]);
 const deviceOptions = ref<{ id: string; name: string }[]>([]);
-const actorFilter = ref<string | null>(null);
-const actionFilter = ref<string>('');
-const resourceTypeFilter = ref<string | null>(null);
-const deviceFilter = ref<string>('');
-const fromFilter = ref('');
-const toFilter = ref('');
+const actorFilter = ref<string | null>(
+  typeof route.query['actor_user_id'] === 'string' ? String(route.query['actor_user_id']) : null,
+);
+const actionFilter = ref<string>(
+  typeof route.query['action'] === 'string' ? String(route.query['action']) : '',
+);
+const resourceTypeFilter = ref<string | null>(
+  typeof route.query['resource_type'] === 'string' ? String(route.query['resource_type']) : null,
+);
+const deviceFilter = ref<string>(
+  typeof route.query['device_id'] === 'string' ? String(route.query['device_id']) : '',
+);
+const fromFilter = ref<string>(
+  typeof route.query['from'] === 'string' ? String(route.query['from']) : '',
+);
+const toFilter = ref<string>(
+  typeof route.query['to'] === 'string' ? String(route.query['to']) : '',
+);
 const page = ref(1);
 const pageSize = ref(20);
 
+// 审计资源类型来自后端审计动作词表（device/user/session/operation/file/audit/system）；
+// 生成的 contracts 没有资源类型枚举，这里保持本地常量并只列出后端 0.1.0 会产生的类型。
 const RESOURCE_OPTIONS = ['device', 'user', 'session', 'operation', 'file', 'audit', 'system'];
 
 const detailOpen = ref(false);
@@ -49,9 +69,37 @@ const detailState = ref<'loading' | 'ready' | 'error' | 'permission_denied' | 'n
 const detailError = ref<ApiError | null>(null);
 const detail = ref<AuditLogDetailItem | null>(null);
 
+function pushQuery(): void {
+  const query = { ...route.query } as Record<string, string | null>;
+  for (const [key, value] of [
+    ['actor_user_id', actorFilter.value],
+    ['action', actionFilter.value.trim() === '' ? null : actionFilter.value.trim()],
+    ['resource_type', resourceTypeFilter.value],
+    ['device_id', deviceFilter.value.trim() === '' ? null : deviceFilter.value.trim()],
+    ['from', fromFilter.value === '' ? null : fromFilter.value],
+    ['to', toFilter.value === '' ? null : toFilter.value],
+  ] as const) {
+    if (value !== null && value !== undefined) {
+      query[key] = value;
+    } else {
+      delete query[key];
+    }
+  }
+  const entriesEqual = (a: Record<string, unknown>, b: Record<string, unknown>): boolean => {
+    const sorted = (record: Record<string, unknown>): string =>
+      JSON.stringify(Object.entries(record).sort(([x], [y]) => x.localeCompare(y)));
+    return sorted(a) === sorted(b);
+  };
+  if (entriesEqual(query, route.query as Record<string, unknown>)) {
+    void load();
+    return;
+  }
+  void router.replace({ query });
+}
+
 function applyFilters(): void {
   page.value = 1;
-  void load();
+  pushQuery();
 }
 
 function clearFilters(): void {
@@ -62,7 +110,7 @@ function clearFilters(): void {
   fromFilter.value = '';
   toFilter.value = '';
   page.value = 1;
-  void load();
+  pushQuery();
 }
 
 async function load(): Promise<void> {
@@ -163,6 +211,28 @@ async function loadOptions(): Promise<void> {
     // 选项加载失败不阻塞审计列表本身
   }
 }
+
+// URL query → 本地筛选状态 → 重取：覆盖自身 pushQuery 的导航与浏览器前进/后退
+watch(
+  () =>
+    [
+      route.query['actor_user_id'],
+      route.query['action'],
+      route.query['resource_type'],
+      route.query['device_id'],
+      route.query['from'],
+      route.query['to'],
+    ] as const,
+  ([nextActor, nextAction, nextResource, nextDevice, nextFrom, nextTo]) => {
+    actorFilter.value = typeof nextActor === 'string' ? nextActor : null;
+    actionFilter.value = typeof nextAction === 'string' ? nextAction : '';
+    resourceTypeFilter.value = typeof nextResource === 'string' ? nextResource : null;
+    deviceFilter.value = typeof nextDevice === 'string' ? nextDevice : '';
+    fromFilter.value = typeof nextFrom === 'string' ? nextFrom : '';
+    toFilter.value = typeof nextTo === 'string' ? nextTo : '';
+    void load();
+  },
+);
 
 onMounted(() => {
   void load();

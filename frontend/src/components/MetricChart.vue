@@ -14,7 +14,7 @@ import type { ApiError } from '@/api/client';
 import { request } from '@/api/client';
 import type { ComponentRef, DeviceMetricsSeriesResponse } from '@/api/types';
 import { METRIC_META, type MetricKey } from '@/api/generated/contracts';
-import { label as lookupLabel, RESOLUTION_LABELS } from '@/lib/labels';
+import { ENUM_VALUE_LABELS, label as lookupLabel, RESOLUTION_LABELS } from '@/lib/labels';
 import { formatAxisNumber, formatDateTime, formatMetricValue, unitLabel } from '@/lib/format';
 
 /**
@@ -66,6 +66,9 @@ const resolutionLabel = ref<string>('');
 const unitText = ref<string>('');
 const stateValues = ref<string[]>([]);
 const seriesResponses = ref<DeviceMetricsSeriesResponse[]>([]);
+
+// 请求序列号：范围/序列切换后，较早的慢响应不得覆盖较新的结果
+let requestSeq = 0;
 
 const meta = computed(() => METRIC_META[props.metricKey]);
 const isStateSeries = computed(() => meta.value?.series === 'state');
@@ -151,6 +154,7 @@ function rangeTo(): string {
 }
 
 async function loadSeries(): Promise<void> {
+  const seq = ++requestSeq;
   state.value = 'loading';
   error.value = null;
   seriesResponses.value = [];
@@ -171,6 +175,9 @@ async function loadSeries(): Promise<void> {
   }
   try {
     const results = await Promise.all(requests);
+    if (seq !== requestSeq) {
+      return; // 已有更新的请求：丢弃过期响应，避免旧数据覆盖新选择
+    }
     seriesResponses.value = results;
     if (results.length === 0 || results.every((result) => result.points.length === 0)) {
       state.value = 'empty';
@@ -197,6 +204,9 @@ async function loadSeries(): Promise<void> {
     await nextTick();
     renderChart();
   } catch (caught) {
+    if (seq !== requestSeq) {
+      return;
+    }
     error.value = caught as ApiError;
     state.value = 'error';
   }
@@ -301,28 +311,8 @@ function stateOption(pointsBySeries: DeviceMetricsSeriesResponse[]): echarts.ECh
   };
 }
 
-const ENUM_VALUE_LABELS_FALLBACK: Record<string, string> = {
-  unknown: '未知',
-  healthy: '健康',
-  warning: '警告',
-  critical: '严重',
-  ok: '正常',
-  normal: '正常',
-  optimal: '正常',
-  degraded: '降级',
-  rebuilding: '重建中',
-  failed: '故障',
-  passed: '通过',
-  present: '在位',
-  absent: '不在位',
-  detected: '已检测',
-  off: '关闭',
-  on: '开启',
-  identify: '定位中',
-};
-
 function enumDisplay(value: string): string {
-  return lookupLabel(ENUM_VALUE_LABELS_FALLBACK, value);
+  return lookupLabel(ENUM_VALUE_LABELS, value);
 }
 
 function renderChart(): void {
@@ -351,24 +341,41 @@ function renderChart(): void {
 
 function buildTextSummary(): void {
   const parts: string[] = [];
-  for (const result of seriesResponses.value) {
+  seriesResponses.value.forEach((result, index) => {
+    const seriesLabel = scopeDevice.value ? props.metricKey : seriesNameFor(index);
+    if (isStateSeries.value) {
+      // 状态/枚举系列不做数值最值统计：摘要展示当前状态与观测到的状态集合
+      const statePoints = result.points.filter(
+        (point): point is { timestamp: string; value: string; quality: string } =>
+          typeof point.value === 'string' && point.value !== '',
+      );
+      if (statePoints.length === 0) {
+        parts.push(`${seriesLabel}：尚无状态观测点`);
+        return;
+      }
+      const last = statePoints[statePoints.length - 1]!.value;
+      const seen = [...new Set(statePoints.map((point) => point.value))];
+      parts.push(
+        `${seriesLabel}：当前 ${enumDisplay(last)}；观测状态：${seen
+          .map((value) => enumDisplay(value))
+          .join('、')}`,
+      );
+      return;
+    }
     const numbers = result.points
       .map((point) => point.value)
       .filter((value): value is number => typeof value === 'number');
-    const label = scopeDevice.value
-      ? props.metricKey
-      : seriesNameFor(seriesResponses.value.indexOf(result));
     if (numbers.length === 0) {
-      parts.push(`${label}：无数值点`);
-      continue;
+      parts.push(`${seriesLabel}：无可用数值点`);
+      return;
     }
     const max = Math.max(...numbers);
     const min = Math.min(...numbers);
     const last = numbers[numbers.length - 1]!;
     parts.push(
-      `${label}：当前 ${formatMetricValue(last)}，最高 ${formatMetricValue(max)}，最低 ${formatMetricValue(min)}${unitText.value ? ` ${unitText.value}` : ''}`,
+      `${seriesLabel}：当前 ${formatMetricValue(last)}，最高 ${formatMetricValue(max)}，最低 ${formatMetricValue(min)}${unitText.value ? ` ${unitText.value}` : ''}`,
     );
-  }
+  });
   chartTextSummary.value = parts.join('；');
   const all = seriesResponses.value.flatMap((result) =>
     result.points.map(

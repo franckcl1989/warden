@@ -30,7 +30,8 @@ export interface DeviceTabDef {
 
 /** 概览页签承载的"状态摘要"MON 需求（PRODUCT_DESIGN 各类概览内容）。 */
 export const OVERVIEW_MON_REQUIREMENTS: Record<string, string[]> = {
-  server: ['SRV-MON-01', 'SRV-MON-07'],
+  // §5.2 服务器概览：综合健康(SRV-MON-01) + 温度摘要(SRV-MON-02) + 资产/入侵与告警灯(SRV-MON-07)
+  server: ['SRV-MON-01', 'SRV-MON-02', 'SRV-MON-07'],
   synology_nas: ['NAS-MON-03', 'NAS-MON-05', 'NAS-MON-06'],
   core_switch: ['CORE-MON-01', 'CORE-MON-04'],
   access_switch: ['ACCESS-MON-01', 'ACCESS-MON-04'],

@@ -172,4 +172,85 @@ describe('MetricChart（UI_SPEC §7.3）', () => {
       '该时间范围内没有可绘制的数据点',
     );
   });
+
+  it('较早的慢响应不会覆盖较新的请求结果（请求序列化）', async () => {
+    const resolvers: ((response: Response) => void)[] = [];
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const wrapper = mount(MetricChart, {
+      props: {
+        deviceId: 'd-1',
+        metricKey: 'temperature.cpu',
+        candidateComponents: components(1),
+      },
+    });
+    await flushAll();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const range = wrapper
+      .get('[data-testid="chart-range"]')
+      .findComponent({ name: 'ElRadioGroup' });
+    await range.vm.$emit('update:modelValue', 6);
+    await flushAll();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 新请求（6 小时范围）先返回
+    resolvers[1]!(
+      jsonResponse(
+        seriesResponse({
+          points: [{ timestamp: '2026-09-01T08:00:00Z', value: 58.9, quality: 'good' }],
+        }),
+      ),
+    );
+    await flushAll();
+    // 旧请求（24 小时范围）随后才返回：不得覆盖新结果
+    resolvers[0]!(
+      jsonResponse(
+        seriesResponse({
+          points: [{ timestamp: '2026-09-01T08:00:00Z', value: 41.5, quality: 'good' }],
+        }),
+      ),
+    );
+    await flushAll();
+    const summary = wrapper.get('[data-testid="chart-summary"]');
+    expect(summary.text()).toContain('当前 58.9');
+    expect(summary.text()).not.toContain('当前 41.5');
+  });
+
+  it('状态/枚举系列文本摘要展示状态标签，不做数值统计', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          seriesResponse({
+            metric_key: 'fan.status',
+            series: 'state',
+            value_type: 'enum',
+            unit: null,
+            points: [
+              { timestamp: '2026-09-01T08:00:00Z', value: 'ok', quality: 'good' },
+              { timestamp: '2026-09-01T08:01:00Z', value: null, quality: 'partial' },
+              { timestamp: '2026-09-01T08:02:00Z', value: 'warning', quality: 'good' },
+            ],
+          }),
+        ),
+      ),
+    );
+    const wrapper = mount(MetricChart, {
+      props: {
+        deviceId: 'd-1',
+        metricKey: 'fan.status',
+        candidateComponents: components(1),
+      },
+    });
+    await flushAll();
+    const summary = wrapper.get('[data-testid="chart-summary"]');
+    expect(summary.text()).toContain('当前 警告');
+    expect(summary.text()).toContain('观测状态：正常、警告');
+    expect(summary.text()).not.toContain('无数值点');
+    expect(summary.text()).not.toContain('最高');
+  });
 });
