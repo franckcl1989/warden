@@ -38,7 +38,12 @@ from dataclasses import asdict, dataclass
 import structlog
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.application.maintenance import enforce_retention, ensure_partitions, generate_rollups
+from app.application.maintenance import (
+    enforce_file_retention,
+    enforce_retention,
+    ensure_partitions,
+    generate_rollups,
+)
 from app.config import WardenSettings, get_settings
 from app.domain.operation import (
     RecoveryAction,
@@ -48,6 +53,8 @@ from app.domain.operation import (
     timeout_transition,
 )
 from app.generated.operations import OPERATION_PROFILES
+from app.infrastructure.audit import AuditLogger
+from app.infrastructure.files import FileStorage
 from app.infrastructure.tasks import (
     append_event,
     clear_lease,
@@ -102,6 +109,15 @@ class MaintenanceReport:
     sessions_deleted: int = 0
     audit_skipped_append_only: bool = False
     partitions_created: int = 0
+    # M2T5 file retention counters (0 when the pass skipped a cadence or no
+    # file storage is configured for the loop).
+    file_retention_storage_unavailable: bool = False
+    support_bundles_deleted: int = 0
+    operation_logs_deleted: int = 0
+    config_backups_deleted: int = 0
+    abandoned_uploads_deleted: int = 0
+    tickets_deleted: int = 0
+    physical_files_removed: int = 0
 
     def as_dict(self) -> dict[str, int | bool]:
         return asdict(self)
@@ -118,6 +134,8 @@ class MaintenanceLoop:
         rollup_cadence_seconds: float = ROLLUP_CADENCE_SECONDS,
         retention_cadence_seconds: float = RETENTION_CADENCE_SECONDS,
         settings: WardenSettings | None = None,
+        file_storage: FileStorage | None = None,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._tick_seconds = tick_seconds
@@ -125,6 +143,11 @@ class MaintenanceLoop:
         self._log = structlog.get_logger()
         self._rollup_cadence = rollup_cadence_seconds
         self._retention_cadence = retention_cadence_seconds
+        # M2T5: file-layer retention (logical aging, physical cleanup, ticket
+        # purge) needs the volume; audit rows for cleanup go through the
+        # app-level logger (its own transaction) when provided.
+        self._file_storage = file_storage
+        self._audit_logger = audit_logger
         # None => due: the first pass of a fresh loop (and the --once smoke)
         # runs the full maintenance job set.
         self._next_rollup_at: datetime.datetime | None = None
@@ -170,6 +193,13 @@ class MaintenanceLoop:
                         rollup_rows_1h=report.rollup_rows_1h,
                         partitions_dropped=report.partitions_dropped,
                         partitions_created=report.partitions_created,
+                        file_retention_storage_unavailable=report.file_retention_storage_unavailable,
+                        support_bundles_deleted=report.support_bundles_deleted,
+                        operation_logs_deleted=report.operation_logs_deleted,
+                        config_backups_deleted=report.config_backups_deleted,
+                        abandoned_uploads_deleted=report.abandoned_uploads_deleted,
+                        tickets_deleted=report.tickets_deleted,
+                        physical_files_removed=report.physical_files_removed,
                     )
             except Exception:
                 self._log.exception("maintenance_pass_failed")
@@ -207,6 +237,21 @@ class MaintenanceLoop:
         report.sessions_deleted = retention_report.sessions_deleted
         report.audit_skipped_append_only = retention_report.audit_skipped_append_only
         report.partitions_created = ensure_partitions(session, now=now)
+        if self._file_storage is not None:
+            file_report = enforce_file_retention(
+                session,
+                now=now,
+                settings=self._settings,
+                storage=self._file_storage,
+                audit=self._audit_logger,
+            )
+            report.file_retention_storage_unavailable = file_report.storage_unavailable
+            report.support_bundles_deleted = file_report.support_bundles_deleted
+            report.operation_logs_deleted = file_report.operation_logs_deleted
+            report.config_backups_deleted = file_report.config_backups_deleted
+            report.abandoned_uploads_deleted = file_report.abandoned_uploads_deleted
+            report.tickets_deleted = file_report.tickets_deleted
+            report.physical_files_removed = file_report.physical_files_removed
         self._next_retention_at = now + datetime.timedelta(seconds=self._retention_cadence)
 
     def _recover_one(self, task_id: object, report: MaintenanceReport) -> None:

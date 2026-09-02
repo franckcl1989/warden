@@ -38,6 +38,13 @@ PURGEABLE_TABLES = (
     "operation_tasks",
     "ui_events",
     "sessions",
+    # M2T5 (0011): the file layer's purgeable tables are owned by warden_app
+    # — the sweep UPDATEs files rows (30d aging / config-backup prune /
+    # abandoned-upload close-out) and DELETEs expired ticket rows, all via
+    # ownership exactly like the 0010 ledger.
+    "files",
+    "file_links",
+    "device_file_tickets",
 )
 APPEND_ONLY_TABLES = ("audit_logs", "operation_task_events")
 

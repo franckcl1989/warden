@@ -88,6 +88,11 @@ class WardenSettings(BaseSettings):
     max_firmware_bytes: int = Field(default=10 * 1024**3)
     max_virtual_media_bytes: int = Field(default=50 * 1024**3)
 
+    # Controlled file store root (docs/ARCHITECTURE.md §3.6, SECURITY.md §9):
+    # dev/test default lives under the repo (gitignored .warden-data);
+    # production mounts a persistent volume and sets WARDEN_FILE_STORE_ROOT.
+    file_store_root: Path = Field(default=Path(".warden-data/files"))
+
     # Ingress listeners (event-ingest)
     syslog_udp_port: int = Field(default=1514, ge=1, le=65535)
     syslog_tcp_port: int = Field(default=1514, ge=1, le=65535)
@@ -147,6 +152,19 @@ class WardenSettings(BaseSettings):
     @property
     def allowed_device_networks(self) -> list[str]:
         return [item.strip() for item in self.allowed_device_cidrs.split(",") if item.strip()]
+
+    @property
+    def resolved_file_store_root(self) -> Path:
+        """Absolute file-store root: relative values anchor at the repo root.
+
+        Dev/test default ``.warden-data/files`` must land in the repo's
+        gitignored data directory no matter the working directory (alembic,
+        pytest and uvicorn all run from backend/); production sets an
+        absolute volume path.
+        """
+        if self.file_store_root.is_absolute():
+            return self.file_store_root
+        return _REPO_ROOT / self.file_store_root
 
     @property
     def session_cookie_secure(self) -> bool:

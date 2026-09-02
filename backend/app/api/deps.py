@@ -29,13 +29,14 @@ from app.domain.auth_errors import (
 from app.domain.errors import AppError
 from app.domain.roles import require_permission as matrix_require
 from app.infrastructure.audit import AuditLogger
-from app.infrastructure.crypto import CredentialCipher, CredentialKeyring
+from app.infrastructure.crypto import CredentialCipher, CredentialKeyring, FileKeyCipher
 from app.infrastructure.csrf import (
     CSRF_HEADER_NAME,
     is_origin_allowed,
     normalize_origin,
     verify_csrf_token,
 )
+from app.infrastructure.files import FileStorage, FileStorageError
 from app.infrastructure.rate_limit import RateLimiter
 from app.infrastructure.readiness import ReadinessRegistry
 from app.infrastructure.request_id import get_current_request_id
@@ -148,6 +149,51 @@ def get_credential_keyring(request: Request) -> CredentialKeyring:
         raise dependency_unavailable("credential_keyring") from exc
     request.app.state.credential_keyring = ring
     return ring
+
+
+def get_file_keyring(request: Request) -> FileKeyCipher:
+    """The file master key (SECURITY.md §9): wraps per-file content keys.
+
+    Lazily built from the read-only ``file_master_key_file`` Secret like the
+    credential keystore; a missing/too-short key surfaces as
+    ``dependency_unavailable`` so encrypted uploads/downloads fail loudly
+    instead of storing unreadable bytes.
+    """
+    cipher: FileKeyCipher | None = getattr(request.app.state, "file_keyring", None)
+    if cipher is not None:
+        return cipher
+    settings: WardenSettings = request.app.state.settings
+    try:
+        material = settings.file_master_key.get_secret_value().encode("utf-8")
+        cipher = FileKeyCipher(material)
+    except ValueError as exc:
+        raise dependency_unavailable("file_keyring") from exc
+    request.app.state.file_keyring = cipher
+    return cipher
+
+
+def get_file_storage(request: Request) -> FileStorage:
+    """The controlled-file volume (ARCHITECTURE.md §3.6, ADR-012).
+
+    Built lazily once per process from the resolved settings root. Volume
+    availability is probed at use time by the storage calls — a missing/
+    unwritable volume surfaces as ``storage_unavailable`` on uploads and
+    downloads (ARCHITECTURE.md §7: 文件卷不可用时禁止上传/升级/日志采集，监控读
+    取继续).
+    """
+    storage: FileStorage | None = getattr(request.app.state, "file_storage", None)
+    if storage is not None:
+        return storage
+    settings: WardenSettings = request.app.state.settings
+    storage = FileStorage(settings.resolved_file_store_root)
+    try:
+        storage.check_available()
+    except FileStorageError as exc:
+        raise AppError(
+            "storage_unavailable", "文件存储不可用", details={"purpose": "file_volume"}
+        ) from exc
+    request.app.state.file_storage = storage
+    return storage
 
 
 def _allowed_origins(settings: WardenSettings) -> set[str]:

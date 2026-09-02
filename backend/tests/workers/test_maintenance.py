@@ -322,7 +322,16 @@ class TestRollupRetentionWiring:
 
         assert report.lock_acquired is True
         assert report.rollup_rows_5m == 1
-        assert report.rollup_rows_1h == 0
+        # The hourly rollup only exists once the seeded window's hour is
+        # fully closed. The seed is relative to the REAL clock, so when the
+        # pass runs inside the first minutes of an hour its window lands in
+        # the previous (closed) hour and the 1h row appears — the expected
+        # value follows the same boundary rule instead of assuming luck.
+        now = utcnow()
+        window = now.replace(second=0, microsecond=0)
+        window = window - datetime.timedelta(minutes=window.minute % 5) - datetime.timedelta(minutes=5)
+        expected_1h = 1 if window.hour != now.hour else 0
+        assert report.rollup_rows_1h == expected_1h
         assert report.ui_events_deleted == 1
         assert report.operation_task_events_skipped_append_only is True
         assert report.audit_skipped_append_only is True
@@ -355,6 +364,81 @@ class TestRollupRetentionWiring:
         assert second.partitions_created == 0
         # The recovery/timeout sweep still runs every pass.
         assert second.lock_acquired is True
+
+
+class TestFileRetentionWiring:
+    """M2T5: the maintenance pass runs the file-layer retention sweep.
+
+    A ready support bundle past its 30-day window must be logically deleted
+    by the loop (report counter), while the metric/DB retention of the same
+    pass still works. The loop skips the file sweep when no storage is
+    configured (--once smoke shape) and reports honestly instead.
+    """
+
+    def _seed_old_support_bundle(self, db_session: Session, *, user_index: int = 70):
+        from datetime import timedelta
+
+        from app.models.files import File
+
+        from tests.task_factories import make_user
+
+        now = utcnow()
+        user = make_user(db_session, index=user_index)
+        bundle = File(
+            file_type="support_bundle",
+            original_filename="old.zip",
+            storage_name="a" * 64,
+            sha256="a" * 64,
+            size_bytes=1024,
+            mime_type="application/zip",
+            encrypted=True,
+            key_version=1,
+            uploaded_by=user.id,
+            status="ready",
+        )
+        db_session.add(bundle)
+        db_session.commit()
+        bundle.created_at = now - timedelta(days=45)
+        db_session.commit()
+        return bundle
+
+    def test_file_retention_runs_with_storage(self, db_session: Session, tmp_path) -> None:
+        from app.infrastructure.files import FileStorage
+
+        bundle = self._seed_old_support_bundle(db_session)
+        storage = FileStorage(tmp_path / "files")
+        storage.check_available()
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory, file_storage=storage).run_once()
+        assert report.lock_acquired is True
+        assert report.support_bundles_deleted == 1
+        assert report.file_retention_storage_unavailable is False
+        db_session.refresh(bundle)
+        assert bundle.status == "deleted"
+
+    def test_file_retention_skipped_without_storage(self, db_session: Session) -> None:
+        bundle = self._seed_old_support_bundle(db_session, user_index=71)
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory).run_once()
+        assert report.lock_acquired is True
+        assert report.support_bundles_deleted == 0
+        assert report.file_retention_storage_unavailable is False
+        db_session.refresh(bundle)
+        assert bundle.status == "ready"
+
+    def test_dead_volume_is_reported_not_faked(self, db_session: Session, tmp_path) -> None:
+        from app.infrastructure.files import FileStorage
+
+        bundle = self._seed_old_support_bundle(db_session, user_index=72)
+        blocker = tmp_path / "blocked"
+        blocker.write_text("file-not-dir", encoding="utf-8")
+        storage = FileStorage(blocker / "files")
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory, file_storage=storage).run_once()
+        assert report.file_retention_storage_unavailable is True
+        assert report.support_bundles_deleted == 0
+        db_session.refresh(bundle)
+        assert bundle.status == "ready"
 
 
 class TestTimeoutSweep:

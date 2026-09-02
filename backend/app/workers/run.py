@@ -26,8 +26,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.collection import run_collection
 from app.config import WardenSettings, get_settings
+from app.infrastructure.audit import AuditLogger
 from app.infrastructure.crypto import CredentialCipher, CredentialKeyring
 from app.infrastructure.db import create_db_engine, create_session_factory
+from app.infrastructure.files import FileStorage
 from app.infrastructure.logging import configure_logging
 from app.infrastructure.observation_store import claim_collection_run
 from app.workers.collection_pool import CollectionPool
@@ -96,6 +98,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     keyring = CredentialKeyring.from_current(
         CredentialCipher(settings.credential_master_key.get_secret_value().encode("utf-8"))
     )
+    # M2T5: the file-volume + audit logger for the maintenance loop's file
+    # retention (physical cleanup / aging / ticket purge, SECURITY.md §9).
+    file_storage = FileStorage(settings.resolved_file_store_root)
+    audit_logger = AuditLogger(session_factory)
 
     if args.once:
         try:
@@ -103,7 +109,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             collection_processed = _process_due_collections_once(
                 session_factory, settings=settings, keyring=keyring, owner=owner
             )
-            report = MaintenanceLoop(session_factory).run_once()
+            report = MaintenanceLoop(
+                session_factory,
+                file_storage=file_storage,
+                audit_logger=audit_logger,
+            ).run_once()
             log.info(
                 "worker_once_done",
                 lease_owner=owner,
@@ -150,7 +160,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             daemon=True,
         ),
         threading.Thread(
-            target=MaintenanceLoop(session_factory).run_forever,
+            target=MaintenanceLoop(
+                session_factory,
+                file_storage=file_storage,
+                audit_logger=audit_logger,
+            ).run_forever,
             args=(stop_event,),
             name="maintenance",
             daemon=True,

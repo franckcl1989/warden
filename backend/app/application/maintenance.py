@@ -65,6 +65,7 @@ Retention semantics (DATA_MODEL.md §10) and the production privilege model
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import re
 import uuid
@@ -76,14 +77,19 @@ from sqlalchemy import Uuid, cast, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.application.files import storage_key
 from app.config import WardenSettings
 from app.generated.metrics import METRIC_DEFINITIONS
+from app.infrastructure.audit import AuditLogger
+from app.infrastructure.files import FileStorage, FileStorageError
 from app.infrastructure.observation_store import ensure_metric_partitions
+from app.models.files import File, FileLink
 from app.models.observation import (
     MetricPoint,
     MetricRollup1h,
     MetricRollup5m,
 )
+from app.models.operation import OperationTask
 
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -798,4 +804,369 @@ def enforce_retention(
     report.operation_task_events_skipped_append_only = _append_only_trigger_exists(
         db, "operation_task_events", "operation_task_events_no_delete"
     )
+    return report
+
+
+# ---------------------------------------------------------------------------
+# File retention (DATA_MODEL.md §10 rows for 支持包/操作日志/配置备份/固件-ISO,
+# M2T5). Runs from the same maintenance pass as ``enforce_retention``; the
+# file rows/tickets live on the volume + the migration-0011 tables.
+# ---------------------------------------------------------------------------
+
+# DATA_MODEL.md §10: 支持包/操作日志 30 天 (可由管理员延长 — the platform has
+# no product API for extension in 0.1.0; a needed bundle is re-uploaded).
+# Logical delete keeps the row (audit-visible lifecycle); the PHYSICAL bytes
+# leave 7 days later (SECURITY.md §9: 物理清理前检查任务引用并写审计).
+PHYSICAL_CLEANUP_DELAY = datetime.timedelta(days=7)
+# Upload sessions abandoned mid-stream (client vanished): rows + spool close
+# after 24 h (the 2-concurrent-upload limit counts only live uploading rows).
+ABANDONED_UPLOAD_DELAY = datetime.timedelta(hours=24)
+# Expired/revoked tickets keep one extra day for forensics, then purge.
+TICKET_PURGE_MARGIN = datetime.timedelta(days=1)
+
+# Operation-task states that still reference a file (active links block
+# logical delete with a 409 and delay physical cleanup).
+_FILE_ACTIVE_TASK_STATES = ("queued", "running", "waiting_device")
+
+
+@dataclass
+class FileRetentionReport:
+    """Counters of one file-retention sweep (DATA_MODEL.md §10 记录清理数量)."""
+
+    storage_unavailable: bool = False
+    support_bundles_deleted: int = 0
+    operation_logs_deleted: int = 0
+    config_backups_deleted: int = 0
+    abandoned_uploads_deleted: int = 0
+    tickets_deleted: int = 0
+    physical_files_removed: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _file_has_active_task_link(db: Session, file_id: uuid.UUID) -> bool:
+    """True when any queued/running/waiting_device task links the file."""
+    exists = db.scalar(
+        select(FileLink.id)
+        .join(OperationTask, OperationTask.id == FileLink.task_id)
+        .where(
+            FileLink.file_id == file_id,
+            OperationTask.state.in_(_FILE_ACTIVE_TASK_STATES),
+        )
+        .limit(1)
+    )
+    return exists is not None
+
+
+def _logically_delete_file(
+    db: Session,
+    row: File,
+    *,
+    audit: AuditLogger | None,
+    reason: str,
+    detail: dict[str, object],
+) -> None:
+    row.status = "deleted"
+    row.version += 1
+    if audit is not None:
+        audit.record(
+            action="file.retention_delete",
+            resource_type="file",
+            resource_id=str(row.id),
+            requirement_id="PLT-06",
+            result="success",
+            detail={
+                "file_type": row.file_type,
+                "size_bytes": row.size_bytes,
+                "reason": reason,
+                **detail,
+            },
+        )
+
+
+def _prune_expired_files(
+    db: Session,
+    *,
+    now: datetime.datetime,
+    settings: WardenSettings,
+    audit: AuditLogger | None,
+    report: FileRetentionReport,
+) -> None:
+    """30-day logical delete of ready support bundles / operation logs.
+
+    Rows referenced by an ACTIVE task are skipped (they cannot be aged out
+    from under an executing operation); terminal-task links do not protect
+    the bytes — retention says bundles leave after 30 days (DATA_MODEL.md
+    §10) and the task history references the file row, not its bytes.
+    """
+    cutoff = now - datetime.timedelta(days=settings.support_bundle_retention_days)
+    while True:
+        candidates = list(
+            db.scalars(
+                select(File)
+                .where(
+                    File.status == "ready",
+                    File.file_type.in_(("support_bundle", "operation_log")),
+                    File.created_at < cutoff,
+                )
+                .order_by(File.id)
+                .limit(DELETE_BATCH_SIZE)
+            ).all()
+        )
+        if not candidates:
+            return
+        changed_in_batch = 0
+        for row in candidates:
+            if _file_has_active_task_link(db, row.id):
+                continue
+            _logically_delete_file(
+                db,
+                row,
+                audit=audit,
+                reason="retention_30d",
+                detail={"created_at": row.created_at.isoformat()},
+            )
+            if row.file_type == "support_bundle":
+                report.support_bundles_deleted += 1
+            else:
+                report.operation_logs_deleted += 1
+            changed_in_batch += 1
+        # A full batch of active-task-linked candidates cannot make progress:
+        # stop instead of re-selecting them forever (the next daily pass
+        # retries after their tasks finish).
+        if changed_in_batch == 0:
+            return
+
+
+def _prune_config_backups(
+    db: Session,
+    *,
+    now: datetime.datetime,
+    settings: WardenSettings,
+    audit: AuditLogger | None,
+    report: FileRetentionReport,
+) -> None:
+    """Config backups: keep the newest 10 per device, minimum age 90 days.
+
+    DATA_MODEL.md §10 (配置备份: 默认保留最近 10 份/设备，至少 90 天): a backup
+    is pruned when it is BEYOND the newest ``keep`` per device AND older than
+    the minimum age — recent backups (rank > keep but younger than the
+    minimum age) stay until they reach the age rule, then leave when they are
+    no longer in the newest set. Active-task-linked backups are never pruned.
+    """
+    min_age_cutoff = now - datetime.timedelta(days=settings.config_backup_min_days)
+    keep = settings.config_backup_keep_per_device
+    rows = db.execute(
+        select(File.id, File.created_at, FileLink.device_id)
+        .join(FileLink, FileLink.file_id == File.id)
+        .where(
+            File.status == "ready",
+            File.file_type == "config_backup",
+            FileLink.purpose == "output_config_backup",
+            FileLink.device_id.is_not(None),
+        )
+        .order_by(File.created_at.desc())
+    ).all()
+    per_device: dict[uuid.UUID, list[tuple[uuid.UUID, datetime.datetime]]] = {}
+    for file_id, created_at, device_id in rows:
+        per_device.setdefault(device_id, []).append((file_id, created_at))
+    for device_id, backups in per_device.items():
+        # Rows are ordered newest-first; dedupe against double links.
+        seen: set[uuid.UUID] = set()
+        rank = 0
+        for file_id, created_at in backups:
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+            if rank < keep or created_at >= min_age_cutoff:
+                rank += 1
+                continue
+            row = db.get(File, file_id)
+            if row is None or _file_has_active_task_link(db, file_id):
+                rank += 1
+                continue
+            _logically_delete_file(
+                db,
+                row,
+                audit=audit,
+                reason="config_backup_prune",
+                detail={
+                    "device_id": str(device_id),
+                    "keep_per_device": keep,
+                    "created_at": created_at.isoformat(),
+                },
+            )
+            report.config_backups_deleted += 1
+            rank += 1
+
+
+def _close_abandoned_uploads(
+    db: Session,
+    *,
+    now: datetime.datetime,
+    storage: FileStorage,
+    audit: AuditLogger | None,
+    report: FileRetentionReport,
+) -> None:
+    """Upload sessions older than 24 h without content: close row + spool."""
+    cutoff = now - ABANDONED_UPLOAD_DELAY
+    while True:
+        candidates = list(
+            db.scalars(
+                select(File)
+                .where(File.status == "uploading", File.created_at < cutoff)
+                .order_by(File.id)
+                .limit(DELETE_BATCH_SIZE)
+            ).all()
+        )
+        if not candidates:
+            return
+        for row in candidates:
+            _logically_delete_file(
+                db,
+                row,
+                audit=audit,
+                reason="abandoned_upload",
+                detail={"created_at": row.created_at.isoformat()},
+            )
+            with contextlib.suppress(FileStorageError):
+                storage.remove_upload(str(row.id))  # spool sweep retries otherwise
+            report.abandoned_uploads_deleted += 1
+
+
+def _physically_clean_deleted_files(
+    db: Session,
+    *,
+    now: datetime.datetime,
+    storage: FileStorage,
+    audit: AuditLogger | None,
+    report: FileRetentionReport,
+) -> None:
+    """Physical bytes of logically deleted rows leave 7 days later.
+
+    SECURITY.md §9: 物理清理前检查任务引用并写审计. Guards before the volume
+    delete: no ACTIVE task link, and no other live row (uploading/ready/
+    quarantined) shares the same physical storage key — two identical plain
+    uploads point at one content-addressed file, so the bytes stay while ANY
+    live row needs them. Encrypted rows own distinct per-row files (their
+    storage keys embed the row id) and are unaffected by the twin check.
+    """
+    cutoff = now - PHYSICAL_CLEANUP_DELAY
+    live_statuses = ("uploading", "ready", "quarantined")
+    while True:
+        candidates = list(
+            db.scalars(
+                select(File)
+                .where(File.status == "deleted", File.updated_at < cutoff)
+                .order_by(File.id)
+                .limit(DELETE_BATCH_SIZE)
+            ).all()
+        )
+        if not candidates:
+            return
+        changed_in_batch = 0
+        for row in candidates:
+            if row.storage_name is None or row.sha256 is None:
+                continue  # never completed: no physical bytes to remove
+            if _file_has_active_task_link(db, row.id):
+                continue
+            twin = db.scalar(
+                select(File.id)
+                .where(
+                    File.storage_name == row.storage_name,
+                    File.encrypted == row.encrypted,
+                    File.status.in_(live_statuses),
+                    File.id != row.id,
+                )
+                .limit(1)
+            )
+            if twin is not None:
+                continue
+            storage_key_value = storage_key(row)
+            try:
+                if not storage.delete(storage_key_value):
+                    continue  # already gone (e.g. a twin cleanup removed it)
+            except FileStorageError:
+                continue  # volume hiccup: the next daily pass retries
+            # Record the cleanup time so the batch loop never re-selects this
+            # row (its status stays ``deleted`` for the audit-visible
+            # lifecycle; updated_at marks when the bytes left).
+            logical_deleted_at = row.updated_at
+            row.updated_at = now
+            report.physical_files_removed += 1
+            changed_in_batch += 1
+            if audit is not None:
+                audit.record(
+                    action="file.physical_cleanup",
+                    resource_type="file",
+                    resource_id=str(row.id),
+                    requirement_id="PLT-06",
+                    result="success",
+                    detail={
+                        "file_type": row.file_type,
+                        "size_bytes": row.size_bytes,
+                        "encrypted": row.encrypted,
+                        "logical_deleted_at": logical_deleted_at.isoformat(),
+                        "cleaned_at": now.isoformat(),
+                    },
+                )
+        # A full batch of rows that cannot leave yet (active links / live
+        # twins / never-completed) makes no progress: stop re-selecting them
+        # (the next daily pass re-checks).
+        if changed_in_batch == 0:
+            return
+
+
+def _purge_expired_tickets(
+    db: Session,
+    *,
+    now: datetime.datetime,
+    report: FileRetentionReport,
+) -> None:
+    """Expired/revoked tickets are purged one day past expiry (counted)."""
+    cutoff = now - TICKET_PURGE_MARGIN
+    while True:
+        result = db.execute(
+            text(
+                "DELETE FROM device_file_tickets WHERE id IN "
+                "(SELECT id FROM device_file_tickets WHERE expires_at < :cutoff "
+                "ORDER BY id LIMIT 2000)"
+            ),
+            {"cutoff": cutoff},
+        )
+        rowcount = typing_cast(Any, result).rowcount
+        if rowcount is None or rowcount == 0:
+            return
+        report.tickets_deleted += int(rowcount)
+
+
+def enforce_file_retention(
+    db: Session,
+    *,
+    now: datetime.datetime,
+    settings: WardenSettings,
+    storage: FileStorage,
+    audit: AuditLogger | None = None,
+) -> FileRetentionReport:
+    """File-layer retention sweep; the caller commits.
+
+    Runs as warden_app in production: the migration-0011 ownership model
+    (warden_app owns files/file_links/device_file_tickets — the files-row
+    UPDATEs come from the blanket S/I/U grant, the ticket DELETEs from
+    ownership, exactly like the 0010 ledger). The file volume is probed
+    first: a dead volume reports ``storage_unavailable`` and the pass is
+    skipped loudly instead of pretending to clean.
+    """
+    report = FileRetentionReport()
+    try:
+        storage.check_available()
+    except FileStorageError:
+        report.storage_unavailable = True
+        return report
+    _prune_expired_files(db, now=now, settings=settings, audit=audit, report=report)
+    _prune_config_backups(db, now=now, settings=settings, audit=audit, report=report)
+    _close_abandoned_uploads(db, now=now, storage=storage, audit=audit, report=report)
+    _physically_clean_deleted_files(db, now=now, storage=storage, audit=audit, report=report)
+    _purge_expired_tickets(db, now=now, report=report)
     return report

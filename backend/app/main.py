@@ -24,7 +24,9 @@ from app.api.routes import (
     audit,
     auth,
     collection_runs,
+    device_file_access,
     devices,
+    files,
     metrics,
     operations,
     overview,
@@ -92,6 +94,13 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     api_v1_router.include_router(alerts.router, dependencies=[Depends(require_password_changed)])
     # M2T4 two-phase operations API (PLT-05): preview/confirm + task lifecycle.
     api_v1_router.include_router(operations.router, dependencies=[Depends(require_password_changed)])
+    # M2T5 controlled files (PLT-06): upload sessions / metadata / download /
+    # logical delete. Sessions, storage and keyring dependencies resolve per
+    # request from app.state (lazy, see api/deps.py).
+    api_v1_router.include_router(files.router, dependencies=[Depends(require_password_changed)])
+    # Device pulls (PLT-06) carry NO user session: mounted outside the gates,
+    # still under /api/v1 for the path contract.
+    api_v1_router.include_router(device_file_access.router)
     app.include_router(api_v1_router)
     return app
 

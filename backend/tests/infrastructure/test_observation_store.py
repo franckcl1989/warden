@@ -465,8 +465,16 @@ class TestCollectionRunClaim:
 
     def test_claim_skips_running_with_valid_lease(self, db_session: Session) -> None:
         device = make_collection_device(db_session)
+        # Lease expiry is compared against the DATABASE clock (func.now()),
+        # so the valid lease must be relative to the real clock — the module
+        # NOW/FUTURE constants are fixed instants that age out.
+        valid_until = datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1)
         make_collection_run(
-            db_session, device_id=device.id, state="running", lease_owner="w1", lease_expires_at=FUTURE
+            db_session,
+            device_id=device.id,
+            state="running",
+            lease_owner="w1",
+            lease_expires_at=valid_until,
         )
         assert claim_collection_run(db_session, lease_owner="w2", lease_seconds=300) is None
 

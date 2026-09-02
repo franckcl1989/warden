@@ -34,6 +34,14 @@ NONCE_BYTES = 12
 HKDF_INFO = b"warden-credential-master-key-v1"
 AAD_PREFIX = b"warden-credential-aad-v1"
 
+# M2T5 file master key (docs/SECURITY.md §9): config backups / support
+# bundles / operation logs are encrypted with a per-file key that is wrapped
+# by this master key. The HKDF context and the AAD prefix are DISTINCT from
+# the credential keystore so a ciphertext can never be interpreted across the
+# two contexts, and the wrap AAD binds the wrapped key to its storage name.
+FILE_KEY_HKDF_INFO = b"warden-file-key-v1"
+FILE_KEY_AAD_PREFIX = b"warden-file-key-aad-v1"
+
 _KEY_REDACTED = "<redacted>"
 
 
@@ -56,7 +64,7 @@ class EncryptedSecret:
         )
 
 
-def _derive_key(raw: bytes) -> bytes:
+def _derive_key(raw: bytes, info: bytes = HKDF_INFO) -> bytes:
     if len(raw) < MIN_MASTER_KEY_BYTES:
         msg = f"credential master key must be at least {MIN_MASTER_KEY_BYTES} bytes"
         raise ValueError(msg)
@@ -66,7 +74,7 @@ def _derive_key(raw: bytes) -> bytes:
         algorithm=hashes.SHA256(),
         length=MIN_MASTER_KEY_BYTES,
         salt=None,
-        info=HKDF_INFO,
+        info=info,
     ).derive(raw)
 
 
@@ -188,5 +196,73 @@ class CredentialKeyring:
             for version, cipher in sorted(self._keys.items())
         )
         return f"CredentialKeyring(current_version={self._current_version}, keys={{{versions}}})"
+
+    __str__ = __repr__
+
+
+def file_key_aad(storage_name: str) -> bytes:
+    """Length-prefixed AAD binding a wrapped file key to its storage name.
+
+    SECURITY.md §9: per-file keys are wrapped under the file master key; the
+    AAD prevents a wrapped key from being replayed under another storage name
+    (an envelope swap across files).
+    """
+    parts = [
+        len(storage_name.encode("utf-8")).to_bytes(4, "big") + storage_name.encode("utf-8"),
+    ]
+    return FILE_KEY_AAD_PREFIX + b"".join(parts)
+
+
+class FileKeyCipher:
+    """File master key: wraps per-file content keys (docs/SECURITY.md §9, M2T5).
+
+    AES-256-GCM wrapping of random 32-byte per-file keys, master key derived
+    from the read-only ``file_master_key_file`` Secret (config.py) with the
+    DISTINCT HKDF context ``warden-file-key-v1`` — the credential keystore
+    derivation context never applies here, so the two keystores cannot share
+    material semantics. ``key_version`` is fixed at 1 for a single current
+    master key in 0.1.0 (rotation would introduce a keyring like the
+    credential one; not required by the M2 scope).
+    """
+
+    def __init__(self, master_key_material: bytes) -> None:
+        # The 32-byte "use raw" shortcut of the credential derivation is NOT
+        # reused here: the file-key master key must always be HKDF-derived
+        # under its own info context so that identical secret-file material
+        # can never yield the same key across the two keystores (SECURITY.md
+        # §5/§9 context separation).
+        if len(master_key_material) < MIN_MASTER_KEY_BYTES:
+            msg = f"file master key must be at least {MIN_MASTER_KEY_BYTES} bytes"
+            raise ValueError(msg)
+        self._key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=MIN_MASTER_KEY_BYTES,
+            salt=None,
+            info=FILE_KEY_HKDF_INFO,
+        ).derive(master_key_material)
+        self._aesgcm = AESGCM(self._key)
+        self._key_sha256 = sha256(self._key).hexdigest()
+
+    def fingerprint(self) -> str:
+        """SHA-256 of the derived key (key-identity, not secret material)."""
+        return self._key_sha256
+
+    def wrap(self, file_key: bytes, *, storage_name: str) -> EncryptedSecret:
+        """Wrap one 32-byte file key under this master key (fresh nonce)."""
+        nonce = secrets.token_bytes(NONCE_BYTES)
+        ciphertext = self._aesgcm.encrypt(nonce, file_key, file_key_aad(storage_name))
+        return EncryptedSecret(ciphertext=ciphertext, nonce=nonce, key_version=1)
+
+    def unwrap(self, wrapped: EncryptedSecret, *, storage_name: str) -> bytes:
+        """Unwrap and authenticate ``wrapped``; raises ``DecryptionError``."""
+        try:
+            return self._aesgcm.decrypt(
+                wrapped.nonce, wrapped.ciphertext, file_key_aad(storage_name)
+            )
+        except Exception as exc:  # cryptography InvalidTag and ValueError surface here
+            raise DecryptionError("file key unwrap failed (tamper or wrong master key)") from exc
+
+    def __repr__(self) -> str:
+        return f"FileKeyCipher(key_sha256={self._key_sha256[:16]}...{_KEY_REDACTED})"
 
     __str__ = __repr__

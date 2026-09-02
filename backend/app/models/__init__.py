@@ -13,6 +13,7 @@ from app.models.devices import (
     DeviceCapability,
     DeviceCredential,
 )
+from app.models.files import ACTIVE_FILE_REFERENCE_STATES, DeviceFileTicket, File, FileLink
 from app.models.observation import (
     ALERT_STATUSES,
     COLLECTION_STATES,
@@ -40,6 +41,7 @@ from app.models.operation import (
 )
 
 __all__ = [
+    "ACTIVE_FILE_REFERENCE_STATES",
     "ALERT_STATUSES",
     "AuditAppendOnlyError",
     "AuditLog",
@@ -66,6 +68,9 @@ __all__ = [
     "DeviceCapability",
     "DeviceCredential",
     "DeviceEvent",
+    "DeviceFileTicket",
+    "File",
+    "FileLink",
     "MetricLatest",
     "MetricPoint",
     "OperationTask",

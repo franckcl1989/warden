@@ -61,6 +61,9 @@ NON_PURGEABLE_TABLES = (
     "metric_rollups_5m",
     "metric_rollups_1h",
     "preview_token_uses",
+    "files",
+    "file_links",
+    "device_file_tickets",
 )
 
 

@@ -15,6 +15,7 @@ from app.infrastructure.crypto import (
     CredentialKeyring,
     DecryptionError,
     EncryptedSecret,
+    FileKeyCipher,
     credential_aad,
 )
 
@@ -222,3 +223,38 @@ def test_previous_and_current_ring_classmethod() -> None:
     )
     assert ring.decrypt(old_encrypted, aad=aad) == "S3cret-Pass!"
     assert ring.decrypt(new_encrypted, aad=aad) == "S3cret-Pass!"
+
+# --- M2T5: file master key wrapper (SECURITY.md §9) -----------------------
+
+
+@pytest.mark.unit
+def test_file_key_wrap_round_trip() -> None:
+    cipher = FileKeyCipher(MASTER_KEY_32)
+    file_key = secrets.token_bytes(32)
+    wrapped = cipher.wrap(file_key, storage_name="ab" * 32)
+    assert wrapped.key_version == 1
+    assert cipher.unwrap(wrapped, storage_name="ab" * 32) == file_key
+
+
+@pytest.mark.unit
+def test_file_key_wrong_master_material_fails() -> None:
+    wrapped = FileKeyCipher(MASTER_KEY_32).wrap(
+        secrets.token_bytes(32), storage_name="ab" * 32
+    )
+    with pytest.raises(DecryptionError):
+        FileKeyCipher(MASTER_KEY_OTHER).unwrap(wrapped, storage_name="ab" * 32)
+
+
+@pytest.mark.unit
+def test_file_key_wrap_is_bound_to_storage_name() -> None:
+    cipher = FileKeyCipher(MASTER_KEY_32)
+    wrapped = cipher.wrap(secrets.token_bytes(32), storage_name="ab" * 32)
+    with pytest.raises(DecryptionError):
+        cipher.unwrap(wrapped, storage_name="cd" * 32)
+
+
+@pytest.mark.unit
+def test_file_key_derivation_context_differs_from_credential_context() -> None:
+    file_cipher = FileKeyCipher(MASTER_KEY_32)
+    credential_cipher = CredentialCipher(MASTER_KEY_32)
+    assert file_cipher.fingerprint() != credential_cipher.fingerprint()
