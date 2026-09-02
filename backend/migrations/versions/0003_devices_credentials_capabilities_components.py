@@ -64,7 +64,10 @@ def upgrade() -> None:
         sa.Column("version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.CheckConstraint("device_type IN ('server', 'synology_nas', 'core_switch', 'access_switch')", name="ck_devices_device_type"),
+        sa.CheckConstraint(
+            "device_type IN ('server', 'synology_nas', 'core_switch', 'access_switch')",
+            name="ck_devices_device_type",
+        ),
         sa.CheckConstraint("readiness IN ('not_ready', 'ready', 'misconfigured')", name="ck_devices_readiness"),
         sa.CheckConstraint("reachability IN ('unknown', 'online', 'offline')", name="ck_devices_reachability"),
         sa.CheckConstraint("health IN ('unknown', 'healthy', 'warning', 'critical')", name="ck_devices_health"),
@@ -73,7 +76,9 @@ def upgrade() -> None:
         sa.CheckConstraint("version >= 1", name="ck_devices_version"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("name", name="uq_devices_name"),
-        sa.UniqueConstraint("device_type", "management_endpoint", "adapter_key", name="uq_devices_type_endpoint_adapter"),
+        sa.UniqueConstraint(
+            "device_type", "management_endpoint", "adapter_key", name="uq_devices_type_endpoint_adapter"
+        ),
     )
 
     op.create_table(
@@ -102,7 +107,10 @@ def upgrade() -> None:
         sa.Column("detail", sa.Text(), nullable=True),
         sa.Column("last_checked_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("adapter_version", sa.String(length=32), nullable=False),
-        sa.CheckConstraint("support_state IN ('supported', 'unsupported', 'not_configured')", name="ck_device_capabilities_support_state"),
+        sa.CheckConstraint(
+            "support_state IN ('supported', 'unsupported', 'not_configured')",
+            name="ck_device_capabilities_support_state",
+        ),
         sa.ForeignKeyConstraint(["device_id"], ["devices.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("device_id", "capability_key", name="uq_device_capabilities_device_key"),
