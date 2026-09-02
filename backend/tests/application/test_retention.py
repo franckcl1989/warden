@@ -1,11 +1,20 @@
 ﻿"""Retention enforcement integration tests (real PostgreSQL).
 
-docs/DATA_MODEL.md 搂10 + M2T3 brief: raw metric_points leave via DROP of old
-daily partitions (never row deletes), rollups/events/resolved alerts/terminal
-operation tasks/sessions/ui_events via batch deletes, audit_logs stay
-append-only (0002 trigger + 0004 REVOKE 鈥?the function reports the skip).
-Every delete is counted; deletes never touch active/queued/verification_required
-tasks and never delete audit history.
+docs/DATA_MODEL.md §10 + M2T3 fix rulings: raw metric_points leave via DROP
+of old daily partitions (never row deletes), rollups/events/resolved alerts/
+terminal operation tasks/sessions/ui_events via batch deletes — with the
+append-only exemptions of ADR-030:
+
+- a terminal task is purged only when it has NO operation_task_events rows
+  (the 0005 trigger + FK cascade make evented tasks unremovable);
+- sessions referenced by audit_logs.session_id survive (the 0002 audit
+  trigger rejects the FK SET NULL);
+- audit_logs and operation_task_events themselves are never deleted: the
+  sweep records ``*_skipped_append_only`` instead of crashing or weakening
+  the append-only protections.
+
+Every delete is counted; deletes never touch active/queued/verification_
+required tasks and never delete audit or task-event history.
 """
 
 from __future__ import annotations
@@ -309,10 +318,10 @@ class TestAlertRetention:
 
 
 class TestOperationTaskRetention:
-    def test_terminal_tasks_survive_append_only_event_stream(self, db_session: Session) -> None:
-        # DATA_MODEL.md §7.3/0005 keep operation_task_events append-only at the
-        # database: a task cannot be removed while its event stream exists, so
-        # the sweep reports the skip instead of failing the whole pass.
+    def test_eventless_terminal_tasks_are_purged(self, db_session: Session) -> None:
+        # A terminal task with NO event rows can be removed at the application
+        # layer (no append-only stream to violate — ADR-030 keeps the streams
+        # intact, not the task rows themselves).
         device = make_collection_device(db_session, index=7)
         user = _user(db_session)
         old = make_task(
@@ -326,7 +335,6 @@ class TestOperationTaskRetention:
             idempotency_key="retention-old-7",
         )
         old.finished_at = NOW - datetime.timedelta(days=400)
-        db_session.add(OperationTaskEvent(task_id=old.id, state="succeeded", message="done"))
         fresh = make_task(
             db_session,
             device_id=device.id,
@@ -342,11 +350,43 @@ class TestOperationTaskRetention:
 
         report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
 
+        assert report.operation_tasks_deleted == 1
+        remaining = db_session.scalars(select(OperationTask.id)).all()
+        assert len(remaining) == 1
+        assert remaining[0] == fresh.id
+
+    def test_evented_terminal_tasks_survive_with_their_append_only_stream(
+        self, db_session: Session
+    ) -> None:
+        # DATA_MODEL.md §7.3/0005 keep operation_task_events append-only at
+        # the database: the FK cascade would fire the no-delete trigger, so a
+        # task cannot be removed while its event stream exists. The sweep
+        # reports the append-only skip (ADR-030) instead of failing the pass.
+        device = make_collection_device(db_session, index=7)
+        user = _user(db_session)
+        old = make_task(
+            db_session,
+            device_id=device.id,
+            requested_by=user.id,
+            index=7,
+            requirement_id="SRV-ACT-02",
+            capability_key="power.on",
+            state="succeeded",
+            idempotency_key="retention-old-7",
+        )
+        old.finished_at = NOW - datetime.timedelta(days=400)
+        db_session.add(OperationTaskEvent(task_id=old.id, state="succeeded", message="done"))
+        db_session.commit()
+
+        report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
         assert report.operation_tasks_deleted == 0
-        assert report.operation_tasks_skipped_append_only is True
-        assert db_session.scalar(select(func.count()).select_from(OperationTask)) == 2
+        assert report.operation_task_events_skipped_append_only is True
+        assert db_session.scalar(select(func.count()).select_from(OperationTask)) == 1
         events = db_session.scalar(
-            select(func.count()).select_from(OperationTaskEvent).where(OperationTaskEvent.task_id == old.id)
+            select(func.count())
+            .select_from(OperationTaskEvent)
+            .where(OperationTaskEvent.task_id == old.id)
         )
         assert events == 1  # the event stream is untouched
 
@@ -378,7 +418,6 @@ class TestOperationTaskRetention:
         report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
 
         assert report.operation_tasks_deleted == 0
-        assert report.operation_tasks_skipped_append_only is True
         assert db_session.scalar(select(func.count()).select_from(OperationTask)) == 2
 
 
@@ -413,6 +452,41 @@ class TestUiEventAndSessionRetention:
         assert report.sessions_deleted == 2
         assert db_session.scalar(select(func.count()).select_from(DBSession)) == 1
 
+    def test_sessions_referenced_by_audit_rows_survive_cleanup(self, db_session: Session) -> None:
+        # audit_logs.session_id is FK ON DELETE SET NULL; the 0002 audit
+        # trigger rejects the internal UPDATE of the FK action (PostgreSQL
+        # fires child row triggers on FK actions), so an audit-linked session
+        # cannot be deleted while its audit row lives (ADR-030). The sweep
+        # must skip it and purge only the unreferenced one.
+        user = _user(db_session)
+        audit_linked = _session_row(
+            db_session, user, revoked_at=NOW - datetime.timedelta(days=40)
+        )
+        db_session.flush()  # populate audit_linked.id (uuid7 client-side default)
+        db_session.add(
+            AuditLog(
+                actor_user_id=user.id,
+                session_id=audit_linked.id,
+                action="test.session_linked",
+                occurred_at=NOW - datetime.timedelta(days=40),
+                result="success",
+            )
+        )
+        _session_row(db_session, user, revoked_at=NOW - datetime.timedelta(days=40))
+        db_session.commit()
+
+        report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
+        assert report.sessions_deleted == 1
+        remaining_ids = set(db_session.scalars(select(DBSession.id)).all())
+        assert remaining_ids == {audit_linked.id}
+        audit_rows = db_session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.session_id == audit_linked.id)
+        )
+        assert audit_rows == 1
+
 
 class TestAuditStaysAppendOnly:
     def test_audit_rows_are_never_deleted_by_the_maintenance_loop(
@@ -439,13 +513,15 @@ class TestAuditStaysAppendOnly:
 
         report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
 
-        # 0002 trigger + 0004 REVOKE keep the table append-only: the sweep
-        # records the skip instead of crashing or weakening the protection.
-        assert report.audit_deleted == 0
+        # 0002 trigger + 0004 REVOKE keep the table append-only; ADR-030
+        # exempts it from automatic retention purge: the sweep records the
+        # protection state instead of crashing or weakening the protection.
         assert report.audit_skipped_append_only is True
         assert db_session.scalar(select(func.count()).select_from(AuditLog)) == 2
 
     def test_audit_never_removed_when_linked_task_is_cleaned(self, db_session: Session) -> None:
+        # audit_logs.task_id is NOT a foreign key: purging an eventless
+        # terminal task leaves its audit rows fully intact.
         device = make_collection_device(db_session, index=12)
         user = _user(db_session)
         old = make_task(
@@ -473,9 +549,7 @@ class TestAuditStaysAppendOnly:
 
         report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
 
-        assert report.operation_tasks_deleted == 0
-        assert report.operation_tasks_skipped_append_only is True
-        assert report.audit_deleted == 0
+        assert report.operation_tasks_deleted == 1
         assert report.audit_skipped_append_only is True
         remaining = db_session.scalar(
             select(func.count()).select_from(AuditLog).where(AuditLog.task_id == old.id)
@@ -515,8 +589,8 @@ class TestFunctionSafety:
         assert report.operation_tasks_deleted == 0
         assert report.ui_events_deleted == 0
         assert report.sessions_deleted == 0
-        assert report.as_dict()["audit_deleted"] == 0  # report shape is stable
-        assert report.as_dict()["operation_tasks_skipped_append_only"] is True
+        assert report.as_dict()["audit_skipped_append_only"] is True  # report shape is stable
+        assert report.as_dict()["operation_task_events_skipped_append_only"] is True
 
     def test_retention_uses_settings_retention_days(self, db_session: Session) -> None:
         # A deployment that lowers raw retention to 1 day must drop partitions

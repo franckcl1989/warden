@@ -1,8 +1,8 @@
 ﻿"""Rollup generation and retention maintenance (M2T3).
 
-docs/DATA_MODEL.md 搂5.4 (rollups: gauge-only, closed windows, idempotent
-regeneration), 搂10 (tiered retention table), DEPLOYMENT.md 搂9.3 (姣?5 鍒嗛挓
-鐢熸垚鎸囨爣鑱氬悎; 姣忔棩鍒涘缓鏈潵鍒嗗尯骞舵墽琛屼繚鐣欐竻鐞?, ARCHITECTURE.md 搂3.3 (缁存姢寰幆).
+docs/DATA_MODEL.md §5.4 (rollups: gauge-only, closed windows, idempotent
+regeneration), §10 (tiered retention table), DEPLOYMENT.md §9.3 (每 5 分钟
+生成指标聚合; 每日创建未来分区并执行保留清理), ARCHITECTURE.md §3.3 (维护循环).
 The workers/maintenance.py loop calls these on their cadences; tests call them
 directly with an injected ``now``.
 
@@ -13,37 +13,54 @@ Rollup semantics:
   marker + 5m), floor5(now)) from raw metric_points. The just-closed window
   plus a small lookback lets points committed a few minutes late fold in;
   the marker (newest existing 5m row) catches windows up after worker
-  downtime, bounded by the raw retention floor 鈥?a window whose raw points
+  downtime, bounded by the raw retention floor — a window whose raw points
   were already dropped can never be rebuilt.
 - The 1h pass targets every fully closed hour whose newest (last) window lies
-  in that range 鈥?the pass that closes an hour's last window builds its
+  in that range — the pass that closes an hour's last window builds its
   hourly row, and a catch-up pass re-closes every gap hour the same way.
-  Aggregation is the documented choice of DATA_MODEL.md 搂5.4: min of the
+  Aggregation is the documented choice of DATA_MODEL.md §5.4: min of the
   window minimums, max of the window maximums, simple mean of the window
   averages with count summed, last value of the newest window, quality
   ``partial`` when any window is partial. Only windows that have rows
-  contribute 鈥?a window without data has no row and is never invented.
+  contribute — a window without data has no row and is never invented.
 - Both tables are upserted (ON CONFLICT DO UPDATE on the COALESCE key), so
   regeneration is idempotent: a rerun converges to identical rows.
 
-Retention semantics (DATA_MODEL.md 搂10):
+Retention semantics (DATA_MODEL.md §10) and the production privilege model
+(migration 0008_retention_grants):
 
-- raw metric_points leave by DROP of whole day partitions whose range END is
+- The maintenance worker runs as ``warden_app``, which OWNS the purgeable
+  tables after 0008 — that ownership is what makes this sweep deployable:
+  warden_app can DELETE rows and DROP old metric_points partitions, and it
+  has CREATE on schema public to pre-create the future partition window.
+  audit_logs/operation_task_events stay owned by the migration role with
+  their REVOKE + append-only triggers (0002/0005) — never touched here.
+- Raw metric_points leave by DROP of whole day partitions whose range END is
   at or before the cutoff (day granularity is the documented precision of the
-  partition scheme 鈥?the partition that straddles the cutoff is kept whole);
-- every other table is batch-deleted (PK-ordered chunks of
-  ``DELETE_BATCH_SIZE``, counted 鈥?DATA_MODEL.md 搂10: 鍒嗘壒鍒犻櫎);
-- operation tasks and audit logs are NEVER deleted here: their event/audit
-  streams are protected by DB-level append-only triggers (0005 for
-  operation_task_events 鈥?a task cannot be removed while its event stream
-  exists 鈥?and 0002 plus the 0004 REVOKE for audit_logs). The sweep probes
-  the triggers once per pass and reports the skips
-  (``operation_tasks_skipped_append_only`` / ``audit_skipped_append_only``);
-  those rows leave only through database administration. Task volume is
-  human-triggered, so the unbounded-but-small history is the accepted
-  0.1.0 trade-off against weakening append-only (ADR-028);
-- ui_events keep their 10-minute SSE window (DATA_MODEL.md 搂11); sessions are
-  cleaned 30 days after revocation or absolute expiry (DATA_MODEL.md 搂10).
+  partition scheme — the partition that straddles the cutoff is kept whole).
+- Every other purgeable table is batch-deleted in PK-ordered chunks of
+  ``DELETE_BATCH_SIZE``, counted (DATA_MODEL.md §10: 分批删除).
+- Terminal operation tasks age out by DELETE **only when no event row exists**:
+  the 0005 append-only trigger on operation_task_events (DATABASE-level,
+  ADR-030) makes the FK cascade impossible — PostgreSQL fires child row
+  triggers on FK actions, so deleting an evented task raises. Eventless
+  terminal tasks (never claimed/transitioned) are the only ones removable at
+  the application layer; evented tasks stay with their append-only stream
+  and leave only through out-of-band database administration (ADR-030).
+- Sessions are cleaned 30 days after revocation or absolute expiry, except
+  sessions referenced by audit_logs.session_id: the FK is ON DELETE SET NULL
+  and the 0002 audit trigger rejects that internal UPDATE (PostgreSQL fires
+  child BEFORE UPDATE triggers on FK SET NULL actions), so an audit-linked
+  session survives as long as its audit rows do — the audit stream is
+  permanent (ADR-030), and the sweep records honest counts instead of
+  crashing on a daily cadence.
+- The append-only streams themselves (audit_logs, operation_task_events) are
+  exempt from automatic retention purge (ADR-030): the sweep probes their
+  no-delete triggers once per pass and reports
+  ``audit_skipped_append_only`` / ``operation_task_events_skipped_append_only``
+  so a tampered trigger state (flag False) is visible instead of silently
+  deleting history. ui_events keep their 10-minute SSE window
+  (DATA_MODEL.md §11).
 """
 
 from __future__ import annotations
@@ -79,15 +96,15 @@ ONE_HOUR = datetime.timedelta(hours=1)
 # retention, so the source points are guaranteed to exist.
 ROLLUP_REGENERATION_LOOKBACK = datetime.timedelta(minutes=15)
 
-# ui_events retention (DATA_MODEL.md 搂11: SSE 绐楀彛淇濈暀 10 鍒嗛挓).
+# ui_events retention (DATA_MODEL.md §11: SSE 窗口保留 10 分钟).
 UI_EVENT_RETENTION = datetime.timedelta(minutes=10)
-# Login session cleanup (DATA_MODEL.md 搂10: 鐧诲綍浼氳瘽 杩囨湡鍚?30 澶╂竻鐞?.
+# Login session cleanup (DATA_MODEL.md §10: 登录会话 过期后 30 天清理).
 SESSION_CLEANUP_DELAY = datetime.timedelta(days=30)
 
-# Chunk size for retention batch deletes (DATA_MODEL.md 搂10: 鍒嗘壒鍒犻櫎).
+# Chunk size for retention batch deletes (DATA_MODEL.md §10: 分批删除).
 DELETE_BATCH_SIZE = 2000
 
-# Only gauge series are numerically aggregated (DATA_MODEL.md 搂5.4): states
+# Only gauge series are numerically aggregated (DATA_MODEL.md §5.4): states
 # stay change points, counters stay raw values.
 GAUGE_METRIC_KEYS = frozenset(
     key for key, definition in METRIC_DEFINITIONS.items() if definition.series == "gauge"
@@ -95,7 +112,9 @@ GAUGE_METRIC_KEYS = frozenset(
 
 # Table names the chunked delete helper may target. The SQL per table is a
 # FULLY STATIC literal below (no interpolation anywhere): the sweep never
-# builds SQL from input.
+# builds SQL from input. audit_logs/operation_task_events are deliberately
+# absent — they are append-only (0002/0005 triggers + 0004 REVOKE, ADR-030)
+# and are never batch-deleted here.
 _RETENTION_TABLES = frozenset(
     {
         "metric_rollups_5m",
@@ -105,13 +124,12 @@ _RETENTION_TABLES = frozenset(
         "operation_tasks",
         "ui_events",
         "sessions",
-        "audit_logs",
     }
 )
 
 _PARTITION_NAME_PATTERN = re.compile(r"^metric_points_\d{4}_\d{2}_\d{2}$")
 
-# Chunked deletes keep every statement bounded (DATA_MODEL.md 搂10: 鍒嗘壒鍒犻櫎);
+# Chunked deletes keep every statement bounded (DATA_MODEL.md §10: 分批删除);
 # DELETE_BATCH_SIZE is inlined as the literal 2000 below.
 _CHUNKED_DELETE_SQL: dict[str, str] = {
     "metric_rollups_5m": (
@@ -132,9 +150,17 @@ _CHUNKED_DELETE_SQL: dict[str, str] = {
         "ORDER BY id LIMIT 2000)"
     ),
     "operation_tasks": (
+        # Only terminal states (finished_at is set exactly on terminal
+        # states); queued/running/verification_required are never touched.
+        # The NOT EXISTS guard keeps the 0005 append-only stream intact: the
+        # FK cascade from a task with event rows would fire the
+        # operation_task_events no-delete trigger (PostgreSQL fires child row
+        # triggers on FK actions), so only eventless terminal tasks can be
+        # removed at the application layer (ADR-030).
         "DELETE FROM operation_tasks WHERE id IN "
         "(SELECT id FROM operation_tasks WHERE state IN "
         "('succeeded', 'failed', 'timed_out', 'cancelled') AND finished_at < :cutoff "
+        "AND NOT EXISTS (SELECT 1 FROM operation_task_events e WHERE e.task_id = operation_tasks.id) "
         "ORDER BY id LIMIT 2000)"
     ),
     "ui_events": (
@@ -142,16 +168,18 @@ _CHUNKED_DELETE_SQL: dict[str, str] = {
         "(SELECT id FROM ui_events WHERE occurred_at < :cutoff ORDER BY id LIMIT 2000)"
     ),
     "sessions": (
+        # audit_logs.session_id is FK ON DELETE SET NULL; the 0002 audit
+        # trigger rejects the internal UPDATE PostgreSQL performs for the FK
+        # action, so an audit-referenced session cannot be deleted while its
+        # audit rows live (audit is permanent, ADR-030). The NOT EXISTS guard
+        # keeps the sweep from crashing on a daily cadence; such sessions
+        # leave only through out-of-band database administration.
         "DELETE FROM sessions WHERE id IN "
-        "(SELECT id FROM sessions WHERE (revoked_at IS NOT NULL AND revoked_at < :cutoff) "
-        "OR (revoked_at IS NULL AND absolute_expires_at < :cutoff) "
-        "ORDER BY id LIMIT 2000)"
-    ),
-    "audit_logs": (
-        "DELETE FROM audit_logs WHERE id IN "
-        "(SELECT id FROM audit_logs WHERE occurred_at < :cutoff "
-        "AND (task_id IS NULL OR task_id NOT IN (SELECT id FROM operation_tasks)) "
-        "ORDER BY id LIMIT 2000)"
+        "(SELECT s.id FROM sessions s "
+        "WHERE ((s.revoked_at IS NOT NULL AND s.revoked_at < :cutoff) "
+        "OR (s.revoked_at IS NULL AND s.absolute_expires_at < :cutoff)) "
+        "AND NOT EXISTS (SELECT 1 FROM audit_logs a WHERE a.session_id = s.id) "
+        "ORDER BY s.id LIMIT 2000)"
     ),
 }
 
@@ -186,7 +214,7 @@ class RollupReport:
 
 @dataclass
 class RetentionReport:
-    """Counters from one retention pass (DATA_MODEL.md 搂10 璁板綍娓呯悊鏁伴噺)."""
+    """Counters from one retention pass (DATA_MODEL.md §10 记录清理数量)."""
 
     partitions_dropped: list[str] = field(default_factory=list)
     rollup_5m_deleted: int = 0
@@ -196,9 +224,12 @@ class RetentionReport:
     operation_tasks_deleted: int = 0
     ui_events_deleted: int = 0
     sessions_deleted: int = 0
-    audit_deleted: int = 0
+    # Append-only streams (audit_logs, operation_task_events) are exempt from
+    # automatic retention purge (ADR-030): the flags report that the 0002/
+    # 0005 no-delete triggers were present (True), so a tampered trigger
+    # state becomes visible instead of silently deleting history.
     audit_skipped_append_only: bool = False
-    operation_tasks_skipped_append_only: bool = False
+    operation_task_events_skipped_append_only: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -408,7 +439,7 @@ def _hourly_window_rows(
 ) -> list[dict[str, object]]:
     """Aggregate the closed 5m rows of hour [hour_start, hour_start + 1h).
 
-    Documented choice (DATA_MODEL.md 搂5.4, M2T3 brief): min of the window
+    Documented choice (DATA_MODEL.md §5.4, M2T3 brief): min of the window
     minimums, max of the window maximums, simple mean of the window averages,
     count summed, last value from the newest window, quality partial when any
     window is partial. Only windows that have rows contribute.
@@ -506,7 +537,14 @@ def generate_rollups(
     """Generate/regenerate rollups for closed windows (the caller commits).
 
     Range: [max(floor5(now) - lookback, marker + 5m, raw retention floor),
-    floor5(now)) 鈥?see the module docstring for the catch-up semantics.
+    floor5(now)) — see the module docstring for the catch-up semantics.
+
+    The lookback is bounded (``ROLLUP_REGENERATION_LOOKBACK`` = 15 minutes):
+    a point committed later than 15 minutes after its window closed is
+    preserved in raw metric_points / metric_latest but is NOT folded into the
+    5m/1h aggregates (collection commits happen within seconds in this
+    design; the bound keeps regeneration reads small and is never allowed to
+    reach into raw-retention-dropped windows).
     """
     floor = _floor_5m(now)
     marker = db.scalar(select(func.max(MetricRollup5m.window_start)))
@@ -542,9 +580,12 @@ def generate_rollups(
 def ensure_partitions(db: Session, *, now: datetime.datetime) -> int:
     """Create daily metric_points partitions for the next 14 days (idempotent).
 
-    docs/DEPLOYMENT.md 搂9.2: PostgreSQL 鏃ュ垎鍖烘湭鏉ヨ嚦灏戦鍒涘缓 14 澶? Migration
+    docs/DEPLOYMENT.md §9.2: PostgreSQL 日分区未来至少预创建 14 天. Migration
     0006 pre-creates the same window at install; the daily maintenance call
-    keeps the window rolling. Returns how many partitions were created.
+    keeps the window rolling. Runs as warden_app in production, which OWNS
+    metric_points and holds CREATE on schema public after 0008 + the
+    deployment init script (partition creation requires schema CREATE even
+    for the parent's owner — PG18). Returns how many partitions were created.
     """
     return ensure_metric_partitions(db, start_date=now.date(), days=14)
 
@@ -628,10 +669,12 @@ def _chunked_delete(db: Session, table: str, params: dict[str, object]) -> int:
 def _append_only_trigger_exists(db: Session, table: str, trigger: str) -> bool:
     """True when an append-only trigger protects ``table`` (0002/0005).
 
-    The audit (0002) and operation_task_events (0005) triggers reject DELETE
-    for every role; 0004 additionally revoked the app account's audit DELETE.
-    The sweep probes once per pass and reports the skip instead of raising on
-    a daily cadence.
+    The audit (0002) and operation_task_events (0005) triggers reject UPDATE/
+    DELETE for every role; 0004 additionally revoked the app account's audit
+    DELETE. ADR-030 exempts both streams from automatic retention purge, so
+    the sweep probes them once per pass and reports the protection state
+    (``*_skipped_append_only``) instead of attempting a DELETE that must
+    fail — a tampered trigger state shows up as False in the report.
     """
     exists = db.execute(
         text(
@@ -649,7 +692,14 @@ def enforce_retention(
     now: datetime.datetime,
     settings: WardenSettings,
 ) -> RetentionReport:
-    """Enforce the tiered retention (DATA_MODEL.md 搂10); the caller commits."""
+    """Enforce the tiered retention (DATA_MODEL.md §10); the caller commits.
+
+    Production runs this as warden_app, which OWNS the purgeable tables after
+    migration 0008 — the DROP/UPDATE/DELETE below are therefore real,
+    deployable behavior. The append-only streams are never touched (ADR-030;
+    see the module docstring for the exact exemptions and the PostgreSQL
+    trigger/ownership mechanics).
+    """
     report = RetentionReport()
 
     # Raw points: drop whole day partitions whose range END is at/before the
@@ -686,44 +736,42 @@ def enforce_retention(
         "alerts",
         {"cutoff": _days_ago(settings.resolved_alert_retention_days)},
     )
-    # DATA_MODEL.md §10 lists 操作任务与任务事件 at 365 days, but the
-    # operation_task_events append-only trigger (0005, DATA_MODEL.md §7.3
-    # 禁止更新/删除历史事件) makes the FK cascade impossible — a task cannot
-    # be removed while its event stream exists. Same resolution as audit:
-    # report the skip; events/tasks leave only through database administration.
-    # (Task volume is human-triggered, so the unbounded-but-small history is
-    # acceptable for 0.1.0 versus weakening append-only.)
-    if _append_only_trigger_exists(db, "operation_task_events", "operation_task_events_no_delete"):
-        report.operation_tasks_skipped_append_only = True
-    else:
-        # Only terminal states (finished_at is set exactly on terminal
-        # states); queued/running/verification_required are never touched.
-        report.operation_tasks_deleted = _chunked_delete(
-            db,
-            "operation_tasks",
-            {"cutoff": _days_ago(settings.operation_retention_days)},
-        )
+    # Terminal tasks age out by DELETE — the chunked statement's NOT EXISTS
+    # guard keeps the 0005 append-only stream intact (see the SQL comment):
+    # evented tasks stay with their history (ADR-030), eventless terminal
+    # tasks are the only ones removable at the application layer. Terminal
+    # states only; queued/running/verification_required are never touched.
+    report.operation_tasks_deleted = _chunked_delete(
+        db,
+        "operation_tasks",
+        {"cutoff": _days_ago(settings.operation_retention_days)},
+    )
     report.ui_events_deleted = _chunked_delete(
         db,
         "ui_events",
         {"cutoff": now - UI_EVENT_RETENTION},
     )
+    # Sessions 30 days after revocation/absolute expiry; audit-referenced
+    # sessions are exempt (the NOT EXISTS guard in the SQL — the 0002 audit
+    # trigger rejects the FK SET NULL, so they live as long as their audit
+    # rows, ADR-030).
     report.sessions_deleted = _chunked_delete(
         db,
         "sessions",
         {"cutoff": now - SESSION_CLEANUP_DELAY},
     )
-    # DATA_MODEL.md §10 lists audit rows at 365 days ("且不得早于关联任务"),
-    # but the baseline append-only enforcement (0002 trigger + 0004 REVOKE,
-    # ADR-028 / SECURITY.md §12) makes application-layer deletes impossible.
-    # Report the skip instead of attempting a DELETE that must fail; audit
-    # history leaves only through database administration.
-    if _append_only_trigger_exists(db, "audit_logs", "audit_logs_no_delete"):
-        report.audit_skipped_append_only = True
-    else:
-        report.audit_deleted = _chunked_delete(
-            db,
-            "audit_logs",
-            {"cutoff": _days_ago(settings.audit_retention_days)},
-        )
+    # DATA_MODEL.md §10 lists audit rows and task events at 365 days, but both
+    # streams are append-only at the database (0002/0005 triggers + the 0004
+    # REVOKE on audit_logs; operation_task_events also has no DELETE grant
+    # after 0008). ADR-030: they are EXEMPT from automatic retention purge —
+    # physical cleanup is an out-of-band DBA operation in 0.1.0. The probes
+    # report the protection state once per pass (True = trigger present), so
+    # a tampered database becomes visible instead of failing the pass or
+    # silently deleting history.
+    report.audit_skipped_append_only = _append_only_trigger_exists(
+        db, "audit_logs", "audit_logs_no_delete"
+    )
+    report.operation_task_events_skipped_append_only = _append_only_trigger_exists(
+        db, "operation_task_events", "operation_task_events_no_delete"
+    )
     return report

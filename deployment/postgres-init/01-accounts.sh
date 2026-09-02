@@ -44,4 +44,12 @@ END
 GRANT CONNECT ON DATABASE $POSTGRES_DB TO warden_app, warden_migrate;
 GRANT USAGE ON SCHEMA public TO warden_app;
 GRANT CREATE, USAGE ON SCHEMA public TO warden_migrate;
+-- 迁移 0008（保留清理权限模型）：warden_app 需要 schema CREATE 才能由维护循环
+-- 预创建 metric_points 日分区（PG18：即使拥有分区父表也需要 schema CREATE），
+-- 且 ALTER OWNER 要求新属主拥有 schema CREATE；
+-- warden_migrate 需要 warden_app 成员资格才能把可清理表的所有权转移给
+-- warden_app（PG18：非超级用户 ALTER OWNER 必须是新属主角色的成员）。
+-- 本脚本先于 migrate 容器运行，因此 0008 在生产环境可确定性地生效。
+GRANT CREATE ON SCHEMA public TO warden_app;
+GRANT warden_app TO warden_migrate;
 SQL

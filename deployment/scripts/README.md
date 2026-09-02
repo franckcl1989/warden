@@ -45,7 +45,7 @@ warden bootstrap-admin <用户名>          # 创建首个管理员（仅 users 
 | `audit_logs` 表（CLI 写入列） | `actor text`、`actor_session_id`（可空）、`action text`、`resource_type text`、`resource_id`、`result text`、`detail text`、`created_at timestamptz`（M2 迁移创建；CLI 只追加） |
 | `users` 表 | DATA_MODEL §3.1 字段；引导只做“空表检查”，行写入由 `app.tools.bootstrap_admin` 负责 |
 | `app.tools.bootstrap_admin` | M2 实现：users 表为空时创建首个管理员（Argon2id 参数见 SECURITY §2），密码从 stdin 或 `WARDEN_BOOTSTRAP_PASSWORD_FILE` 读取，拒绝时非零退出并写审计 |
-| `postgres-init/01-accounts.sh` | 首次空数据目录时由官方镜像执行：从 DSN Secret 文件提取密码创建 `warden_app`（无超级用户/无建库）与 `warden_migrate`，授予 schema 访问；密码字符集 `[A-Za-z0-9._-]` |
+| `postgres-init/01-accounts.sh` | 首次空数据目录时由官方镜像执行：从 DSN Secret 文件提取密码创建 `warden_app`（无超级用户/无建库）与 `warden_migrate`，授予 schema 访问；warden_app 另获 `CREATE ON SCHEMA public`（分区维护循环与 0008 所有权转移需要，PG18），`warden_migrate` 获 `warden_app` 成员资格（0008 把可清理表所有权转移给应用账号需要）。表级权限模型由迁移补充：0004 授予 SELECT/INSERT/UPDATE 并 REVOKE audit_logs 的 UPDATE/DELETE，0008 把可清理表（metric_points 及分区、rollups、events、alerts、operation_tasks、ui_events、sessions）所有权转移给 `warden_app`；audit_logs/operation_task_events 保持迁移账号属主 + 只追加触发器 |
 
 ## 容器入口脚本
 

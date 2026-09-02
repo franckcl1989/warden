@@ -96,10 +96,9 @@ class MaintenanceReport:
     device_events_deleted: int = 0
     resolved_alerts_deleted: int = 0
     operation_tasks_deleted: int = 0
-    operation_tasks_skipped_append_only: bool = False
+    operation_task_events_skipped_append_only: bool = False
     ui_events_deleted: int = 0
     sessions_deleted: int = 0
-    audit_deleted: int = 0
     audit_skipped_append_only: bool = False
     partitions_created: int = 0
 
@@ -199,12 +198,11 @@ class MaintenanceLoop:
         report.device_events_deleted = retention_report.device_events_deleted
         report.resolved_alerts_deleted = retention_report.resolved_alerts_deleted
         report.operation_tasks_deleted = retention_report.operation_tasks_deleted
-        report.operation_tasks_skipped_append_only = (
-            retention_report.operation_tasks_skipped_append_only
+        report.operation_task_events_skipped_append_only = (
+            retention_report.operation_task_events_skipped_append_only
         )
         report.ui_events_deleted = retention_report.ui_events_deleted
         report.sessions_deleted = retention_report.sessions_deleted
-        report.audit_deleted = retention_report.audit_deleted
         report.audit_skipped_append_only = retention_report.audit_skipped_append_only
         report.partitions_created = ensure_partitions(session, now=now)
         self._next_retention_at = now + datetime.timedelta(seconds=self._retention_cadence)

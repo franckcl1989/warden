@@ -324,7 +324,7 @@ class TestRollupRetentionWiring:
         assert report.rollup_rows_5m == 1
         assert report.rollup_rows_1h == 0
         assert report.ui_events_deleted == 1
-        assert report.operation_tasks_skipped_append_only is True
+        assert report.operation_task_events_skipped_append_only is True
         assert report.audit_skipped_append_only is True
         rollup = db_session.execute(
             select(MetricRollup5m).where(MetricRollup5m.device_id == device_id)
