@@ -26,6 +26,7 @@ from app.api.routes import (
     collection_runs,
     device_file_access,
     devices,
+    events,
     files,
     metrics,
     operations,
@@ -94,6 +95,8 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     api_v1_router.include_router(alerts.router, dependencies=[Depends(require_password_changed)])
     # M2T4 two-phase operations API (PLT-05): preview/confirm + task lifecycle.
     api_v1_router.include_router(operations.router, dependencies=[Depends(require_password_changed)])
+    # M2T6 SSE realtime stream (PLT-09): ui_events replay + live updates.
+    api_v1_router.include_router(events.router, dependencies=[Depends(require_password_changed)])
     # M2T5 controlled files (PLT-06): upload sessions / metadata / download /
     # logical delete. Sessions, storage and keyring dependencies resolve per
     # request from app.state (lazy, see api/deps.py).

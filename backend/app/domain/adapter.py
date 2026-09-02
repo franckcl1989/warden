@@ -487,9 +487,18 @@ class VerificationResult:
     must enter/remain ``verification_required`` (error ambiguous_result) and
     may only be resolved by another read-back or by admin evidence — never by
     replaying the action (AGENTS.md: 不得把不确定的结果伪装成成功).
+
+    ``pending=True`` reports an asynchronous device job that is STILL RUNNING
+    (a device_job_status strategy whose persisted job has not finished yet):
+    the worker keeps polling ``verify_operation`` for the same persisted job
+    while the task stays ``waiting_device`` with renewed leases
+    (DATA_MODEL.md §7.1: 存在时只查询，不重复创建). Pending is neither
+    success nor failure and never maps to ambiguous — the job is known to
+    still be in progress.
     """
 
     succeeded: bool
     ambiguous: bool = False
+    pending: bool = False
     evidence: dict[str, object] = field(default_factory=dict)
     error_code: str | None = None

@@ -574,6 +574,54 @@ def test_verify_ambiguous_keeps_task_verification_required(
 
 
 @pytest.mark.integration
+def test_verify_pending_job_keeps_task_verification_required(
+    device_client: TestClient, db_session: Session,
+) -> None:
+    """M2T6: an admin read-back whose device job is still running (pending)
+    must keep the task verification_required — never mark it failed."""
+    admin, admin_csrf = _admin(device_client, db_session)
+    probe = probe_and_get_token(
+        device_client,
+        admin_csrf,
+        connection_config={"device_job_mode": True, "job_poll_rounds": 2},
+    )
+    assert probe["ok"] is True
+    created = create_device(
+        device_client,
+        admin_csrf,
+        token=probe["probe_token"],
+        name="fake-srv-pending",
+        connection_config={"device_job_mode": True, "job_poll_rounds": 2},
+    )
+    assert created.status_code == 201
+    device_id = str(created.json()["id"])
+    operator = create_user(
+        db_session, username="op-pending", password=OPERATOR_PASSWORD, role="operator"
+    )
+    task = make_task(
+        db_session,
+        device_id=uuid.UUID(device_id),
+        requested_by=operator.id,
+        index=0,
+        idempotency_key="seed-verify-pending",
+        requirement_id="SRV-ACT-02",
+        capability_key="power.on",
+        state="verification_required",
+        error_code="ambiguous_result",
+        device_job_id="fake-job-1",
+    )
+    verified = device_client.post(
+        f"{API}/operations/{task.id}/verify",
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert verified.status_code == 200
+    body = verified.json()
+    assert body["state"] == "verification_required"
+    assert body["error_code"] == "ambiguous_result"
+    assert body["evidence"]["verification"]["pending"] is True
+
+
+@pytest.mark.integration
 def test_resolve_verification_requires_evidence_and_state(
     device_client: TestClient, db_session: Session, onboarded_device: tuple[str, dict[str, object]],
 ) -> None:

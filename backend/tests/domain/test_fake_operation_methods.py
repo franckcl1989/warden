@@ -1,9 +1,10 @@
-"""Fake adapter operation methods (M2T4, docs/DEVICE_ADAPTERS.md §2.4/§4.2/§9).
+"""Fake adapter operation methods (M2T4/M2T6, DEVICE_ADAPTERS.md §2.4/§4.2/§9).
 
 Unit tests over plan/preflight/execute/verify with their mode flags; the
-worker wiring that CALLS them lands in M2T6, so these cover the adapter
-contract itself. Plans mirror the shared domain planner over a hand-built
-server snapshot (no DB, no device).
+worker wiring that CALLS them is exercised by the M2T6 executor/E2E suites.
+Plans mirror the shared domain planner over a hand-built server snapshot
+(no DB, no device). M2T6 fault modes (slow progress, job-poll rounds,
+crash before/after the fence) are covered here too.
 """
 
 from __future__ import annotations
@@ -14,15 +15,21 @@ import uuid
 import pytest
 from app.adapters.fake import (
     AMBIGUOUS_MODE_KEY,
+    CRASH_AFTER_FENCE_MODE_KEY,
+    CRASH_BEFORE_FENCE_MODE_KEY,
     DEVICE_JOB_MODE_KEY,
     EXECUTE_FAIL_MODE_KEY,
     EXECUTE_TIMEOUT_MODE_KEY,
     FAIL_PREFLIGHT_MODE_KEY,
     FAKE_DEVICE_JOB_ID,
+    JOB_POLL_FAIL_MODE_KEY,
+    JOB_POLL_ROUNDS_KEY,
+    SLOW_MODE_KEY,
     STALE_PREFLIGHT_MODE_KEY,
     VERIFY_AMBIGUOUS_MODE_KEY,
     VERIFY_FAIL_MODE_KEY,
     FakeSimpleAdapter,
+    SimulatedWorkerCrash,
 )
 from app.domain.adapter import (
     AdapterTimeoutError,
@@ -73,9 +80,11 @@ SNAPSHOT = DeviceSnapshot(
 
 
 def _session(**config_overrides: object) -> DeviceSession:
+    device_id = config_overrides.pop("device_id", DEVICE_ID)
+    assert isinstance(device_id, uuid.UUID)
     config: dict[str, object] = dict(config_overrides)
     return DeviceSession(
-        device_id=DEVICE_ID,
+        device_id=device_id,
         management_endpoint="192.0.2.10",
         connection_config=config,
         credentials={"username": "admin", "password": "secret"},
@@ -226,3 +235,88 @@ def test_verify_ambiguous_mode_reports_unprovable_outcome() -> None:
     assert result.succeeded is False
     assert result.ambiguous is True
     assert result.error_code == "ambiguous_result"
+
+
+# -- M2T6 fault-injection modes --------------------------------------------
+
+
+@pytest.mark.unit
+def test_slow_mode_reports_stepwise_progress() -> None:
+    progress: list[tuple[int, str | None]] = []
+    started = time.monotonic()
+    result = FAKE.execute_operation(
+        _session(**{SLOW_MODE_KEY: True}), _power_on_plan(), lambda p, m: progress.append((p, m))
+    )
+    elapsed = time.monotonic() - started
+    assert result.ok is True
+    assert [p for p, _m in progress] == [20, 40, 60, 80, 100]
+    assert elapsed >= 0.9, "slow_mode must spread progress across ~1 s"
+
+
+@pytest.mark.unit
+def test_crash_before_fence_fires_once_per_device_then_passes() -> None:
+    fake = FakeSimpleAdapter()
+    device_id = uuid.uuid4()
+    session = _session(**{CRASH_BEFORE_FENCE_MODE_KEY: True, "device_id": device_id})
+    with pytest.raises(SimulatedWorkerCrash) as exc:
+        fake.preflight_operation(session, _power_on_plan())
+    assert "crash_before_fence" in str(exc.value)
+    # The fault fires once per device: recovery retries succeed.
+    result = fake.preflight_operation(session, _power_on_plan())
+    assert result.ok is True
+
+
+@pytest.mark.unit
+def test_crash_after_fence_fires_once_per_device_then_passes() -> None:
+    fake = FakeSimpleAdapter()
+    device_id = uuid.uuid4()
+    session = _session(**{CRASH_AFTER_FENCE_MODE_KEY: True, "device_id": device_id})
+    with pytest.raises(SimulatedWorkerCrash):
+        fake.execute_operation(session, _power_on_plan(), _noop_progress)
+    result = fake.execute_operation(session, _power_on_plan(), _noop_progress)
+    assert result.ok is True
+
+
+@pytest.mark.unit
+def test_crash_modes_are_independent_per_device() -> None:
+    fake = FakeSimpleAdapter()
+    first = _session(**{CRASH_AFTER_FENCE_MODE_KEY: True, "device_id": uuid.uuid4()})
+    second = _session(**{CRASH_AFTER_FENCE_MODE_KEY: True, "device_id": uuid.uuid4()})
+    with pytest.raises(SimulatedWorkerCrash):
+        fake.execute_operation(first, _power_on_plan(), _noop_progress)
+    with pytest.raises(SimulatedWorkerCrash):
+        fake.execute_operation(second, _power_on_plan(), _noop_progress)
+
+
+@pytest.mark.unit
+def test_job_poll_rounds_report_pending_then_success() -> None:
+    fake = FakeSimpleAdapter()
+    session = _session(**{DEVICE_JOB_MODE_KEY: True, JOB_POLL_ROUNDS_KEY: 2, "device_id": uuid.uuid4()})
+    executed = fake.execute_operation(session, _power_on_plan(), _noop_progress)
+    assert executed.device_job_id == FAKE_DEVICE_JOB_ID
+    first = fake.verify_operation(session, _power_on_plan(), executed)
+    assert first.succeeded is False and first.ambiguous is False and first.pending is True
+    assert first.evidence["job_status"] == "running"
+    second = fake.verify_operation(session, _power_on_plan(), executed)
+    assert second.pending is True
+    third = fake.verify_operation(session, _power_on_plan(), executed)
+    assert third.succeeded is True and third.pending is False
+
+
+@pytest.mark.unit
+def test_job_poll_fail_mode_ends_in_explicit_failure() -> None:
+    fake = FakeSimpleAdapter()
+    session = _session(
+        **{
+            DEVICE_JOB_MODE_KEY: True,
+            JOB_POLL_ROUNDS_KEY: 1,
+            JOB_POLL_FAIL_MODE_KEY: True,
+            "device_id": uuid.uuid4(),
+        }
+    )
+    executed = fake.execute_operation(session, _power_on_plan(), _noop_progress)
+    first = fake.verify_operation(session, _power_on_plan(), executed)
+    assert first.pending is True
+    verdict = fake.verify_operation(session, _power_on_plan(), executed)
+    assert verdict.succeeded is False and verdict.pending is False
+    assert verdict.error_code == "operation_failed"

@@ -10,7 +10,12 @@ The device mutex (DATA_MODEL.md §7.1) is enforced by the partial unique index
 ``uq_operation_tasks_active_mutex`` from the migration: at most one active
 (queued/running/waiting_device) task per (device_id, conflict_scope) for the
 mutex scopes device/component:disk. ``conflict_scope`` is copied from the
-operations.json profile at task creation (M2T5).
+operations.json profile at task creation (M2T5). ``attempt_count`` (migration
+0012) counts crash-driven recovery requeues of READ-only profiles: a
+fence-less read task may start a new attempt bounded by the deployment setting
+``operation_read_max_attempts`` (DATA_MODEL.md §7.2); side-effect profiles
+never re-execute after the dispatch fence and never consume attempts
+(DEVICE_ADAPTERS.md §9).
 """
 
 from __future__ import annotations
@@ -67,6 +72,7 @@ class OperationTask(Base):
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     conflict_scope: Mapped[str] = mapped_column(String(32), nullable=False)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     progress_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     current_step: Mapped[str | None] = mapped_column(Text)
     lease_owner: Mapped[str | None] = mapped_column(String(64))
@@ -115,6 +121,7 @@ class OperationTask(Base):
             "progress_percent >= 0 AND progress_percent <= 100",
             name="ck_operation_tasks_progress_percent",
         ),
+        CheckConstraint("attempt_count >= 0", name="ck_operation_tasks_attempt_count"),
         CheckConstraint("version >= 1", name="ck_operation_tasks_version"),
     )
     # docs/DATA_MODEL.md §7.1: 同一设备存在 running/waiting_device 变更任务时，

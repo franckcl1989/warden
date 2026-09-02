@@ -5,13 +5,18 @@ processed in its own transaction (DATA_MODEL.md §11) with conditional
 UPDATEs, so a second maintenance loop or a concurrent worker transition makes
 a candidate a harmless no-op:
 
-- lease recovery (recovery_scan): running tasks whose lease expired are
-  classified by the pure ``recover_task`` fence logic (DEVICE_ADAPTERS.md §9)
-  using the profile from the GENERATED registry (never hardcoded):
-    - no dispatch fence / read-only without a device job  -> requeue (queued)
+- lease recovery (recovery_scan): running/waiting_device tasks whose lease
+  expired are classified by the pure ``recover_task`` fence logic
+  (DEVICE_ADAPTERS.md §9) using the profile from the GENERATED registry
+  (never hardcoded):
+    - no dispatch fence / read-only without a device job  -> requeue (queued);
+      READ profiles requeue at most ``operation_read_max_attempts - 1`` times
+      (attempt_count, migration 0012) — past the cap the task fails
+      terminally (network_unreachable) instead of spinning a crashing worker
     - fenced side-effect task (or read with a persisted job) -> verify_only:
-      an event is appended once and the lease is cleared (task stays running;
-      the M2T6 verify path claims fenced tasks and only read-backs)
+      an event is appended once and the lease is cleared (task stays
+      running/waiting_device; the M2T6 verify path claims fenced tasks and
+      only read-backs)
     - verification already failed to prove -> verification_required
 - timeout sweep (timeout_scan): running/waiting_device tasks past timeout_at
   are classified by the pure ``timeout_transition`` profile semantics into
@@ -38,6 +43,7 @@ from dataclasses import asdict, dataclass
 import structlog
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.collection import emit_ui_event
 from app.application.maintenance import (
     enforce_file_retention,
     enforce_retention,
@@ -58,6 +64,7 @@ from app.infrastructure.files import FileStorage
 from app.infrastructure.tasks import (
     append_event,
     clear_lease,
+    fail_recovered_task,
     mark_timeout,
     mark_verification_required,
     recovery_scan,
@@ -79,9 +86,11 @@ ROLLUP_CADENCE_SECONDS = 300.0
 RETENTION_CADENCE_SECONDS = 86400.0
 
 VERIFY_ONLY_EVENT_MESSAGE = (
-    "recovery_verify_only: dispatch fence present; only verify/read-back allowed (execution wiring lands M2T6)"
+    "recovery_verify_only: dispatch fence present; only verify/read-back allowed "
+    "(executor consumption wired in M2T6)"
 )
 REQUEUE_EVENT_MESSAGE = "recovery_requeued: no dispatch fence; task reclaimable after full precondition recheck"
+READ_ATTEMPT_CAP_MESSAGE = "recovery_read_attempt_cap: read task requeue limit reached; task failed terminally"
 
 
 @dataclass
@@ -93,6 +102,7 @@ class MaintenanceReport:
     verify_only: int = 0
     verification_required: int = 0
     timed_out: int = 0
+    recovery_failed: int = 0
     skipped_missing_profile: int = 0
     # M2T3 rollup/retention counters (0 when the pass skipped a cadence).
     rollup_rows_5m: int = 0
@@ -277,8 +287,36 @@ class MaintenanceLoop:
                 verification_state=task.verification_state,
             )
             if action is RecoveryAction.REQUEUE:
-                if requeue_task(session, task_id=task.id, message=REQUEUE_EVENT_MESSAGE):
-                    report.requeued += 1
+                if profile.side_effect:
+                    # Fence-less side-effect task: nothing was ever sent, so
+                    # the task is reclaimable without an attempt bound
+                    # (DEVICE_ADAPTERS.md §9: 重新领取但重新检查全部前置条件).
+                    if requeue_task(session, task_id=task.id, message=REQUEUE_EVENT_MESSAGE):
+                        report.requeued += 1
+                elif task.attempt_count + 1 < self._settings.operation_read_max_attempts:
+                    # Read profile: a NEW attempt is allowed (DEVICE_ADAPTERS.md
+                    # §9), bounded by the deployment setting (migration 0012).
+                    if requeue_task(
+                        session,
+                        task_id=task.id,
+                        message=REQUEUE_EVENT_MESSAGE,
+                        attempt_count=task.attempt_count + 1,
+                    ):
+                        report.requeued += 1
+                elif fail_recovered_task(
+                    session,
+                    task_id=task.id,
+                    error_code="network_unreachable",
+                    error_detail=(
+                        f"读取任务恢复重试次数已达上限（{self._settings.operation_read_max_attempts} 次），"
+                        "任务终止；如需重新执行请重新预览提交"
+                    ),
+                    message=READ_ATTEMPT_CAP_MESSAGE,
+                ):
+                    # Terminal state + audit + ui_events in ONE transaction
+                    # (DATA_MODEL.md §11).
+                    self._record_recovery_terminal(session, task, outcome="failed")
+                    report.recovery_failed += 1
             elif action is RecoveryAction.REPORT_AMBIGUOUS:
                 if mark_verification_required(
                     session,
@@ -291,11 +329,46 @@ class MaintenanceLoop:
                     append_event(
                         session,
                         task_id=task.id,
-                        state=TaskState.RUNNING.value,
+                        state=task.state,
                         message=VERIFY_ONLY_EVENT_MESSAGE,
                     )
                     report.verify_only += 1
             session.commit()
+
+    def _record_recovery_terminal(self, session: Session, task: OperationTask, *, outcome: str) -> None:
+        """Audit + ui_event inside the recovery terminal-failure transaction.
+
+        The M2T6 read-attempt-cap failure is a terminal transition; per
+        DATA_MODEL.md §11 the terminal state, its audit and the ui_event must
+        commit together. Requeue/verify-only parking are NOT terminal and stay
+        event-only (M2T1 semantics).
+        """
+        if self._audit_logger is not None:
+            self._audit_logger.record_in(
+                session,
+                action="operation.finish",
+                actor_user_id=task.requested_by,
+                resource_type="operation_task",
+                resource_id=str(task.id),
+                device_id=task.device_id,
+                requirement_id=task.requirement_id,
+                task_id=task.id,
+                result=outcome,
+                detail={
+                    "capability_key": task.capability_key,
+                    "state": task.state,
+                    "error_code": task.error_code,
+                    "verification_state": task.verification_state,
+                },
+            )
+        emit_ui_event(
+            session,
+            entity_type="operation_task",
+            entity_id=task.id,
+            version=task.version,
+            event_type="operation.updated",
+            payload={"state": task.state},
+        )
 
     def _timeout_one(self, task_id: object, report: MaintenanceReport) -> None:
         with self._session_factory() as session:

@@ -254,6 +254,83 @@ class TestRecovery:
         db_session.commit()
 
 
+class TestReadAttemptBound:
+    """M2T6: crash-driven read requeues are bounded by attempt_count
+    (migration 0012 + ``operation_read_max_attempts``); side-effect requeues
+    stay unbounded (nothing was ever sent — no fence)."""
+
+    def _expired(self, db_session: Session, *, requirement: str, capability: str, index: int):
+        return _expired_running(
+            db_session,
+            requirement=requirement,
+            capability=capability,
+            dispatch_started_at=None,
+            index=index,
+            idempotency_key=f"attempt-{index}",
+        )
+
+    def test_read_requeue_increments_attempt_count(self, db_session: Session) -> None:
+        task = self._expired(
+            db_session, requirement=SUPPORT_BUNDLE[0], capability=SUPPORT_BUNDLE[1], index=40
+        )
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory).run_once()
+        assert report.requeued == 1
+        db_session.refresh(task)
+        assert task.state == "queued"
+        assert task.attempt_count == 1
+
+    def test_side_effect_requeue_never_increments_attempt_count(self, db_session: Session) -> None:
+        task = self._expired(db_session, requirement=POWER_ON[0], capability=POWER_ON[1], index=41)
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory).run_once()
+        assert report.requeued == 1
+        db_session.refresh(task)
+        assert task.state == "queued"
+        assert task.attempt_count == 0
+
+    def test_read_attempt_cap_fails_task_terminally(self, db_session: Session) -> None:
+        task = self._expired(
+            db_session, requirement=SUPPORT_BUNDLE[0], capability=SUPPORT_BUNDLE[1], index=42
+        )
+        task.attempt_count = 1  # one requeue already granted -> cap reached
+        db_session.commit()
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory).run_once()
+        assert report.requeued == 0
+        assert report.recovery_failed == 1
+        db_session.refresh(task)
+        assert task.state == "failed"
+        assert task.error_code == "network_unreachable"
+        assert task.finished_at is not None
+        assert task.attempt_count == 1
+
+    def test_waiting_device_expired_lease_is_parked_verify_only(
+        self, db_session: Session
+    ) -> None:
+        device = make_device(db_session, index=43)
+        task = make_task(
+            db_session,
+            device_id=device.id,
+            requested_by=make_user(db_session, index=43).id,
+            index=43,
+            requirement_id=POWER_ON[0],
+            capability_key=POWER_ON[1],
+            state="waiting_device",
+            lease_owner="dead-poller",
+            lease_expires_at=PAST,
+            dispatch_started_at=NOW,
+            device_job_id="fake-job-1",
+            idempotency_key="attempt-waiting-43",
+        )
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory).run_once()
+        assert report.verify_only == 1
+        db_session.refresh(task)
+        assert task.state == "waiting_device"
+        assert task.lease_owner is None and task.lease_expires_at is None
+
+
 class TestRollupRetentionWiring:
     """The M2T3 jobs run from the maintenance loop at their cadences.
 

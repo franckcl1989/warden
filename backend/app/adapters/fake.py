@@ -45,6 +45,16 @@ fail_credentials/fail_tls pattern):
   the persisted job instead of re-creating it;
 - ``verify_fail_mode`` / ``verify_ambiguous_mode``: read-back explicitly fails
   or cannot prove either outcome.
+
+M2T6 fault injection (dev/test only, same connection_config pattern):
+``slow_mode`` reports stepwise progress inside execute (progress-event
+throttling tests); ``job_poll_rounds`` (int) makes ``verify_operation`` report
+the persisted device job as ``pending`` for that many polls before a terminal
+verdict (waiting_device + lease-renewal tests); ``job_poll_fail_mode`` turns
+that final verdict into an explicit failure; ``crash_before_fence_mode`` /
+``crash_after_fence_mode`` raise ``SimulatedWorkerCrash`` once per device from
+preflight / execute to simulate a worker process dying before / after the
+dispatch fence commit — the executor must never re-execute a fenced task.
 """
 
 from __future__ import annotations
@@ -90,10 +100,33 @@ AMBIGUOUS_MODE_KEY = "ambiguous_mode"
 DEVICE_JOB_MODE_KEY = "device_job_mode"
 VERIFY_FAIL_MODE_KEY = "verify_fail_mode"
 VERIFY_AMBIGUOUS_MODE_KEY = "verify_ambiguous_mode"
+# M2T6 fault injection (dev/test only).
+SLOW_MODE_KEY = "slow_mode"
+JOB_POLL_ROUNDS_KEY = "job_poll_rounds"
+JOB_POLL_FAIL_MODE_KEY = "job_poll_fail_mode"
+CRASH_BEFORE_FENCE_MODE_KEY = "crash_before_fence_mode"
+CRASH_AFTER_FENCE_MODE_KEY = "crash_after_fence_mode"
 
 FAILURE_CODES = ("network_unreachable", "authentication_failed", "protocol_error")
 
 FAKE_DEVICE_JOB_ID = "fake-job-1"
+
+
+class SimulatedWorkerCrash(RuntimeError):
+    """Dev/test-only worker-crash injection (M2T6).
+
+    Raised by the fake adapter at a configured point (preflight =
+    crash_before_fence_mode, execute = crash_after_fence_mode) to simulate the
+    worker process dying. The executor lets it propagate (a real process
+    crash has no exception handler), the pool releases the lease, and the
+    maintenance recovery decides per the dispatch fence. Each mode fires ONCE
+    per device so the test can then observe the recovery/verify path running
+    to completion against the same device.
+    """
+
+    def __init__(self, stage: str) -> None:
+        super().__init__(f"SimulatedWorkerCrash at {stage} (dev/test fault injection)")
+        self.stage = stage
 
 
 def batch_events(now: datetime.datetime) -> tuple[EventObservation, ...]:
@@ -128,6 +161,15 @@ class FakeSimpleAdapter:
     supported_device_types = frozenset({"server"})
     adapter_version = "0.1.0"
     secret_schema_version = 1
+
+    def __init__(self) -> None:
+        # Per-device fault-injection state (dev/test only). Keyed by device id
+        # so the module-level singleton never leaks a fired crash/poll across
+        # tests (every test recreates the database with fresh device ids).
+        self._crashed_preflight: set[str] = set()
+        self._crashed_execute: set[str] = set()
+        self._job_poll_calls: dict[str, int] = {}
+
     secret_schema: dict[str, object] = {
         "type": "object",
         "required": ["username", "password"],
@@ -171,6 +213,12 @@ class FakeSimpleAdapter:
             DEVICE_JOB_MODE_KEY: {"type": "boolean"},
             VERIFY_FAIL_MODE_KEY: {"type": "boolean"},
             VERIFY_AMBIGUOUS_MODE_KEY: {"type": "boolean"},
+            # M2T6 fault-injection modes (dev/test only).
+            SLOW_MODE_KEY: {"type": "boolean"},
+            JOB_POLL_ROUNDS_KEY: {"type": "integer", "minimum": 0, "maximum": 50},
+            JOB_POLL_FAIL_MODE_KEY: {"type": "boolean"},
+            CRASH_BEFORE_FENCE_MODE_KEY: {"type": "boolean"},
+            CRASH_AFTER_FENCE_MODE_KEY: {"type": "boolean"},
         },
     }
 
@@ -310,9 +358,16 @@ class FakeSimpleAdapter:
         Success by default; ``fail_preflight_mode`` rejects with
         validation_failed, ``stale_preflight_mode`` signals device-version
         drift so the worker fails the task as preview_stale.
+        ``crash_before_fence_mode`` fires ONCE per device from here: the
+        simulated worker death happens before the dispatch fence is
+        committed, so recovery may requeue the task (M2T6).
         """
         del plan
         config = session.connection_config
+        device_key = str(session.device_id)
+        if config.get(CRASH_BEFORE_FENCE_MODE_KEY) and device_key not in self._crashed_preflight:
+            self._crashed_preflight.add(device_key)
+            raise SimulatedWorkerCrash("preflight (crash_before_fence_mode)")
         if config.get(STALE_PREFLIGHT_MODE_KEY):
             return PreflightResult(
                 ok=False,
@@ -340,13 +395,26 @@ class FakeSimpleAdapter:
         execute_fail_mode -> explicit device failure (operation_failed);
         execute_timeout_mode -> AdapterTimeoutError after ~1 s;
         ambiguous_mode -> accepted but unverifiable (disconnected, no job);
-        device_job_mode -> returns the persisted vendor job id (fake-job-1).
+        device_job_mode -> returns the persisted vendor job id (fake-job-1);
+        slow_mode -> stepwise progress callbacks across ~1 s (throttling
+        tests); crash_after_fence_mode fires ONCE per device from here — the
+        simulated worker death happens AFTER the dispatch fence was
+        committed, so recovery may only verify/read-back, never re-execute
+        (M2T6).
         """
         del plan
         config = session.connection_config
+        device_key = str(session.device_id)
+        if config.get(CRASH_AFTER_FENCE_MODE_KEY) and device_key not in self._crashed_execute:
+            self._crashed_execute.add(device_key)
+            raise SimulatedWorkerCrash("execute (crash_after_fence_mode)")
         if config.get(EXECUTE_TIMEOUT_MODE_KEY):
             time.sleep(1.0)
             raise AdapterTimeoutError("execute_timeout_mode：模拟设备调用超时")
+        if config.get(SLOW_MODE_KEY):
+            for percent in (20, 40, 60, 80):
+                progress(percent, f"模拟执行中（{percent}%）")
+                time.sleep(0.25)
         if config.get(AMBIGUOUS_MODE_KEY):
             progress(50, "模拟命令已被设备接受，连接随后中断")
             return OperationResult(
@@ -382,8 +450,45 @@ class FakeSimpleAdapter:
         Reports success by default for every verification strategy (the fake
         device always confirms). Modes: verify_fail_mode -> explicit failed
         read-back; verify_ambiguous_mode -> neither outcome provable.
+
+        Job polling (M2T6): when a device job id is present (persisted before
+        polling) and ``job_poll_rounds`` > 0, the first N polls report
+        ``pending`` (the job is still running — the worker stays in
+        waiting_device and keeps renewing its lease); poll N+1 returns the
+        terminal verdict (success by default, explicit failure under
+        ``job_poll_fail_mode``). Poll counters are per device so the shared
+        registry instance stays deterministic per test database.
         """
         config = session.connection_config
+        job = result.device_job_id if result is not None else None
+        if job is not None:
+            rounds_value = config.get(JOB_POLL_ROUNDS_KEY) or 0
+            rounds = rounds_value if isinstance(rounds_value, int) else 0
+            if rounds > 0:
+                device_key = str(session.device_id)
+                poll_number = self._job_poll_calls.get(device_key, 0)
+                self._job_poll_calls[device_key] = poll_number + 1
+                if poll_number < rounds:
+                    return VerificationResult(
+                        succeeded=False,
+                        pending=True,
+                        evidence={
+                            "job_status": "running",
+                            "device_job_id": job,
+                            "poll": poll_number + 1,
+                            "rounds": rounds,
+                        },
+                    )
+                if config.get(JOB_POLL_FAIL_MODE_KEY):
+                    return VerificationResult(
+                        succeeded=False,
+                        evidence={
+                            "job_status": "failed",
+                            "mode": "job_poll_fail",
+                            "device_job_id": job,
+                        },
+                        error_code="operation_failed",
+                    )
         if config.get(VERIFY_AMBIGUOUS_MODE_KEY):
             return VerificationResult(
                 succeeded=False,
@@ -398,7 +503,6 @@ class FakeSimpleAdapter:
                 error_code="operation_failed",
             )
         strategy = plan.verification_strategy
-        job = result.device_job_id if result is not None else None
         return VerificationResult(
             succeeded=True,
             evidence={

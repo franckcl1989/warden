@@ -906,18 +906,26 @@ def verify_task(
         "verification": {
             "succeeded": result.succeeded,
             "ambiguous": result.ambiguous,
+            "pending": result.pending,
             **dict(result.evidence),
         }
     }
-    if result.ambiguous:
-        message = "回读验证无法确认操作结果，等待人工核验"
+    if result.pending or result.ambiguous:
+        # pending: the device job is still running — neither success nor
+        # failure nor ambiguous (M2T6). ambiguous: success AND failure are
+        # both unproven. Both outcomes keep the task verification_required.
+        if result.pending:
+            message = "回读验证显示设备作业仍在进行，等待核验"
+            outcome = "pending"
+        else:
+            message = "回读验证无法确认操作结果，等待人工核验"
+            outcome = "ambiguous"
         values: dict[str, object] = {
             "evidence": evidence,
             "error_code": "ambiguous_result",
             "updated_at": current,
             "version": OperationTask.version + 1,
         }
-        outcome = "ambiguous"
         event_state = TaskState.VERIFICATION_REQUIRED.value
     elif result.succeeded:
         message = "回读验证确认操作成功"

@@ -2,8 +2,9 @@
 
 Builds the engine and session factory from WardenSettings (WARDEN_POSTGRES_DSN
 or WARDEN_POSTGRES_DSN_FILE), starts the four components of ARCHITECTURE.md
-§3.3 — scheduler loop, operation pool, collection pool, maintenance loop —
-and shuts them down gracefully on SIGTERM/SIGINT.
+§3.3 — scheduler loop, operation pool (M2T6: OperationExecutor wiring),
+collection pool, maintenance loop — and shuts them down gracefully on
+SIGTERM/SIGINT.
 
 ``--once`` runs a single scheduler tick, drains the claimable collection
 runs once, and runs a single maintenance pass against the configured database
@@ -34,6 +35,7 @@ from app.infrastructure.logging import configure_logging
 from app.infrastructure.observation_store import claim_collection_run
 from app.workers.collection_pool import CollectionPool
 from app.workers.maintenance import MaintenanceLoop
+from app.workers.operation_executor import OperationExecutor
 from app.workers.operation_pool import OperationPool
 from app.workers.scheduler import Scheduler
 
@@ -76,8 +78,10 @@ def _process_due_collections_once(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="app.workers.run",
-        description="Warden worker service: scheduler, operation pool, "
-        "collection pool and maintenance loop (M2T1 skeleton, M2T2 collection wiring).",
+        description=(
+            "Warden worker service: scheduler, operation pool (M2T6 executor), "
+            "collection pool and maintenance loop."
+        ),
     )
     parser.add_argument(
         "--once",
@@ -138,11 +142,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
 
+    operation_executor = OperationExecutor(
+        session_factory=session_factory,
+        lease_owner=owner,
+        lease_seconds=settings.task_lease_seconds,
+        settings=settings,
+        keyring=keyring,
+        audit_logger=audit_logger,
+    )
     operation_pool = OperationPool(
         session_factory=session_factory,
         max_workers=settings.operation_workers,
         lease_seconds=settings.task_lease_seconds,
         lease_owner=owner,
+        handler=operation_executor,
     )
     collection_pool = CollectionPool(
         session_factory=session_factory,

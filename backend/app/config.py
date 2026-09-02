@@ -72,6 +72,19 @@ class WardenSettings(BaseSettings):
     collection_workers: int = Field(default=4, ge=1, le=32)
     operation_workers: int = Field(default=2, ge=1, le=8)
     task_lease_seconds: int = Field(default=300, ge=30)
+    # Worker execution tuning (M2T6): total attempts allowed for a read-only
+    # operation task across crash-driven recovery requeues (the initial run
+    # counts as attempt 1); the vendor-job poll cadence while a task sits in
+    # waiting_device; and the progress-persistence throttle inside a single
+    # adapter execute call. Deployment configuration, not product pages.
+    operation_read_max_attempts: int = Field(default=2, ge=1, le=10)
+    operation_job_poll_interval_seconds: float = Field(default=2.0, ge=0.05, le=300.0)
+    operation_progress_min_interval_seconds: float = Field(default=1.0, ge=0.05, le=60.0)
+    # SSE stream tuning (API_CONTRACT.md §10): poll cadence for ui_events and
+    # keepalive comment cadence. Correctness never depends on NOTIFY
+    # (ARCHITECTURE.md §5.3, ADR-024).
+    sse_poll_interval_seconds: float = Field(default=1.0, ge=0.05, le=30.0)
+    sse_keepalive_seconds: float = Field(default=15.0, ge=1, le=300)
     raw_retention_days: int = Field(default=7, ge=1)
     rollup_5m_retention_days: int = Field(default=30, ge=2)
     rollup_1h_retention_days: int = Field(default=180, ge=7)
