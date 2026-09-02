@@ -1,8 +1,10 @@
-"""Device API (docs/API_CONTRACT.md §4, contracts/http-api.json PLT-02).
+"""Device API (docs/API_CONTRACT.md §4, contracts/http-api.json PLT-02/PLT-03).
 
 operationIds EXACTLY per contracts/http-api.json: device_probes_create,
 devices_create, devices_list, devices_get, devices_update, devices_probe,
-device_capabilities_list. There is NO ``DELETE /devices`` (API_CONTRACT.md §4).
+device_capabilities_list (PLT-02) and — added by M2T3 — device_components_list
+and device_events_list (PLT-03, monitor.read for all roles). There is NO
+``DELETE /devices`` (API_CONTRACT.md §4).
 
 Permissions (SECURITY.md §3.1): reads need ``device.read`` (all roles);
 create/update/probe need ``device.manage`` (admin only — PRODUCT_DESIGN.md
@@ -44,6 +46,7 @@ from app.application.devices import (
     save_device_from_probe,
     update_device,
 )
+from app.application.monitoring import list_components, list_device_events
 from app.config import WardenSettings
 from app.domain import auth_errors
 from app.domain.adapter import (
@@ -55,7 +58,7 @@ from app.domain.adapter import (
     credentials_digest,
     validate_json_schema,
 )
-from app.domain.roles import DEVICE_MANAGE, DEVICE_READ
+from app.domain.roles import DEVICE_MANAGE, DEVICE_READ, MONITOR_READ
 from app.infrastructure.audit import AuditLogger
 from app.infrastructure.crypto import CredentialKeyring
 from app.infrastructure.rate_limit import RateLimiter
@@ -661,4 +664,155 @@ def device_capabilities_list(
             )
             for item in items
         ]
+    )
+
+
+class ComponentView(BaseModel):
+    """Current component (API_CONTRACT.md §4: 当前组件，按 kind/status 过滤)."""
+
+    id: uuid.UUID
+    kind: str
+    native_id: str
+    name: str
+    status: str
+    properties: dict[str, object]
+    first_seen_at: datetime.datetime
+    last_seen_at: datetime.datetime
+
+
+class DeviceComponentsListResponse(BaseModel):
+    device_id: uuid.UUID
+    items: list[ComponentView]
+    page: int
+    page_size: int
+    total: int
+
+
+class DeviceEventView(BaseModel):
+    """One device event (API_CONTRACT.md §4: SEL、DSM、Trap、Syslog 等).
+
+    The JSONB detail blob stays on the write path; the read view carries the
+    message and its provenance (DATA_MODEL.md §5.5).
+    """
+
+    id: uuid.UUID
+    component_id: uuid.UUID | None
+    event_type: str
+    severity: str
+    message: str
+    occurred_at: datetime.datetime
+    received_at: datetime.datetime
+    source: str
+    native_event_id: str | None
+
+
+class DeviceEventsListResponse(BaseModel):
+    device_id: uuid.UUID
+    items: list[DeviceEventView]
+    page: int
+    page_size: int
+    total: int
+
+
+COMPONENT_STATUS_PATTERN = r"^(unknown|ok|warning|critical|absent)$"
+EVENT_SEVERITY_PATTERN = r"^(unknown|info|warning|critical)$"
+EVENT_SOURCE_PATTERN = r"^(redfish_sel|dsm_log|snmp_trap|syslog|poll|oem_log)$"
+
+
+@router.get(
+    "/devices/{id}/components",
+    operation_id="device_components_list",
+    response_model=DeviceComponentsListResponse,
+    responses={"403": {"description": "permission_denied"}, "404": {"description": "resource_not_found"}},
+)
+def device_components_list(
+    id: str,
+    context: Annotated[AuthContext, Depends(require_permission(MONITOR_READ))],
+    db: Annotated[Session, Depends(get_db)],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    kind: str | None = Query(default=None, max_length=32),
+    status: str | None = Query(default=None, pattern=COMPONENT_STATUS_PATTERN),
+) -> DeviceComponentsListResponse:
+    del context
+    device = get_device(db, id)
+    rows, total = list_components(
+        db,
+        device=device,
+        page=page,
+        page_size=page_size,
+        kind=kind,
+        status=status,
+    )
+    return DeviceComponentsListResponse(
+        device_id=device.id,
+        items=[
+            ComponentView(
+                id=row.id,
+                kind=row.kind,
+                native_id=row.native_id,
+                name=row.name,
+                status=row.status,
+                properties=dict(row.properties),
+                first_seen_at=row.first_seen_at,
+                last_seen_at=row.last_seen_at,
+            )
+            for row in rows
+        ],
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.get(
+    "/devices/{id}/events",
+    operation_id="device_events_list",
+    response_model=DeviceEventsListResponse,
+    responses={"403": {"description": "permission_denied"}, "404": {"description": "resource_not_found"}},
+)
+def device_events_list(
+    id: str,
+    context: Annotated[AuthContext, Depends(require_permission(MONITOR_READ))],
+    db: Annotated[Session, Depends(get_db)],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    severity: str | None = Query(default=None, pattern=EVENT_SEVERITY_PATTERN),
+    event_type: str | None = Query(default=None, max_length=64),
+    source: str | None = Query(default=None, pattern=EVENT_SOURCE_PATTERN),
+    from_: Annotated[datetime.datetime | None, Query(alias="from")] = None,
+    to_: Annotated[datetime.datetime | None, Query(alias="to")] = None,
+) -> DeviceEventsListResponse:
+    del context
+    device = get_device(db, id)
+    rows, total = list_device_events(
+        db,
+        device=device,
+        page=page,
+        page_size=page_size,
+        severity=severity,
+        event_type=event_type,
+        source=source,
+        from_=from_,
+        to_=to_,
+    )
+    return DeviceEventsListResponse(
+        device_id=device.id,
+        items=[
+            DeviceEventView(
+                id=row.id,
+                component_id=row.component_id,
+                event_type=row.event_type,
+                severity=row.severity,
+                message=row.message,
+                occurred_at=row.occurred_at,
+                received_at=row.received_at,
+                source=row.source,
+                native_event_id=row.native_event_id,
+            )
+            for row in rows
+        ],
+        page=page,
+        page_size=page_size,
+        total=total,
     )

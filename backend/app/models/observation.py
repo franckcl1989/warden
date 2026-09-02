@@ -168,6 +168,72 @@ class MetricLatest(Base):
     # expression index ``uq_metric_latest_device_component_key`` from 0006.
 
 
+class MetricRollup5m(Base):
+    """5-minute numeric-gauge window aggregate (docs/DATA_MODEL.md §5.4).
+
+    Columns mirror migration ``0007_rollups`` exactly. Only closed UTC-aligned
+    5-minute windows of numeric gauge keys are written (state/boolean/
+    monotonic_counter series are never numerically aggregated). Rows are
+    idempotently regenerated (ON CONFLICT DO UPDATE on the COALESCE expression
+    index). Not partitioned: retention deletes by ``window_start``.
+    """
+
+    __tablename__ = "metric_rollups_5m"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), nullable=False
+    )
+    component_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("components.id", ondelete="SET NULL"))
+    metric_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    window_start: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    min_value: Mapped[float] = mapped_column(Float, nullable=False)
+    max_value: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_value: Mapped[float] = mapped_column(Float, nullable=False)
+    last_value: Mapped[float] = mapped_column(Float, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    quality: Mapped[str] = mapped_column(String(16), nullable=False)
+    collection_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collection_runs.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        CheckConstraint("count >= 1", name="ck_metric_rollups_5m_count"),
+        CheckConstraint("quality IN ('good', 'partial')", name="ck_metric_rollups_5m_quality"),
+    )
+    # UNIQUE (device_id, COALESCE(component_id, zero-uuid), metric_key,
+    # window_start) + the series/window_start indexes are declared in 0007.
+
+
+class MetricRollup1h(Base):
+    """1-hour numeric-gauge aggregate of twelve closed 5m windows (§5.4)."""
+
+    __tablename__ = "metric_rollups_1h"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), nullable=False
+    )
+    component_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("components.id", ondelete="SET NULL"))
+    metric_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    window_start: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    min_value: Mapped[float] = mapped_column(Float, nullable=False)
+    max_value: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_value: Mapped[float] = mapped_column(Float, nullable=False)
+    last_value: Mapped[float] = mapped_column(Float, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    quality: Mapped[str] = mapped_column(String(16), nullable=False)
+    collection_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collection_runs.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        CheckConstraint("count >= 1", name="ck_metric_rollups_1h_count"),
+        CheckConstraint("quality IN ('good', 'partial')", name="ck_metric_rollups_1h_quality"),
+    )
+    # Same unique/series/window_start indexes as metric_rollups_5m (0007).
+
+
 class DeviceEvent(Base):
     """A time-point fact from SEL/logs/traps/syslog/poll (docs/DATA_MODEL.md §5.5)."""
 

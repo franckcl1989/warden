@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, FastAPI
 
 from app.api.deps import require_password_changed
 from app.api.errors import register_exception_handlers
-from app.api.routes import audit, auth, devices, roles, users
+from app.api.routes import alerts, audit, auth, collection_runs, devices, metrics, overview, roles, users
 from app.api.routes.health import router as health_router
 from app.config import WardenSettings, get_settings
 from app.infrastructure.audit import AuditLogger
@@ -70,6 +70,13 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     api_v1_router.include_router(roles.router, dependencies=[Depends(require_password_changed)])
     api_v1_router.include_router(devices.router, dependencies=[Depends(require_password_changed)])
     api_v1_router.include_router(audit.router, dependencies=[Depends(require_password_changed)])
+    # M2T3 monitoring reads (PLT-03/PLT-04): overview, metrics, collection
+    # runs and alerts live in their own routers; components/events ride on the
+    # devices router above.
+    api_v1_router.include_router(metrics.router, dependencies=[Depends(require_password_changed)])
+    api_v1_router.include_router(collection_runs.router, dependencies=[Depends(require_password_changed)])
+    api_v1_router.include_router(overview.router, dependencies=[Depends(require_password_changed)])
+    api_v1_router.include_router(alerts.router, dependencies=[Depends(require_password_changed)])
     app.include_router(api_v1_router)
     return app
 

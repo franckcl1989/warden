@@ -434,7 +434,7 @@ def test_full_upgrade_applies_all_revisions_and_audit_trigger_blocks_mutation(
     fresh_test_db_dsn: str,
 ) -> None:
     head = _head_revision()
-    assert head == "0006_collection_metrics"
+    assert head == "0007_rollups"
     with psycopg.connect(fresh_test_db_dsn) as connection:
         version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         assert version is not None and version[0] == head, version
@@ -461,6 +461,8 @@ def test_full_upgrade_applies_all_revisions_and_audit_trigger_blocks_mutation(
             "collection_observation_errors",
             "alerts",
             "ui_events",
+            "metric_rollups_5m",
+            "metric_rollups_1h",
         } <= tables, tables
         triggers = {
             row[0]

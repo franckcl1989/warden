@@ -9,6 +9,7 @@ from app.config import WardenSettings
 from app.main import create_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
 
 @pytest.fixture
@@ -54,3 +55,18 @@ def device_app(device_settings: WardenSettings) -> Iterator[FastAPI]:
 def device_client(device_app: FastAPI) -> Iterator[TestClient]:
     with TestClient(device_app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def client_env(
+    db_client: TestClient,
+    db_session: Session,
+    db_settings: WardenSettings,
+) -> tuple[TestClient, Session, WardenSettings]:
+    """(client, seeding session, settings) over ONE fresh warden_test database.
+
+    The monitoring API tests seed rows directly through ``db_session`` (no
+    probe round-trips) and call the API through ``db_client``; both fixtures
+    share the same recreated database within a test.
+    """
+    return db_client, db_session, db_settings

@@ -12,10 +12,12 @@ per-operation logic. The advisory lock is exercised too.
 from __future__ import annotations
 
 import datetime
+from uuid import uuid4
 
 from app.infrastructure.db import create_session_factory
 from app.infrastructure.tasks import recovery_scan
 from app.infrastructure.time import utcnow
+from app.models.observation import MetricRollup5m
 from app.models.operation import OperationTaskEvent
 from app.workers.maintenance import (
     MAINTENANCE_ADVISORY_LOCK_KEY,
@@ -26,6 +28,7 @@ from app.workers.scheduler import release_advisory_lock, try_advisory_lock
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tests.observation_factories import make_collection_device
 from tests.task_factories import make_device, make_task, make_user
 
 NOW = datetime.datetime.now(datetime.UTC)
@@ -249,6 +252,109 @@ class TestRecovery:
         assert report.lock_acquired is False
         release_advisory_lock(db_session, MAINTENANCE_ADVISORY_LOCK_KEY)
         db_session.commit()
+
+
+class TestRollupRetentionWiring:
+    """The M2T3 jobs run from the maintenance loop at their cadences.
+
+    First pass of a fresh loop runs rollups + retention + the future partition
+    window (DEPLOYMENT.md §9.3); the next pass skips them until the cadence
+    elapses (rollups every 5 minutes, retention daily).
+    """
+
+    def _seed_closed_window_points(self, db_session: Session) -> None:
+        import datetime
+
+        from app.infrastructure.observation_store import ensure_metric_partitions
+        from app.models.devices import Component
+        from app.models.observation import MetricPoint, UiEvent
+
+        now = datetime.datetime.now(datetime.UTC)
+        window = now.replace(second=0, microsecond=0)
+        window = window - datetime.timedelta(minutes=window.minute % 5)
+        window = window - datetime.timedelta(minutes=5)
+        device = make_collection_device(db_session, index=60)
+        component = Component(
+            device_id=device.id,
+            kind="processor",
+            native_id="CPU0",
+            name="CPU 0",
+            status="ok",
+            properties={},
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+        db_session.add(component)
+        ensure_metric_partitions(db_session, start_date=now.date(), days=3)
+        db_session.flush()
+        db_session.add(
+            MetricPoint(
+                id=uuid4(),
+                device_id=device.id,
+                component_id=component.id,
+                metric_key="temperature.cpu",
+                observed_at=window + datetime.timedelta(seconds=30),
+                value_double=35.0,
+                unit="Cel",
+                quality="good",
+                source="redfish",
+            )
+        )
+        db_session.add(
+            UiEvent(
+                entity_type="device",
+                entity_id=device.id,
+                version=1,
+                event_type="device.updated",
+                payload={},
+                occurred_at=now - datetime.timedelta(minutes=20),
+            )
+        )
+        db_session.commit()
+        return device.id
+
+    def test_first_pass_runs_rollups_retention_and_partitions(
+        self, db_session: Session
+    ) -> None:
+        device_id = self._seed_closed_window_points(db_session)
+        factory = create_session_factory(db_session.bind)
+        report = MaintenanceLoop(factory).run_once()
+
+        assert report.lock_acquired is True
+        assert report.rollup_rows_5m == 1
+        assert report.rollup_rows_1h == 0
+        assert report.ui_events_deleted == 1
+        assert report.operation_tasks_skipped_append_only is True
+        assert report.audit_skipped_append_only is True
+        rollup = db_session.execute(
+            select(MetricRollup5m).where(MetricRollup5m.device_id == device_id)
+        ).scalar_one()
+        assert rollup.metric_key == "temperature.cpu"
+        assert rollup.avg_value == 35.0
+
+    def test_cadence_gates_rollups_and_retention_on_immediate_second_pass(
+        self, db_session: Session
+    ) -> None:
+        self._seed_closed_window_points(db_session)
+        factory = create_session_factory(db_session.bind)
+        loop = MaintenanceLoop(
+            factory,
+            rollup_cadence_seconds=3600.0,
+            retention_cadence_seconds=7200.0,
+        )
+        first = loop.run_once()
+        second = loop.run_once()
+
+        assert first.rollup_rows_5m == 1
+        assert first.ui_events_deleted == 1
+        # Not due again: the second pass must skip the cadence jobs entirely.
+        assert second.rollup_rows_5m == 0
+        assert second.rollup_rows_1h == 0
+        assert second.ui_events_deleted == 0
+        assert second.rollup_5m_deleted == 0
+        assert second.partitions_created == 0
+        # The recovery/timeout sweep still runs every pass.
+        assert second.lock_acquired is True
 
 
 class TestTimeoutSweep:

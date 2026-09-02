@@ -47,6 +47,33 @@ FRESHNESS_STATES = ("unknown", "fresh", "stale", "expired")
 # whole supported group is back to fresh).
 _FRESHNESS_RANK: dict[str, int] = {"fresh": 1, "unknown": 2, "stale": 3, "expired": 4}
 
+# API_CONTRACT.md §5 时间序列分辨率: within 7 days raw granularity, 7-30 days
+# 5-minute rollups, 30-180 days 1-hour rollups. A client may request a COARSER
+# resolution than the window default, never a finer one than retention
+# supports. Rollups exist for numeric gauge series only (DATA_MODEL.md §5.4),
+# so state/enum/boolean/counter history is always served raw (change points
+# and checkpoints, never averages).
+SERIES_RESOLUTIONS = ("raw", "5m", "1h")
+RAW_RESOLUTION_MAX_DAYS = 7
+FIVE_MINUTE_RESOLUTION_MAX_DAYS = 30
+ONE_HOUR_RESOLUTION_MAX_DAYS = 180
+_GRANULARITY: dict[str, int] = {"raw": 1, "5m": 2, "1h": 3}
+
+
+def default_resolution_for_window(window_seconds: float) -> str:
+    """The resolution the server picks for a [from, to) window (API_CONTRACT §5)."""
+    days = window_seconds / 86400.0
+    if days <= RAW_RESOLUTION_MAX_DAYS:
+        return "raw"
+    if days <= FIVE_MINUTE_RESOLUTION_MAX_DAYS:
+        return "5m"
+    return "1h"
+
+
+def is_finer_resolution(requested: str, base: str) -> bool:
+    """True when ``requested`` is strictly finer than ``base`` (raw < 5m < 1h)."""
+    return _GRANULARITY[requested] < _GRANULARITY[base]
+
 
 @dataclass(frozen=True)
 class ReachabilityState:

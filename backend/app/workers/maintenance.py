@@ -1,4 +1,4 @@
-"""Maintenance loop: lease recovery + timeout sweep (ARCHITECTURE.md §3.3/§7).
+"""Maintenance loop: lease recovery + timeout sweep + rollups/retention.
 
 Two scans run under the scheduler-style advisory lock, then every candidate is
 processed in its own transaction (DATA_MODEL.md §11) with conditional
@@ -20,16 +20,26 @@ a candidate a harmless no-op:
   ``verification_required`` (fenced side-effect task: the device may have
   accepted the action, e.g. an expected_disconnect action with no
   reconnect/identity evidence — never auto-replay).
+- metric rollups (generate_rollups) run on the DEPLOYMENT.md §9.3 cadence
+  (every 5 minutes) and retention + the future partition window
+  (enforce_retention + ensure_partitions) run daily, both inside the same
+  advisory-lock transaction and reported through MaintenanceReport. Cadences
+  are instance state, so exactly one pass in the fleet runs each job; the
+  first pass of a fresh process runs both (that is also what the ``--once``
+  smoke exercises).
 """
 
 from __future__ import annotations
 
+import datetime
 import threading
 from dataclasses import asdict, dataclass
 
 import structlog
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.maintenance import enforce_retention, ensure_partitions, generate_rollups
+from app.config import WardenSettings, get_settings
 from app.domain.operation import (
     RecoveryAction,
     TaskFence,
@@ -57,6 +67,10 @@ from app.workers.scheduler import (
 
 MAINTENANCE_ADVISORY_LOCK_KEY = 0x57415244454E0002
 
+# DEPLOYMENT.md §9.3: 每 5 分钟生成指标聚合; 每日创建未来分区并执行保留清理.
+ROLLUP_CADENCE_SECONDS = 300.0
+RETENTION_CADENCE_SECONDS = 86400.0
+
 VERIFY_ONLY_EVENT_MESSAGE = (
     "recovery_verify_only: dispatch fence present; only verify/read-back allowed (execution wiring lands M2T6)"
 )
@@ -73,23 +87,48 @@ class MaintenanceReport:
     verification_required: int = 0
     timed_out: int = 0
     skipped_missing_profile: int = 0
+    # M2T3 rollup/retention counters (0 when the pass skipped a cadence).
+    rollup_rows_5m: int = 0
+    rollup_rows_1h: int = 0
+    partitions_dropped: int = 0
+    rollup_5m_deleted: int = 0
+    rollup_1h_deleted: int = 0
+    device_events_deleted: int = 0
+    resolved_alerts_deleted: int = 0
+    operation_tasks_deleted: int = 0
+    operation_tasks_skipped_append_only: bool = False
+    ui_events_deleted: int = 0
+    sessions_deleted: int = 0
+    audit_deleted: int = 0
+    audit_skipped_append_only: bool = False
+    partitions_created: int = 0
 
     def as_dict(self) -> dict[str, int | bool]:
         return asdict(self)
 
 
 class MaintenanceLoop:
-    """Runs the recovery and timeout sweeps; one pass = run_once()."""
+    """Runs the sweeps plus the rollup/retention jobs; one pass = run_once()."""
 
     def __init__(
         self,
         session_factory: sessionmaker[Session],
         *,
         tick_seconds: float = DEFAULT_TICK_SECONDS,
+        rollup_cadence_seconds: float = ROLLUP_CADENCE_SECONDS,
+        retention_cadence_seconds: float = RETENTION_CADENCE_SECONDS,
+        settings: WardenSettings | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._tick_seconds = tick_seconds
+        self._settings = settings if settings is not None else get_settings()
         self._log = structlog.get_logger()
+        self._rollup_cadence = rollup_cadence_seconds
+        self._retention_cadence = retention_cadence_seconds
+        # None => due: the first pass of a fresh loop (and the --once smoke)
+        # runs the full maintenance job set.
+        self._next_rollup_at: datetime.datetime | None = None
+        self._next_retention_at: datetime.datetime | None = None
 
     def run_once(self) -> MaintenanceReport:
         """One maintenance pass; returns counters (report.lock_acquired=False
@@ -102,6 +141,10 @@ class MaintenanceLoop:
                 now = utcnow()
                 recovery_candidates = recovery_scan(session, now=now)
                 timeout_candidates = timeout_scan(session, now=now)
+                if self._next_rollup_at is None or now >= self._next_rollup_at:
+                    self._run_rollups(session, report, now)
+                if self._next_retention_at is None or now >= self._next_retention_at:
+                    self._run_retention(session, report, now)
             finally:
                 release_advisory_lock(session, MAINTENANCE_ADVISORY_LOCK_KEY)
             session.commit()
@@ -123,10 +166,48 @@ class MaintenanceLoop:
                         verify_only=report.verify_only,
                         verification_required=report.verification_required,
                         timed_out=report.timed_out,
+                        rollup_rows_5m=report.rollup_rows_5m,
+                        rollup_rows_1h=report.rollup_rows_1h,
+                        partitions_dropped=report.partitions_dropped,
+                        partitions_created=report.partitions_created,
                     )
             except Exception:
                 self._log.exception("maintenance_pass_failed")
             stop_event.wait(self._tick_seconds)
+
+    def _run_rollups(
+        self,
+        session: Session,
+        report: MaintenanceReport,
+        now: datetime.datetime,
+    ) -> None:
+        rollup_report = generate_rollups(session, now=now, settings=self._settings)
+        self._next_rollup_at = now + datetime.timedelta(seconds=self._rollup_cadence)
+        report.rollup_rows_5m = rollup_report.rows_5m
+        report.rollup_rows_1h = rollup_report.rows_1h
+
+    def _run_retention(
+        self,
+        session: Session,
+        report: MaintenanceReport,
+        now: datetime.datetime,
+    ) -> None:
+        retention_report = enforce_retention(session, now=now, settings=self._settings)
+        report.partitions_dropped = len(retention_report.partitions_dropped)
+        report.rollup_5m_deleted = retention_report.rollup_5m_deleted
+        report.rollup_1h_deleted = retention_report.rollup_1h_deleted
+        report.device_events_deleted = retention_report.device_events_deleted
+        report.resolved_alerts_deleted = retention_report.resolved_alerts_deleted
+        report.operation_tasks_deleted = retention_report.operation_tasks_deleted
+        report.operation_tasks_skipped_append_only = (
+            retention_report.operation_tasks_skipped_append_only
+        )
+        report.ui_events_deleted = retention_report.ui_events_deleted
+        report.sessions_deleted = retention_report.sessions_deleted
+        report.audit_deleted = retention_report.audit_deleted
+        report.audit_skipped_append_only = retention_report.audit_skipped_append_only
+        report.partitions_created = ensure_partitions(session, now=now)
+        self._next_retention_at = now + datetime.timedelta(seconds=self._retention_cadence)
 
     def _recover_one(self, task_id: object, report: MaintenanceReport) -> None:
         with self._session_factory() as session:

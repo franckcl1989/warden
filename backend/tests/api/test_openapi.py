@@ -74,6 +74,17 @@ AUDIT_ENDPOINTS = {
     "audit_logs_get": ("GET", "/audit-logs/{id}"),
 }
 
+MONITOR_ENDPOINTS = {
+    "device_components_list": ("GET", "/devices/{id}/components"),
+    "device_events_list": ("GET", "/devices/{id}/events"),
+    "overview_get": ("GET", "/overview"),
+    "device_metrics_latest": ("GET", "/devices/{id}/metrics/latest"),
+    "device_metrics_series": ("GET", "/devices/{id}/metrics/series"),
+    "device_collection_runs_list": ("GET", "/devices/{id}/collection-runs"),
+    "alerts_list": ("GET", "/alerts"),
+    "alerts_get": ("GET", "/alerts/{id}"),
+}
+
 
 def _assert_operation_ids(
     schema: dict[str, object],
@@ -110,3 +121,9 @@ def test_exported_openapi_device_operation_ids_match_contract() -> None:
 def test_exported_openapi_audit_operation_ids_match_contract() -> None:
     """M1T4 read-only audit endpoints carry the EXACT operationIds of http-api.json."""
     _assert_operation_ids(exported_schema(), AUDIT_ENDPOINTS)
+
+
+@pytest.mark.unit
+def test_exported_openapi_monitoring_operation_ids_match_contract() -> None:
+    """M2T3 monitoring read endpoints carry the EXACT operationIds of http-api.json."""
+    _assert_operation_ids(exported_schema(), MONITOR_ENDPOINTS)
