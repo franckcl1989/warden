@@ -434,7 +434,7 @@ def test_full_upgrade_applies_all_revisions_and_audit_trigger_blocks_mutation(
     fresh_test_db_dsn: str,
 ) -> None:
     head = _head_revision()
-    assert head == "0004_audit_db_permissions"
+    assert head == "0005_operation_tasks"
     with psycopg.connect(fresh_test_db_dsn) as connection:
         version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         assert version is not None and version[0] == head, version
@@ -452,6 +452,8 @@ def test_full_upgrade_applies_all_revisions_and_audit_trigger_blocks_mutation(
             "device_credentials",
             "device_capabilities",
             "components",
+            "operation_tasks",
+            "operation_task_events",
         } <= tables, tables
         triggers = {
             row[0]
@@ -460,6 +462,17 @@ def test_full_upgrade_applies_all_revisions_and_audit_trigger_blocks_mutation(
             )
         }
         assert {"audit_logs_no_update", "audit_logs_no_delete"} <= triggers, triggers
+        task_event_triggers = {
+            row[0]
+            for row in connection.execute(
+                "SELECT tgname FROM pg_trigger "
+                "WHERE tgrelid = 'operation_task_events'::regclass"
+            )
+        }
+        assert {
+            "operation_task_events_no_update",
+            "operation_task_events_no_delete",
+        } <= task_event_triggers, task_event_triggers
         connection.execute(
             "INSERT INTO audit_logs (id, action, result, detail_jsonb) "
             "VALUES (gen_random_uuid(), 'm1.gate', 'success', %s)",

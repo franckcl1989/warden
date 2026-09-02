@@ -13,6 +13,15 @@ from app.models.devices import (
     DeviceCapability,
     DeviceCredential,
 )
+from app.models.operation import (
+    IDEMPOTENCY_KEY_MAX_LENGTH,
+    IDEMPOTENCY_KEY_MIN_LENGTH,
+    RISK_LEVELS,
+    TASK_STATES,
+    OperationTask,
+    OperationTaskAppendOnlyError,
+    OperationTaskEvent,
+)
 
 __all__ = [
     "AuditAppendOnlyError",
@@ -20,13 +29,20 @@ __all__ = [
     "COMPONENT_STATUSES",
     "DEVICE_TYPES",
     "HEALTH_STATES",
+    "IDEMPOTENCY_KEY_MAX_LENGTH",
+    "IDEMPOTENCY_KEY_MIN_LENGTH",
     "REACHABILITY_STATES",
     "READINESS_STATES",
+    "RISK_LEVELS",
     "SUPPORT_STATES",
+    "TASK_STATES",
     "Component",
     "Device",
     "DeviceCapability",
     "DeviceCredential",
+    "OperationTask",
+    "OperationTaskAppendOnlyError",
+    "OperationTaskEvent",
     "Session",
     "User",
 ]
