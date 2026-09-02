@@ -27,6 +27,7 @@ from tests.api.auth_helpers import (
     login,
 )
 from tests.observation_factories import make_collection_device
+from tests.partition_helpers import ensure_partitions_around
 
 API = "/api/v1"
 UTC = datetime.UTC
@@ -211,6 +212,26 @@ class TestMetricsLatest:
 
 
 class TestMetricsSeries:
+    @pytest.fixture(autouse=True)
+    def _metric_partition_window(self, request: pytest.FixtureRequest) -> None:
+        """Create the day partitions the seeded series rows need.
+
+        The series tests seed MetricPoint rows at ``now - hours`` where
+        ``now`` is the real clock. Between 00:00 and 08:00 Asia/Shanghai the
+        UTC date still lags the local date, so rows reaching back across the
+        session-local midnight would land in a local day the migration's
+        future pre-created window (current_date .. +13) does not cover — the
+        UTC+8 post-midnight suite flake (M2T8). The window is computed from
+        the seeded instants in the DB session time zone — the same frame
+        PostgreSQL routes rows by — and must never depend on the wall clock.
+        """
+        if "seeded" not in request.fixturenames:
+            return
+        _client, db, _device, _component, now = request.getfixturevalue("seeded")
+        ensure_partitions_around(
+            db, [now - datetime.timedelta(hours=6), now]
+        )
+
     def _seed_gauge_points(
         self,
         db: Session,

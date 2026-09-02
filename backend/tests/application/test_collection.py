@@ -39,6 +39,23 @@ T0 = datetime.datetime(2026, 9, 2, 8, 0, 0, tzinfo=datetime.UTC)
 TICK = datetime.timedelta(seconds=31)
 
 
+@pytest.fixture(autouse=True)
+def _metric_partition_window(request: pytest.FixtureRequest) -> None:
+    """Create the day partitions this module's fixed-clock rows need.
+
+    A fresh test DB pre-creates partitions only for the migration window
+    (current_date .. +13 in the DB session zone), so rows at the module's
+    fixed ``T0`` would otherwise depend on the wall clock (the UTC+8
+    post-midnight flake, M2T8). The window is computed from ``T0`` in the DB
+    session time zone — the same frame PostgreSQL routes rows by.
+    """
+    if "db_session" not in request.fixturenames:
+        return
+    from tests.partition_helpers import ensure_partitions_around
+
+    ensure_partitions_around(request.getfixturevalue("db_session"), [T0])
+
+
 def _claim_and_run(
     db: Session,
     *,
@@ -614,16 +631,21 @@ class TestPartitionRoutingEndToEnd:
         schedule_due_collections(db_session, now=T0, settings=db_settings)
         db_session.commit()
         _claim_and_run(db_session, settings=db_settings, now=T0)
-        partition = db_session.execute(
+        # The point landed in the daily partition of ITS OWN session-local
+        # day (the partition-bound semantics) — the expected name is derived
+        # from the stored row, never a hard-coded date (M2T8 window fix).
+        relname, expected = db_session.execute(
             text(
-                "SELECT c.relname FROM metric_points p "
-                "JOIN pg_class c ON c.oid = p.tableoid "
+                "SELECT c.relname, "
+                "'metric_points_' || to_char(p.observed_at AT TIME ZONE "
+                "current_setting('TimeZone'), 'YYYY_MM_DD') "
+                "FROM metric_points p JOIN pg_class c ON c.oid = p.tableoid "
                 "WHERE p.device_id = :did LIMIT 1"
             ),
             {"did": device.id},
-        ).scalar()
-        assert partition is not None
-        assert str(partition).startswith("metric_points_2026_09_02")
+        ).one()
+        assert str(relname) == str(expected)
+        assert str(relname).startswith("metric_points_")
 
 
 class TestQualitySemantics:

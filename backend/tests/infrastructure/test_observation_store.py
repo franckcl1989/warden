@@ -49,6 +49,23 @@ FUTURE = NOW + datetime.timedelta(hours=1)
 ZERO = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 
+@pytest.fixture(autouse=True)
+def _metric_partition_window(request: pytest.FixtureRequest) -> None:
+    """Create the day partitions this module's fixed-clock rows need.
+
+    A fresh test DB pre-creates partitions only for the migration window
+    (current_date .. +13 in the DB session zone), so rows at the module's
+    fixed ``NOW`` would otherwise depend on the wall clock (the UTC+8
+    post-midnight flake, M2T8). The window is computed from ``NOW`` in the
+    DB session time zone — the same frame PostgreSQL routes rows by.
+    """
+    if "db_session" not in request.fixturenames:
+        return
+    from tests.partition_helpers import ensure_partitions_around
+
+    ensure_partitions_around(request.getfixturevalue("db_session"), [NOW])
+
+
 def _normal_batch(now: datetime.datetime = NOW) -> ObservationBatch:
     return ObservationBatch(
         observations=(
@@ -413,19 +430,25 @@ class TestBatchPersistence:
 
 
 class TestPartitions:
-    def test_rows_land_in_today_partition(self, db_session: Session) -> None:
+    def test_rows_land_in_the_partition_for_their_session_day(self, db_session: Session) -> None:
         device = make_collection_device(db_session)
         run = make_collection_run(db_session, device_id=device.id)
         persist_observation_batch(db_session, device_id=device.id, batch=_normal_batch(), run_id=run.id, now=NOW)
         db_session.commit()
-        row = db_session.execute(
+        # The row must land in the daily partition of ITS OWN session-local
+        # day (the partition-bound semantics) — the expected name is derived
+        # from the stored row, never a hard-coded date (M2T8 window fix).
+        relname, expected = db_session.execute(
             text(
-                "SELECT c.relname FROM metric_points p "
-                "JOIN pg_class c ON c.oid = p.tableoid WHERE p.metric_key = 'temperature.cpu'"
+                "SELECT c.relname, "
+                "'metric_points_' || to_char(p.observed_at AT TIME ZONE "
+                "current_setting('TimeZone'), 'YYYY_MM_DD') "
+                "FROM metric_points p JOIN pg_class c ON c.oid = p.tableoid "
+                "WHERE p.metric_key = 'temperature.cpu' LIMIT 1"
             )
-        ).scalar()
-        assert row is not None
-        assert str(row).startswith("metric_points_")
+        ).one()
+        assert str(relname) == str(expected)
+        assert str(relname).startswith("metric_points_")
 
     def test_insert_outside_partition_window_fails_honestly(self, db_session: Session) -> None:
         # No partition exists for this old date: PostgreSQL must reject the
@@ -441,13 +464,19 @@ class TestPartitions:
         db_session.rollback()
 
     def test_create_metric_partition_is_idempotent(self, db_session: Session) -> None:
-        start = datetime.date(2026, 10, 1)  # outside the migration's pre-created window
+        # A day far in the PAST of the session's current date: the migration
+        # pre-creates only the future window (current_date .. +13), so the
+        # first call always creates the partition and the second always finds
+        # it — deterministic at any wall-clock time (M2T8: a fixed FUTURE
+        # date would collide with the pre-created window whenever the suite
+        # ran inside that window).
+        today = db_session.execute(text("SELECT current_date")).scalar()
+        start = today - datetime.timedelta(days=400)
         assert ensure_metric_partitions(db_session, start_date=start, days=1) == 1
         assert ensure_metric_partitions(db_session, start_date=start, days=1) == 0
-        name = db_session.execute(
-            text("SELECT to_regclass('public.metric_points_2026_10_01')")
-        ).scalar()
-        assert name is not None
+        name = "metric_points_" + start.strftime("%Y_%m_%d")
+        found = db_session.execute(text("SELECT to_regclass(:name)"), {"name": name}).scalar()
+        assert found is not None
 
 
 class TestCollectionRunClaim:
