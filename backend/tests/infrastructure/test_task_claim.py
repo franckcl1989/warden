@@ -357,6 +357,22 @@ class TestLease:
         assert task.lease_owner is None and task.lease_expires_at is None
         assert recovery_scan(db_session, now=NOW) == []
 
+    def test_clear_lease_is_a_noop_when_lease_already_cleared(
+        self, db_session: Session, ctx: dict[str, object]
+    ) -> None:
+        # A second maintenance pass processing the same fenced candidate (both
+        # passes scanned before either processed) must not re-park or re-count
+        # it: clear_lease requires an existing lease (lease_expires_at NOT
+        # NULL), so the parked task no longer matches.
+        task = make_task(db_session, device_id=ctx["device"].id, requested_by=ctx["user"].id)
+        _claim(db_session, owner="w1")
+        assert clear_lease(db_session, task_id=task.id) is True
+        db_session.commit()
+        db_session.refresh(task)
+        assert clear_lease(db_session, task_id=task.id) is False
+        db_session.refresh(task)
+        assert task.lease_owner is None and task.lease_expires_at is None
+
 
 class TestScans:
     def test_recovery_scan_finds_only_expired_running_leases(self, db_session: Session, ctx: dict[str, object]) -> None:

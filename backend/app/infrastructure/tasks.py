@@ -188,12 +188,21 @@ def clear_lease(session: Session, *, task_id: uuid.UUID) -> bool:
     verify-only: the task stays ``running`` (awaiting the M2T6 verify claim
     path) but is no longer a recovery-scan candidate, so the recovery event
     is appended exactly once instead of every maintenance cycle.
+
+    The UPDATE requires an existing lease (``lease_expires_at IS NOT NULL``),
+    so a task whose lease was already cleared no longer matches: two
+    maintenance passes that both scanned the same expired-lease candidate
+    cannot each append the verify-only event (single-event-per-task
+    invariant). Owner is not part of the guard because the pool's
+    ``release_lease`` already nulls the owner while leaving an (immediately
+    expired) lease timestamp for recovery to act on.
     """
     result = session.execute(
         update(OperationTask)
         .where(
             OperationTask.id == task_id,
             OperationTask.state == TaskState.RUNNING.value,
+            OperationTask.lease_expires_at.is_not(None),
         )
         .values(lease_owner=None, lease_expires_at=None)
     )

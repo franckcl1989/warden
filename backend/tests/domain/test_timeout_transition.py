@@ -1,16 +1,23 @@
 """Timeout outcome decision: pure rules over the generated profile registry.
 
 The engine must never hardcode per-operation semantics: every decision reads
-the profile fields (expected_disconnect, verification.ambiguous) from
-contracts/operations.json via the generated registry. These tests pin the
-rules documented in ``app.domain.operation.timeout_transition``:
+the profile fields (side_effect, expected_disconnect, verification.ambiguous)
+from contracts/operations.json via the generated registry. These tests pin
+the rules documented in ``app.domain.operation.timeout_transition``
+(corrected per the M2T1 review controller ruling — contracts/operations.json
+global invariant ``ambiguity``: 设备可能已接受动作但无法完成验证时必须
+verification_required；不得 failed 后自动重放; GLOSSARY.md ``timed_out``:
+已确认没有继续执行证据且超过计划时限；不确定时使用结果待核验):
 
-- no dispatch fence -> timed_out (nothing was ever sent to the device);
-- profile declares no ambiguity ("not applicable") -> timed_out;
-- expected_disconnect without a persisted device job -> timed_out
-  (the certified disconnect/reconnect window elapsed with no evidence);
-- otherwise (fenced and ambiguity is possible) -> verification_required
-  (the device may have accepted the action — never auto-replay).
+- no dispatch fence -> timed_out (the action was never dispatched, so there
+  is positive evidence it did not execute);
+- read-only profiles (side_effect=false) -> timed_out (no irreversible
+  device-side effect; a new attempt is allowed);
+- fenced side-effect tasks -> verification_required (verification is
+  impossible or incomplete — the device may have accepted the action, e.g.
+  an expected_disconnect action whose timeout shows no reconnect/identity
+  evidence; a terminal timed_out would permit a clean-looking retry of a
+  possibly-executed action).
 """
 
 from __future__ import annotations
@@ -35,15 +42,36 @@ class TestTimeoutDecision:
         # power.cycle is high-risk side-effect with real ambiguity; without a
         # dispatch fence the device was never called, so the timeout is clean.
         assert (
-            timeout_transition(TaskFence(dispatch_started_at=None), _profile("SRV-ACT-02:power.cycle"))
+            timeout_transition(TaskFence(), _profile("SRV-ACT-02:power.cycle"))
             is TaskState.TIMED_OUT
         )
 
-    def test_not_applicable_ambiguity_is_timed_out(self) -> None:
-        # firmware.query: "not applicable; unreadable inventory is failed or unsupported"
-        profile = _profile("SRV-ACT-06:firmware.query")
-        assert profile.verification.ambiguous.lower().startswith("not applicable")
+    @pytest.mark.parametrize(
+        "profile_id",
+        [
+            "SRV-ACT-06:firmware.query",  # ambiguity "not applicable"
+            "SRV-ACT-07:asset.refresh",  # ambiguity "not applicable"
+            "CORE-ACT-06:transceiver.diagnose",  # ambiguity "not applicable"
+            "NAS-ACT-05:backup.status.refresh",  # ambiguity "not applicable"
+        ],
+    )
+    def test_fenced_read_profile_without_ambiguity_is_timed_out(self, profile_id: str) -> None:
+        profile = _profile(profile_id)
+        assert profile.side_effect is False
         assert timeout_transition(TaskFence(dispatch_started_at=NOW), profile) is TaskState.TIMED_OUT
+
+    def test_fenced_read_profile_with_real_ambiguity_and_job_is_timed_out(self) -> None:
+        # logs.support_bundle.collect is read-only but its ambiguity is real
+        # ("DSM job may continue but final artifact cannot be retrieved"). A
+        # read has no irreversible device-side effect: the timeout is clean
+        # and a new attempt is allowed (side_effect=false fence rules).
+        profile = _profile("NAS-ACT-03:logs.support_bundle.collect")
+        assert profile.side_effect is False
+        assert not profile.verification.ambiguous.lower().startswith("not applicable")
+        assert (
+            timeout_transition(TaskFence(dispatch_started_at=NOW, device_job_id="job-1"), profile)
+            is TaskState.TIMED_OUT
+        )
 
     @pytest.mark.parametrize(
         "profile_id",
@@ -55,10 +83,20 @@ class TestTimeoutDecision:
             "ACCESS-ACT-01:device.restart",
         ],
     )
-    def test_expected_disconnect_without_job_evidence_is_timed_out(self, profile_id: str) -> None:
+    def test_expected_disconnect_fenced_without_job_is_verification_required(
+        self, profile_id: str
+    ) -> None:
+        # expected_disconnect with a committed fence and NO reconnect/identity
+        # evidence is genuinely ambiguous: the device may have accepted the
+        # action. Never a terminal timed_out (which would permit a clean-
+        # looking retry of a possibly-executed action).
         profile = _profile(profile_id)
         assert profile.expected_disconnect is True
-        assert timeout_transition(TaskFence(dispatch_started_at=NOW), profile) is TaskState.TIMED_OUT
+        assert profile.side_effect is True
+        assert (
+            timeout_transition(TaskFence(dispatch_started_at=NOW), profile)
+            is TaskState.VERIFICATION_REQUIRED
+        )
 
     def test_expected_disconnect_with_device_job_is_verification_required(self) -> None:
         # firmware.update declares expected_disconnect AND real ambiguity
@@ -66,6 +104,7 @@ class TestTimeoutDecision:
         # be proven"): a persisted job is evidence the device accepted.
         profile = _profile("SRV-ACT-06:firmware.update")
         assert profile.expected_disconnect is True
+        assert profile.side_effect is True
         assert (
             timeout_transition(TaskFence(dispatch_started_at=NOW, device_job_id="job-fw-1"), profile)
             is TaskState.VERIFICATION_REQUIRED
@@ -79,16 +118,27 @@ class TestTimeoutDecision:
             "SRV-ACT-05:virtual_media.mount",
             "ACCESS-ACT-03:poe.port.set",
             "NAS-ACT-04:disk.smart_test.quick",
-            "NAS-ACT-03:logs.support_bundle.collect",
         ],
     )
     def test_fenced_ambiguous_profiles_become_verification_required(self, profile_id: str) -> None:
         profile = _profile(profile_id)
-        assert profile.expected_disconnect is False
+        assert profile.side_effect is True
         assert not profile.verification.ambiguous.lower().startswith("not applicable")
         assert timeout_transition(TaskFence(dispatch_started_at=NOW), profile) is TaskState.VERIFICATION_REQUIRED
 
     def test_dispatch_fence_is_required_for_ambiguity(self) -> None:
         # Same profile, no fence: the outcome flips to timed_out.
         profile = _profile("SRV-ACT-02:power.on")
-        assert timeout_transition(TaskFence(dispatch_started_at=None), profile) is TaskState.TIMED_OUT
+        assert timeout_transition(TaskFence(), profile) is TaskState.TIMED_OUT
+
+    def test_full_registry_matrix_follows_fence_and_side_effect(self) -> None:
+        # Every task-channel profile obeys the corrected rule: unfenced ->
+        # timed_out; fenced -> verification_required iff side_effect=true.
+        for profile in OPERATION_PROFILES.values():
+            if profile.channel != "task":
+                continue
+            assert timeout_transition(TaskFence(), profile) is TaskState.TIMED_OUT
+            expected = (
+                TaskState.VERIFICATION_REQUIRED if profile.side_effect else TaskState.TIMED_OUT
+            )
+            assert timeout_transition(TaskFence(dispatch_started_at=NOW), profile) is expected

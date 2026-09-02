@@ -244,22 +244,26 @@ def timeout_transition(fence: TaskFence, profile: OperationProfile) -> TaskState
     ``timed_out`` means a confirmed timeout with no evidence of continued
     execution; ``verification_required`` means the device may have accepted
     the action but the result cannot be proven (DATA_MODEL.md §7.2, contracts
-    operations.json global invariant ``ambiguity``).
+    operations.json global invariant ``ambiguity``: 设备可能已接受动作但无法
+    完成验证时必须 verification_required；不得 failed 后自动重放).
 
-    Rules (documented in tests/domain/test_timeout_transition.py):
+    Rules (corrected per the M2T1 review controller ruling; documented in
+    tests/domain/test_timeout_transition.py):
 
-    - No dispatch fence: nothing was ever sent to the device -> timed_out.
-    - Profile declares no ambiguity ("not applicable"): timed_out.
-    - expected_disconnect profile without a persisted device job: the
-      certified disconnect/reconnect window elapsed with no acceptance or
-      continuation evidence -> timed_out.
-    - Otherwise (fenced and ambiguity is possible): verification_required —
-      the device may have accepted the action.
+    - No dispatch fence: the action was never dispatched to the device, so
+      there is positive evidence it did not execute -> timed_out.
+    - Read-only profile (side_effect=false): a read has no irreversible
+      device-side effect; the timeout is clean and a new attempt is allowed
+      (DEVICE_ADAPTERS.md §9 fence rules) -> timed_out.
+    - Otherwise (fenced side-effect task): verification is impossible or
+      incomplete — the device may have accepted the action (e.g. an
+      expected_disconnect action whose timeout shows no reconnect/identity
+      evidence) -> verification_required. A terminal timed_out would permit
+      a clean-looking retry of a possibly-executed action, which the
+      ambiguity invariant forbids.
     """
     if not fence.fenced:
         return TaskState.TIMED_OUT
-    if profile.verification.ambiguous.lower().startswith("not applicable"):
-        return TaskState.TIMED_OUT
-    if profile.expected_disconnect and fence.device_job_id is None:
+    if not profile.side_effect:
         return TaskState.TIMED_OUT
     return TaskState.VERIFICATION_REQUIRED

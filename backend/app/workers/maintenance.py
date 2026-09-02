@@ -15,8 +15,11 @@ a candidate a harmless no-op:
     - verification already failed to prove -> verification_required
 - timeout sweep (timeout_scan): running/waiting_device tasks past timeout_at
   are classified by the pure ``timeout_transition`` profile semantics into
-  ``timed_out`` (terminal, finished_at recorded) or ``verification_required``
-  (ambiguous: device may have accepted the action).
+  ``timed_out`` (terminal, finished_at recorded; unfenced or read-only — the
+  action never ran or has no device-side effect to verify) or
+  ``verification_required`` (fenced side-effect task: the device may have
+  accepted the action, e.g. an expected_disconnect action with no
+  reconnect/identity evidence — never auto-replay).
 """
 
 from __future__ import annotations
@@ -187,14 +190,21 @@ class MaintenanceLoop:
                     task_id=task.id,
                     to_state=to_state,
                     error_code="ambiguous_result",
-                    message="timeout with possible device-side effect; awaiting verification",
+                    message=(
+                        "timeout_ambiguous: dispatch fence present with no positive "
+                        "no-execution evidence — the device may have accepted the "
+                        "action; awaiting verification (never auto-replay)"
+                    ),
                 )
             else:
                 changed = mark_timeout(
                     session,
                     task_id=task.id,
                     to_state=to_state,
-                    message="timeout with no evidence of continued execution",
+                    message=(
+                        "timeout with no evidence of continued execution "
+                        "(never dispatched or read-only profile)"
+                    ),
                 )
             if changed:
                 if to_state is TaskState.VERIFICATION_REQUIRED:
