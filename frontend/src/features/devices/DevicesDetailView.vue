@@ -13,19 +13,25 @@ import {
   ElRadio,
   ElRadioGroup,
   ElSelect,
-  ElTable,
-  ElTableColumn,
+  ElTabPane,
+  ElTabs,
   ElTag,
 } from 'element-plus';
-import { computed, onMounted, reactive, ref } from 'vue';
-import { useRoute } from 'vue-router';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
 import AsyncState from '@/components/AsyncState.vue';
-import CapabilityBadge from '@/components/CapabilityBadge.vue';
 import DeviceIdentity from '@/components/DeviceIdentity.vue';
 import ErrorDetail from '@/components/ErrorDetail.vue';
 import HealthBadge from '@/components/HealthBadge.vue';
 import ReachabilityBadge from '@/components/ReachabilityBadge.vue';
+import CollectionRunsPanel from '@/features/devices/panels/CollectionRunsPanel.vue';
+import ComponentsPanel from '@/features/devices/panels/ComponentsPanel.vue';
+import EventsPanel from '@/features/devices/panels/EventsPanel.vue';
+import MetricGroupsPanel from '@/features/devices/panels/MetricGroupsPanel.vue';
+import OperationsPanel from '@/features/devices/panels/OperationsPanel.vue';
+import OverviewPanel from '@/features/devices/panels/OverviewPanel.vue';
+import { deviceTabsFor } from '@/features/devices/deviceTabs';
 import type { ApiError } from '@/api/client';
 import { request } from '@/api/client';
 import type {
@@ -36,13 +42,16 @@ import type {
   DeviceView,
   ProbeStageView,
 } from '@/api/types';
+import { registerCacheEntry } from '@/lib/query-cache';
 import { formatDateTime } from '@/lib/format';
 import { PROBE_STAGE_LABELS, READINESS_LABELS, label } from '@/lib/labels';
 import { useAuthStore } from '@/stores/auth';
 
-// 设备详情（PLT-02 / PLT-03 基础：通用头部 + 能力清单 + 编辑/停用）。
+// 设备详情（PLT-02/PLT-03）：通用头部 + 按 device_type 的监控页签
+// （PRODUCT_DESIGN §5.1-5.5，配置见 deviceTabs.ts）。
 const auth = useAuthStore();
 const route = useRoute();
+const router = useRouter();
 
 const deviceId = computed(() => String(route.params.id));
 
@@ -50,6 +59,15 @@ const state = ref<'loading' | 'ready' | 'error' | 'permission_denied' | 'not_fou
 const error = ref<ApiError | null>(null);
 const device = ref<DeviceView | null>(null);
 const capabilities = ref<CapabilityView[] | null>(null);
+
+const activeTab = ref<string>('overview');
+
+const tabs = computed(() => (device.value ? deviceTabsFor(device.value.device_type) : []));
+
+function tabFromQuery(): string | null {
+  const query = route.query['tab'];
+  return typeof query === 'string' && query !== '' ? query : null;
+}
 
 async function loadAll(): Promise<void> {
   state.value = 'loading';
@@ -61,6 +79,10 @@ async function loadAll(): Promise<void> {
     ]);
     device.value = deviceResult;
     capabilities.value = capabilitiesResult.items;
+    // 页签写入 URL query（UI_SPEC §2），设备类别变化时回落到概览
+    const requested = tabFromQuery();
+    const valid = tabs.value.some((tab) => tab.id === requested);
+    activeTab.value = valid && requested !== null ? requested : 'overview';
     state.value = 'ready';
   } catch (caught) {
     error.value = caught as ApiError;
@@ -74,8 +96,37 @@ async function loadAll(): Promise<void> {
   }
 }
 
+function onTabChange(tabName: string | number): void {
+  const name = String(tabName);
+  if (name === tabFromQuery()) {
+    return;
+  }
+  void router.replace({ query: { ...route.query, tab: name } });
+}
+
+// SSE：device.updated → 重取设备与能力（实时层按 device-detail + id 失效）
+let unregisterCache: (() => void) | null = null;
+
+watch(
+  () => state.value,
+  (next) => {
+    if (next === 'ready' && unregisterCache === null) {
+      unregisterCache = registerCacheEntry({
+        kind: 'device-detail',
+        id: deviceId.value,
+        refetch: () => void loadAll(),
+      });
+    }
+  },
+);
+
 onMounted(() => {
   void loadAll();
+});
+
+onBeforeUnmount(() => {
+  unregisterCache?.();
+  unregisterCache = null;
 });
 
 // ---------- 停用 / 启用 ----------
@@ -156,7 +207,6 @@ function openEdit(): void {
   editForm.verifyTls = typeof config['verify_tls'] === 'boolean' ? config['verify_tls'] : true;
   editForm.tlsFingerprintSha256 =
     typeof config['tls_fingerprint_sha256'] === 'string' ? config['tls_fingerprint_sha256'] : '';
-  // 未启用证书校验时指纹无意义且会被隐藏，清空避免下次勾选时残留旧值
   if (!editForm.verifyTls) {
     editForm.tlsFingerprintSha256 = '';
   }
@@ -172,8 +222,6 @@ function openEdit(): void {
 function configChanged(): boolean {
   if (device.value === null) return false;
   const config = device.value.connection_config as Record<string, unknown>;
-  // 与 openEdit 相同的缺省归一：存储配置省略的键按适配器默认值比较
-  // （端口默认 443、协议默认 https、默认启用证书校验），避免误判为已修改
   const storedPort = typeof config['port'] === 'number' ? config['port'] : 443;
   const storedProtocol = typeof config['protocol'] === 'string' ? config['protocol'] : 'https';
   const storedVerifyTls = typeof config['verify_tls'] === 'boolean' ? config['verify_tls'] : true;
@@ -215,8 +263,6 @@ async function runEditProbe(): Promise<void> {
             }
           : { username: '', password: '' },
     };
-    // TLS 指纹仅在启用证书校验且填写时携带；清空或关闭校验都让该键从
-    // connection_config 中消失（服务端安全变更会整体替换存储配置，缺键即清除）
     if (editForm.verifyTls && editForm.tlsFingerprintSha256.trim()) {
       (body.connection_config as Record<string, unknown>)['tls_fingerprint_sha256'] =
         editForm.tlsFingerprintSha256.trim();
@@ -325,35 +371,53 @@ function closeEdit(): void {
           </div>
         </div>
 
-        <h2 class="device-detail__section-title">能力清单</h2>
-        <el-table
-          :data="capabilities ?? []"
-          class="device-detail__cap-table"
-          data-testid="capability-table"
+        <el-tabs
+          v-model="activeTab"
+          class="device-detail__tabs"
+          data-testid="device-tabs"
+          @tab-change="onTabChange"
         >
-          <el-table-column prop="requirement_id" label="需求编号" width="140" />
-          <el-table-column prop="requirement_title" label="需求" min-width="160" />
-          <el-table-column prop="capability_key" label="能力键" min-width="220" />
-          <el-table-column label="支持状态" width="120">
-            <template #default="{ row }">
-              <CapabilityBadge
-                :support-state="row.support_state"
-                :reason-code="row.reason_code"
-                :detail="row.detail"
-              />
-            </template>
-          </el-table-column>
-          <el-table-column prop="discovery_method" label="适配路径" width="140" />
-          <el-table-column label="最近核验" width="140">
-            <template #default="{ row }">{{ formatDateTime(row.last_checked_at) }}</template>
-          </el-table-column>
-        </el-table>
-        <p
-          v-if="capabilities !== null && capabilities.length === 0"
-          class="device-detail__empty-cap"
-        >
-          尚无能力发现结果，请先执行连接测试
-        </p>
+          <el-tab-pane v-for="tab in tabs" :key="tab.id" :name="tab.id" :label="tab.title" lazy>
+            <div v-if="activeTab === tab.id" class="device-detail__tab-body">
+              <template v-for="(section, index) in tab.sections" :key="`${tab.id}-${index}`">
+                <OverviewPanel
+                  v-if="section.kind === 'overview'"
+                  :device-id="device.id"
+                  :device="device"
+                  :capabilities="capabilities ?? []"
+                  :overview-requirement-ids="section.requirementIds ?? []"
+                />
+                <MetricGroupsPanel
+                  v-else-if="section.kind === 'metric-groups'"
+                  :device-id="device.id"
+                  :requirement-ids="section.requirementIds ?? []"
+                  :capabilities="capabilities ?? []"
+                />
+                <ComponentsPanel
+                  v-else-if="section.kind === 'components'"
+                  :device-id="device.id"
+                  :kinds="section.kinds"
+                />
+                <EventsPanel
+                  v-else-if="section.kind === 'events'"
+                  :device-id="device.id"
+                  :event-types="section.eventTypes"
+                  :capabilities="capabilities ?? []"
+                />
+                <CollectionRunsPanel
+                  v-else-if="section.kind === 'collection-runs'"
+                  :device-id="device.id"
+                />
+                <OperationsPanel
+                  v-else-if="section.kind === 'operations'"
+                  :device-id="device.id"
+                  :device-name="device.name"
+                  :capabilities="capabilities ?? []"
+                />
+              </template>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
       </template>
     </AsyncState>
 
@@ -502,12 +566,11 @@ function closeEdit(): void {
   display: flex;
   gap: 8px;
 }
-.device-detail__section-title {
-  margin: 0 0 8px;
-  font-size: 15px;
+.device-detail__tabs {
+  margin-top: 4px;
 }
-.device-detail__empty-cap {
-  color: var(--warden-status-unknown);
+.device-detail__tab-body {
+  padding: 16px 0;
 }
 .device-detail__stages {
   list-style: none;

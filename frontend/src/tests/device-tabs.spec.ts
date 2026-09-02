@@ -1,0 +1,86 @@
+import { describe, expect, it } from 'vitest';
+
+import { deviceTabsFor, monitoringRequirementIds } from '@/features/devices/deviceTabs';
+
+/**
+ * 设备详情页签结构（PRODUCT_DESIGN §5.2-5.5）：四类设备都含通用页签组，
+ * 并追加类型专属页签；需求 ID 由生成的 REQUIREMENTS 注册表推导。
+ */
+describe('设备详情页签配置（PRODUCT_DESIGN §5）', () => {
+  it('四类设备都提供 概览/指标/组件/事件/采集/操作 通用页签', () => {
+    for (const deviceType of ['server', 'synology_nas', 'core_switch', 'access_switch']) {
+      const tabs = deviceTabsFor(deviceType);
+      const ids = tabs.map((tab) => tab.id);
+      for (const generic of [
+        'overview',
+        'metrics',
+        'components',
+        'events',
+        'collection-runs',
+        'operations',
+      ]) {
+        expect(ids, `${deviceType} 缺少通用页签 ${generic}`).toContain(generic);
+      }
+    }
+  });
+
+  it('服务器：温度与内存/存储/电源与风扇（PRODUCT_DESIGN §5.2）', () => {
+    const tabs = deviceTabsFor('server');
+    const titles = tabs.map((tab) => tab.title);
+    expect(titles).toContain('温度与内存');
+    expect(titles).toContain('存储');
+    expect(titles).toContain('电源与风扇');
+    const storage = tabs.find((tab) => tab.title === '存储');
+    expect(storage?.sections.map((section) => section.kind)).toEqual([
+      'components',
+      'metric-groups',
+    ]);
+  });
+
+  it('群晖 NAS：磁盘/存储/任务与日志（PRODUCT_DESIGN §5.3）', () => {
+    const titles = deviceTabsFor('synology_nas').map((tab) => tab.title);
+    expect(titles).toContain('磁盘');
+    expect(titles).toContain('存储');
+    expect(titles).toContain('任务与日志');
+  });
+
+  it('核心交换机：端口/光模块/二层与日志（PRODUCT_DESIGN §5.4）', () => {
+    const titles = deviceTabsFor('core_switch').map((tab) => tab.title);
+    expect(titles).toContain('端口');
+    expect(titles).toContain('光模块');
+    expect(titles).toContain('二层与日志');
+    const layer2 = deviceTabsFor('core_switch').find((tab) => tab.id === 'layer2-logs');
+    expect(
+      layer2?.sections.some((section) => section.eventTypes?.includes('event.port_flap')),
+    ).toBe(true);
+  });
+
+  it('接入交换机：端口/PoE/光模块（PRODUCT_DESIGN §5.5）', () => {
+    const titles = deviceTabsFor('access_switch').map((tab) => tab.title);
+    expect(titles).toContain('端口');
+    expect(titles).toContain('PoE');
+    expect(titles).toContain('光模块');
+  });
+
+  it('监控需求 ID 从生成注册表按类型推导', () => {
+    const server = monitoringRequirementIds('server');
+    expect(server).toContain('SRV-MON-01');
+    expect(server).toContain('SRV-MON-08');
+    expect(server.some((id) => id.startsWith('NAS-'))).toBe(false);
+    const nas = monitoringRequirementIds('synology_nas');
+    expect(nas).toContain('NAS-MON-01');
+    expect(nas).toContain('NAS-MON-06');
+  });
+
+  it('未知设备类型只保留通用页签', () => {
+    const tabs = deviceTabsFor('unknown_device');
+    expect(tabs.map((tab) => tab.id)).toEqual([
+      'overview',
+      'metrics',
+      'components',
+      'events',
+      'collection-runs',
+      'operations',
+    ]);
+  });
+});

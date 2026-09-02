@@ -13,7 +13,7 @@ import { AuditView } from '@/features/audit';
 import { DevicesDetailView, DevicesListView, DevicesNewView } from '@/features/devices';
 import { FilesView } from '@/features/files';
 import { ChangePasswordPage, LoginView } from '@/features/login';
-import { OperationsView } from '@/features/operations';
+import { OperationsDetailView, OperationsView } from '@/features/operations';
 import { OverviewView } from '@/features/overview';
 import { SystemView } from '@/features/system';
 import { UsersView } from '@/features/users';
@@ -54,6 +54,12 @@ export const routes: RouteRecordRaw[] = [
     name: 'operations',
     component: OperationsView,
     meta: { title: '操作任务' },
+  },
+  {
+    path: '/operations/:id',
+    name: 'operations-detail',
+    component: OperationsDetailView,
+    meta: { title: '任务详情' },
   },
   { path: '/files', name: 'files', component: FilesView, meta: { title: '文件' } },
   {

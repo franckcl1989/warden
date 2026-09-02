@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { ElDropdown, ElDropdownItem, ElDropdownMenu, ElMenu, ElMenuItem } from 'element-plus';
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue';
 import { ROLE_LABELS, label } from '@/lib/labels';
 import { useAuthStore } from '@/stores/auth';
+import { useRealtimeStore } from '@/stores/realtime';
 
 // UI_SPEC §2 全局框架：左侧 224px 可收起导航 + 顶栏用户菜单。
+// 实时连接指示（UI_SPEC §11）：SSE 断开时显示非阻塞的连接状态。
 const auth = useAuthStore();
+const realtime = useRealtimeStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -39,10 +42,37 @@ const activePath = computed(() => {
   return route.path;
 });
 
+const realtimeText = computed(() => {
+  if (realtime.connectionState === 'degraded') {
+    return '实时连接断开，15 秒轮询中';
+  }
+  if (realtime.connectionState === 'connected') {
+    return '实时已连接';
+  }
+  return '实时未连接';
+});
+
+// SSE 生命周期：登录会话期间保持连接；登出/会话失效即断开
+watch(
+  () => auth.isAuthenticated,
+  (authenticated) => {
+    if (authenticated) {
+      realtime.start();
+    } else {
+      realtime.stop();
+    }
+  },
+  { immediate: true },
+);
+
 async function onLogout(): Promise<void> {
   await auth.logout();
   await router.replace({ name: 'login' });
 }
+
+onBeforeUnmount(() => {
+  realtime.stop();
+});
 </script>
 
 <template>
@@ -65,7 +95,17 @@ async function onLogout(): Promise<void> {
     </el-aside>
     <el-container>
       <el-header class="app-shell__header">
-        <h1 class="app-shell__title">{{ route.meta.title ?? '' }}</h1>
+        <div class="app-shell__header-left">
+          <h1 class="app-shell__title">{{ route.meta.title ?? '' }}</h1>
+          <span
+            v-if="auth.isAuthenticated"
+            class="app-shell__realtime"
+            :class="{ 'app-shell__realtime--degraded': realtime.connectionState === 'degraded' }"
+            :data-testid="`realtime-${realtime.connectionState}`"
+          >
+            {{ realtimeText }}
+          </span>
+        </div>
         <el-dropdown v-if="auth.user" trigger="click">
           <span class="app-shell__user">
             {{ auth.user.display_name }}（{{ label(ROLE_LABELS, auth.user.role) }}） ▾
@@ -123,10 +163,22 @@ async function onLogout(): Promise<void> {
   justify-content: space-between;
   border-bottom: 1px solid var(--el-border-color-light);
 }
+.app-shell__header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
 .app-shell__title {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+}
+.app-shell__realtime {
+  color: var(--warden-status-healthy);
+  font-size: 12px;
+}
+.app-shell__realtime--degraded {
+  color: var(--warden-status-warning);
 }
 .app-shell__user {
   display: inline-flex;

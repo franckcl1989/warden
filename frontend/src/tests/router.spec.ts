@@ -8,6 +8,7 @@ import { createAppRouter, routes } from '@/router';
 import { useAuthStore } from '@/stores/auth';
 
 // PRODUCT_DESIGN §2 信息架构的 11 个页面 + 强制改密流程页 /change-password
+// + 操作任务详情 /operations/:id（M2T7）
 const EXPECTED_PATHS = [
   '/login',
   '/change-password',
@@ -17,6 +18,7 @@ const EXPECTED_PATHS = [
   '/devices/:id',
   '/alerts',
   '/operations',
+  '/operations/:id',
   '/files',
   '/audit',
   '/users',
@@ -58,10 +60,10 @@ describe('router 路由表', () => {
     vi.unstubAllGlobals();
   });
 
-  it('包含 PRODUCT_DESIGN §2 的 11 个路由及强制改密页，路径精确匹配', () => {
+  it('包含 PRODUCT_DESIGN §2 的 11 个路由、强制改密页及任务详情页，路径精确匹配', () => {
     const paths = routes.map((route) => route.path).sort();
     expect(paths).toEqual([...EXPECTED_PATHS].sort());
-    expect(routes).toHaveLength(12);
+    expect(routes).toHaveLength(13);
   });
 
   it('每个路由都有名称、中文标题和组件', () => {

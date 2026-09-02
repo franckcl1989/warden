@@ -27,3 +27,46 @@ export type CapabilityView = Schemas['CapabilityView'];
 export type ProbeStageView = Schemas['ProbeStageView'];
 export type DiscoveryView = Schemas['DiscoveryView'];
 export type CapabilitySupportView = Schemas['CapabilitySupportView'];
+
+export type OverviewResponse = Schemas['OverviewResponse'];
+export type OverviewStats = Schemas['OverviewStats'];
+export type DeviceTypeSummary = Schemas['DeviceTypeSummary'];
+export type AttentionItem = Schemas['AttentionItem'];
+export type AttentionProblem = Schemas['AttentionProblem'];
+
+export type AlertListItem = Schemas['AlertListItem'];
+export type AlertDetailItem = Schemas['AlertDetailItem'];
+export type AlertsListResponse = Schemas['AlertsListResponse'];
+
+export type LatestMetricItem = Schemas['LatestMetricItem'];
+export type LatestComponentGroup = Schemas['LatestComponentGroup'];
+export type DeviceMetricsLatestResponse = Schemas['DeviceMetricsLatestResponse'];
+export type DeviceMetricsSeriesResponse = Schemas['DeviceMetricsSeriesResponse'];
+export type SeriesPointView = Schemas['SeriesPointView'];
+
+export type ComponentView = Schemas['ComponentView'];
+export type ComponentRef = Schemas['ComponentRef'];
+export type DeviceComponentsListResponse = Schemas['DeviceComponentsListResponse'];
+export type DeviceEventView = Schemas['DeviceEventView'];
+export type DeviceEventsListResponse = Schemas['DeviceEventsListResponse'];
+export type CollectionRunView = Schemas['CollectionRunView'];
+export type DeviceCollectionRunsListResponse = Schemas['DeviceCollectionRunsListResponse'];
+
+export type OperationPreviewRequest = Schemas['OperationPreviewRequest'];
+export type OperationPreviewResponse = Schemas['OperationPreviewResponse'];
+export type OperationSubmitRequest = Schemas['OperationSubmitRequest'];
+export type OperationResolveRequest = Schemas['OperationResolveRequest'];
+export type OperationTaskView = Schemas['OperationTaskView'];
+export type OperationTaskDetail = Schemas['OperationTaskDetail'];
+export type OperationEventView = Schemas['OperationEventView'];
+export type OperationsListResponse = Schemas['OperationsListResponse'];
+
+export type FileView = Schemas['FileView'];
+export type FileListResponse = Schemas['FileListResponse'];
+export type FileUploadCreateRequest = Schemas['FileUploadCreateRequest'];
+export type FileUploadContentView = Schemas['FileUploadContentView'];
+export type FileLinkView = Schemas['FileLinkView'];
+
+export type AuditLogListItem = Schemas['AuditLogListItem'];
+export type AuditLogDetailItem = Schemas['AuditLogDetailItem'];
+export type AuditLogListResponse = Schemas['AuditLogListResponse'];
