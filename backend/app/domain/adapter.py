@@ -1,13 +1,12 @@
-"""Device adapter contract (docs/DEVICE_ADAPTERS.md §2) — M1T3 scope: probe + discover.
+"""Device adapter contract (docs/DEVICE_ADAPTERS.md §2) — M1T3 probe/discover, M2T2 collect.
 
 Pure domain types: frozen dataclasses and a structural Protocol; this module
 imports nothing from FastAPI, SQLAlchemy or vendor SDKs (ARCHITECTURE.md §4).
 
-The full protocol grows in M2/M3 (``collect``, ``plan_operation``,
-``preflight_operation``, ``execute_operation``, ``verify_operation``,
-``create_launch``) once the ``DeviceSession`` type lands with collection; a
-Protocol can gain members later without breaking conforming implementations,
-so only probe/discover are declared now.
+The full protocol grows in M3 (``plan_operation``, ``preflight_operation``,
+``execute_operation``, ``verify_operation``, ``create_launch``) once the
+``DeviceSnapshot`` type lands with operations; a Protocol can gain members
+later without breaking conforming implementations.
 
 Probe semantics (DEVICE_ADAPTERS.md §2.1): the probe reports each stage
 separately — a single boolean never hides which phase failed. ``ProbeResult``
@@ -16,6 +15,16 @@ firmware plus the capability support states and observed components that
 onboarding persists. ``support_state`` is only supported/unsupported/
 not_configured (GLOSSARY.md); offline/busy states are dynamic
 ``runtime_availability`` and never overwrite the discovered support state.
+
+Collect semantics (DEVICE_ADAPTERS.md §2.3): ``ObservationBatch`` carries
+successful observations (quality good/partial), time-point events and the
+component inventory observed this pass; failures or missing values are
+reported as separate ``ObservationError`` entries — NEVER as 0/normal
+placeholder points. An observation with quality ``error`` is a failed
+observation and is converted to an ``ObservationError`` by the pipeline
+(never written as a point). Adapter-level failures (connection, TLS, auth,
+protocol) raise ``AdapterError`` with a stable contracts/error-codes.json
+code; the run is marked failed and reachability is fed a failure event.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from ipaddress import IPv4Address, IPv6Address
 from typing import Protocol
 
@@ -128,8 +138,9 @@ class ConnectionProfile:
 class DeviceAdapter(Protocol):
     """Unified adapter interface (docs/DEVICE_ADAPTERS.md §2).
 
-    M1T3 declares probe/discover; M2/M3 extend the protocol with
-    ``DeviceSession``-based collect/plan/preflight/execute/verify/create_launch.
+    M1T3 declares probe/discover; M2T2 adds the collection pass
+    (``DeviceSession`` + ``CollectionRequest`` -> ``ObservationBatch``); M3
+    extends with plan/preflight/execute/verify/create_launch.
     """
 
     adapter_key: str
@@ -141,6 +152,132 @@ class DeviceAdapter(Protocol):
 
     def probe(self, profile: ConnectionProfile) -> ProbeResult: ...
     def discover(self, profile: ConnectionProfile) -> DiscoveryResult: ...
+    def collect(self, session: DeviceSession, request: CollectionRequest) -> ObservationBatch: ...
+
+
+class Quality(StrEnum):
+    """Observation quality (docs/DEVICE_ADAPTERS.md §2.3).
+
+    ``error``-quality observations are failed observations: the pipeline
+    converts them to ``ObservationError`` rows and never writes a point.
+    """
+
+    GOOD = "good"
+    PARTIAL = "partial"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class Observation:
+    """One successful observation value (DEVICE_ADAPTERS.md §2.3).
+
+    ``metric_key``/``unit``/``value_type`` semantics come from
+    contracts/metrics.json; the adapter converts to the contract unit before
+    returning. ``value`` is the raw normalized value (int/float for number/
+    integer, bool for boolean, str for enum); the pipeline validates type and
+    enum membership against the contract before persisting.
+    """
+
+    metric_key: str
+    value: bool | int | float | str
+    observed_at: datetime
+    quality: Quality = Quality.GOOD
+    unit: str | None = None
+    source: str = "poll"
+    component_kind: str | None = None
+    component_native_id: str | None = None
+    evidence: str | None = None
+
+
+@dataclass(frozen=True)
+class EventObservation:
+    """One time-point event (contracts/events.json, DATA_MODEL.md §5.5)."""
+
+    event_type: str
+    severity: str  # normalized: unknown/info/warning/critical (events.json rule)
+    message: str
+    occurred_at: datetime
+    source: str = "poll"
+    component_kind: str | None = None
+    component_native_id: str | None = None
+    native_event_id: str | None = None
+    detail: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ObservationError:
+    """A failed or missing observation (DEVICE_ADAPTERS.md §2.3, ADR-014).
+
+    ``key`` is the metric or event key (None for adapter-level errors).
+    ``error_code`` is a stable contracts/error-codes.json code; ``stage`` is
+    the failing phase (collect/parse/validate/persist).
+    """
+
+    key: str | None
+    error_code: str
+    stage: str
+    component_kind: str | None = None
+    component_native_id: str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class ObservationBatch:
+    """Everything one collect pass observed (DEVICE_ADAPTERS.md §2.3).
+
+    Adapters MUST NOT return fabricated empty/zero data: every missing or
+    failed item is an ``ObservationError`` entry.
+    """
+
+    observations: tuple[Observation, ...] = ()
+    events: tuple[EventObservation, ...] = ()
+    components: tuple[ComponentObserved, ...] = ()
+    errors: tuple[ObservationError, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeviceSession:
+    """Per-run device connection context for a collect pass.
+
+    ``credentials`` are plaintext ONLY inside the adapter call boundary
+    (SECURITY.md §5); ``resolved_ip`` is set by the SSRF policy when the
+    deployment enforces allowed management CIDRs (SECURITY.md §7).
+    """
+
+    device_id: uuid.UUID
+    management_endpoint: str
+    connection_config: dict[str, object]
+    credentials: dict[str, object]
+    resolved_ip: IPv4Address | IPv6Address | None = None
+
+
+@dataclass(frozen=True)
+class CollectionRequest:
+    """What a collect pass is asked to read.
+
+    ``collection_type`` is one of reachability/health/metrics/logs/discovery
+    (ARCHITECTURE.md §8 periods); ``last_run_at`` lets adapters do delta
+    reads (e.g. log pages since the previous pass).
+    """
+
+    device_id: uuid.UUID
+    collection_type: str
+    now: datetime
+    last_run_at: datetime | None = None
+
+
+class AdapterError(Exception):
+    """Adapter-level failure with a stable error code (DEVICE_ADAPTERS.md §7).
+
+    ``code`` must be a contracts/error-codes.json code (the adapter subset);
+    ``message`` is a sanitized summary (never credentials/vendor bodies).
+    """
+
+    def __init__(self, code: str, message: str, *, stage: str = "collect") -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.stage = stage
 
 
 @dataclass(frozen=True)

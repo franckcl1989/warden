@@ -1,14 +1,12 @@
-"""Scheduler loop skeleton (ARCHITECTURE.md §3.3: 调度循环).
+"""Scheduler loop (ARCHITECTURE.md §3.3: 调度循环).
 
-The scheduler writes due collection plans as ``scheduled`` collection_runs;
-the collection_runs table lands in M2T2, so for M2T1 the tick is a NO-OP that
-only proves the advisory-lock guard: at most one scheduler process may run a
-tick, which is what prevents double-scheduling once real scheduling lands.
-
-The advisory lock is a session-scoped pg_try_advisory_lock (non-blocking):
-when another scheduler holds it, the tick is skipped and the loop simply
-waits for the next interval (LISTEN/NOTIFY-style wake-ups are allowed later
-as a droppable optimization, ADR-024).
+Each tick under the session-scoped advisory lock (pg_try_advisory_lock,
+non-blocking — at most one scheduler process runs a tick, which is what
+prevents double-scheduling) writes due collection plans as ``scheduled``
+collection_runs via ``schedule_due_collections`` (M2T2): per enabled+ready
+device, one run per DUE collection type (30s reachability/health, 60s
+metrics, 120s logs, 6h discovery — ARCHITECTURE.md §8), then advances the
+device's next_poll_at to the next due instant across all types.
 """
 
 from __future__ import annotations
@@ -18,6 +16,10 @@ import threading
 import structlog
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
+
+from app.application.collection import schedule_due_collections
+from app.config import WardenSettings, get_settings
+from app.infrastructure.time import utcnow
 
 # 0x57415244454E0001 = "WARDEN" || 0001; distinct keys keep the scheduler and
 # the maintenance loop from serializing against each other.
@@ -36,16 +38,18 @@ def release_advisory_lock(session: Session, key: int) -> None:
 
 
 class Scheduler:
-    """Loop structure; collection scheduling is a NO-OP until M2T2."""
+    """One advisory-lock-guarded scheduling pass per tick."""
 
     def __init__(
         self,
         session_factory: sessionmaker[Session],
         *,
         tick_seconds: float = DEFAULT_TICK_SECONDS,
+        settings: WardenSettings | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._tick_seconds = tick_seconds
+        self._settings = settings if settings is not None else get_settings()
         self._log = structlog.get_logger()
 
     def run_once(self) -> bool:
@@ -54,9 +58,10 @@ class Scheduler:
             if not try_advisory_lock(session, SCHEDULER_ADVISORY_LOCK_KEY):
                 return False
             try:
-                # M2T1: no collection scheduling yet (M2T2 wires
-                # collection_runs creation from devices.next_poll_at).
-                self._log.info("scheduler_tick", collection_runs_scheduled=0)
+                scheduled = schedule_due_collections(
+                    session, now=utcnow(), settings=self._settings
+                )
+                self._log.info("scheduler_tick", collection_runs_scheduled=scheduled)
             finally:
                 release_advisory_lock(session, SCHEDULER_ADVISORY_LOCK_KEY)
             session.commit()

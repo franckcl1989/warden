@@ -24,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -73,6 +74,12 @@ class Device(Base):
     )
     consecutive_successes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
+    )
+    # Per-collection-type last finished_at map {type: ISO-8601} plus the
+    # internal "_backoff" extension {type: ISO-8601} for credential-error
+    # backoff (M2T2, migration 0006; updated in the run completion transaction).
+    collection_state: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime.datetime] = mapped_column(

@@ -5,9 +5,10 @@ or WARDEN_POSTGRES_DSN_FILE), starts the four components of ARCHITECTURE.md
 §3.3 — scheduler loop, operation pool, collection pool, maintenance loop —
 and shuts them down gracefully on SIGTERM/SIGINT.
 
-``--once`` runs a single scheduler tick and a single maintenance pass against
-the configured database and exits; it is used by deployments, smoke tests and
-CI to prove the worker can connect, lock and sweep without churning tasks.
+``--once`` runs a single scheduler tick, drains the claimable collection
+runs once, and runs a single maintenance pass against the configured database
+and exits; it is used by deployments, smoke tests and CI to prove the worker
+can connect, lock, schedule, collect and sweep without churning tasks.
 """
 
 from __future__ import annotations
@@ -21,14 +22,22 @@ import time
 from collections.abc import Sequence
 
 import structlog
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.config import get_settings
+from app.application.collection import run_collection
+from app.config import WardenSettings, get_settings
+from app.infrastructure.crypto import CredentialCipher, CredentialKeyring
 from app.infrastructure.db import create_db_engine, create_session_factory
 from app.infrastructure.logging import configure_logging
+from app.infrastructure.observation_store import claim_collection_run
 from app.workers.collection_pool import CollectionPool
 from app.workers.maintenance import MaintenanceLoop
 from app.workers.operation_pool import OperationPool
 from app.workers.scheduler import Scheduler
+
+# --once drains at most this many collection runs (bounded smoke, never a
+# hidden backlog drain).
+ONCE_MAX_COLLECTION_RUNS = 100
 
 
 def worker_owner() -> str:
@@ -36,16 +45,41 @@ def worker_owner() -> str:
     return f"worker-{socket.gethostname()}-{os.getpid()}"
 
 
+def _process_due_collections_once(
+    session_factory: sessionmaker[Session],
+    *,
+    settings: WardenSettings,
+    keyring: CredentialKeyring,
+    owner: str,
+) -> int:
+    """Claim and execute claimable collection runs once (--once smoke path)."""
+    processed = 0
+    for _ in range(ONCE_MAX_COLLECTION_RUNS):
+        with session_factory() as session:
+            run = claim_collection_run(
+                session, lease_owner=owner, lease_seconds=settings.task_lease_seconds
+            )
+            session.commit()
+        if run is None:
+            break
+        with session_factory() as session:
+            run_collection(session, run, settings=settings, keyring=keyring)
+            session.commit()
+        processed += 1
+    return processed
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="app.workers.run",
         description="Warden worker service: scheduler, operation pool, "
-        "collection pool and maintenance loop (M2T1 skeleton).",
+        "collection pool and maintenance loop (M2T1 skeleton, M2T2 collection wiring).",
     )
     parser.add_argument(
         "--once",
         action="store_true",
-        help="run one scheduler tick and one maintenance pass, then exit",
+        help="run one scheduler tick, drain claimable collection runs once, "
+        "run one maintenance pass, then exit",
     )
     args = parser.parse_args(argv)
 
@@ -55,15 +89,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     engine = create_db_engine(settings.database_url)
     session_factory = create_session_factory(engine)
     owner = worker_owner()
+    # The worker needs the credential master key to decrypt device credentials
+    # for collection (SECURITY.md §5); unset secrets fail fast at startup.
+    keyring = CredentialKeyring.from_current(
+        CredentialCipher(settings.credential_master_key.get_secret_value().encode("utf-8"))
+    )
 
     if args.once:
         try:
-            scheduler_ran = Scheduler(session_factory).run_once()
+            scheduler_ran = Scheduler(session_factory, settings=settings).run_once()
+            collection_processed = _process_due_collections_once(
+                session_factory, settings=settings, keyring=keyring, owner=owner
+            )
             report = MaintenanceLoop(session_factory).run_once()
             log.info(
                 "worker_once_done",
                 lease_owner=owner,
                 scheduler_lock_acquired=scheduler_ran,
+                collection_runs_processed=collection_processed,
                 maintenance_lock_acquired=report.lock_acquired,
                 requeued=report.requeued,
                 verify_only=report.verify_only,
@@ -94,6 +137,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_workers=settings.collection_workers,
         lease_seconds=settings.task_lease_seconds,
         lease_owner=owner,
+        settings=settings,
+        keyring=keyring,
     )
     loop_threads = [
         threading.Thread(
