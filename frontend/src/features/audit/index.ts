@@ -1,7 +1,7 @@
 import { defineComponent, h } from 'vue';
 
-// 审计页占位视图：M2（PLT-07）实现
+// 审计占位视图：页面建设中，随 M2（PLT-07）交付
 export const AuditView = defineComponent({
   name: 'AuditView',
-  setup: () => () => h('div', { class: 'placeholder-page' }, '审计（M2 实现）'),
+  setup: () => () => h('div', { class: 'placeholder-page' }, '页面建设中（M2 交付）'),
 });

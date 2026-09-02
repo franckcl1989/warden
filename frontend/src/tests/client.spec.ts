@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, request, setCsrfTokenProvider } from '@/api/client';
+import {
+  ApiError,
+  isSessionRecoverableError,
+  request,
+  setCsrfTokenProvider,
+  setSessionExpiredHandler,
+} from '@/api/client';
 
 function jsonResponse(body: unknown, status: number, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -22,6 +28,7 @@ describe('api client 错误信封解析', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     setCsrfTokenProvider(null);
+    setSessionExpiredHandler(null);
   });
 
   it('从错误信封中暴露 code/details/request_id', async () => {
@@ -102,17 +109,71 @@ describe('api client 错误信封解析', () => {
     expect(err.request_id).toBe('req-004');
   });
 
-  it('成功响应返回解析后的数据，并携带 CSRF 头槽位', async () => {
+  it('变更请求携带 CSRF 头；读取请求不携带', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ status: 'ok' }, 200));
     vi.stubGlobal('fetch', fetchMock);
     setCsrfTokenProvider(() => 'csrf-token-1');
-    const data = await request<{ status: string }>('/health/live');
-    expect(data).toEqual({ status: 'ok' });
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('/api/v1/health/live');
-    expect(init.headers).toMatchObject({
+    await request<{ status: string }>('/auth/logout', { method: 'POST' });
+    const [postUrl, postInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(postUrl).toBe('/api/v1/auth/logout');
+    expect(postInit.headers).toMatchObject({
       Accept: 'application/json',
       'X-CSRF-Token': 'csrf-token-1',
     });
+    await request<{ status: string }>('/auth/me');
+    const [getUrl, getInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(getUrl).toBe('/api/v1/auth/me');
+    expect(getInit.headers).not.toHaveProperty('X-CSRF-Token');
+  });
+
+  it('session_expired 触发会话失效处理器', async () => {
+    const handler = vi.fn();
+    setSessionExpiredHandler(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            error: { code: 'session_expired', message: '会话已过期', details: {}, request_id: 'r' },
+          },
+          401,
+        ),
+      ),
+    );
+    const err = await expectApiError(request('/devices'));
+    expect(err.code).toBe('session_expired');
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('非会话类错误不触发处理器', async () => {
+    const handler = vi.fn();
+    setSessionExpiredHandler(handler);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          { error: { code: 'internal_error', message: 'x', details: {}, request_id: 'r' } },
+          500,
+        ),
+      ),
+    );
+    await expectApiError(request('/devices'));
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('isSessionRecoverableError 只认会话/CSRF 类错误码', () => {
+    expect(isSessionRecoverableError({ code: 'session_expired' } as ApiError)).toBe(true);
+    expect(isSessionRecoverableError({ code: 'unauthenticated' } as ApiError)).toBe(true);
+    expect(isSessionRecoverableError({ code: 'csrf_failed' } as ApiError)).toBe(true);
+    expect(isSessionRecoverableError({ code: 'permission_denied' } as ApiError)).toBe(false);
+  });
+
+  it('成功响应返回解析后的数据', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ status: 'ok' }, 200)),
+    );
+    const data = await request<{ status: string }>('/health/live');
+    expect(data).toEqual({ status: 'ok' });
   });
 });

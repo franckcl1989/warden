@@ -5,11 +5,35 @@ type ErrorBody = components['schemas']['ErrorBody'];
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 let csrfTokenProvider: (() => string | null) | null = null;
 
-/** M1（PLT-01）登录后注入 CSRF 票据提供者；当前为占位槽。 */
+/**
+ * M1（PLT-01）登录后注入 CSRF 票据提供者。
+ * 票据只在内存中持有，永不写入 localStorage（SECURITY.md §2）。
+ */
 export function setCsrfTokenProvider(provider: (() => string | null) | null): void {
   csrfTokenProvider = provider;
+}
+
+/**
+ * 会话失效处理槽：401 session_expired / csrf_failed 时由调用方（router 层）
+ * 注入清理与重定向逻辑，避免 client 与 store/router 形成循环依赖。
+ */
+let sessionExpiredHandler: (() => void) | null = null;
+
+export function setSessionExpiredHandler(handler: (() => void) | null): void {
+  sessionExpiredHandler = handler;
+}
+
+/** 会话或 CSRF 失效：这类错误只能通过重新登录恢复。 */
+export function isSessionRecoverableError(error: ApiError): boolean {
+  return (
+    error.code === 'session_expired' ||
+    error.code === 'unauthenticated' ||
+    error.code === 'csrf_failed'
+  );
 }
 
 export function apiBaseUrl(): string {
@@ -50,6 +74,11 @@ export class ApiError extends Error {
 
 function isErrorCode(value: string): value is ErrorCode {
   return (ERROR_CODES as readonly string[]).includes(value);
+}
+
+/** 判定错误是否来自服务端错误信封（网络失败等 TypeError 不是 ApiError）。 */
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
 }
 
 async function parseError(response: Response): Promise<ApiError> {
@@ -93,7 +122,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     headers['Content-Type'] = 'application/json';
   }
   const csrfToken = csrfTokenProvider?.();
-  if (csrfToken) {
+  if (csrfToken && options.method !== undefined && MUTATING_METHODS.has(options.method)) {
     headers['X-CSRF-Token'] = csrfToken;
   }
   const controller = new AbortController();
@@ -106,7 +135,11 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       signal: controller.signal,
     });
     if (!response.ok) {
-      throw await parseError(response);
+      const error = await parseError(response);
+      if (isSessionRecoverableError(error)) {
+        sessionExpiredHandler?.();
+      }
+      throw error;
     }
     if (response.status === 204) {
       return undefined as T;
