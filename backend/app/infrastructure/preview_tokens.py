@@ -15,6 +15,14 @@ user, device, device version, requirement/capability and risk:
 - ``expires_at``: 60 seconds after issuance (SECURITY.md §4: 一次性、60 秒
   有效).
 
+Single-use is NOT enforced by the signature alone: within the 60 s window a
+replayed token with a fresh Idempotency-Key would otherwise create a second
+task (SECURITY.md §4 item 7 / §13). The application layer keeps a server-side
+consumption ledger (``preview_token_uses``, migration 0010 — every issued
+token hash is registered at issue time, confirm atomically claims the row in
+the task-creation transaction); ``token_hash()`` is the digest the ledger
+stores.
+
 Verification raises ``PreviewTokenInvalid`` for signature/format problems
 (boundary maps to 422 validation_failed field=preview_token) and
 ``PreviewTokenExpired`` once the validity window passed (boundary maps to
@@ -40,6 +48,16 @@ TOKEN_TTL_SECONDS = 60
 IDEMPOTENCY_KEY_PATTERN = r"^[A-Za-z0-9._-]+$"
 IDEMPOTENCY_KEY_MIN_LENGTH = 8
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
+
+
+def token_hash(token: str) -> str:
+    """SHA-256 hex digest identifying one issued preview token.
+
+    The server-side single-use ledger (``preview_token_uses``, migration
+    0010) stores only this digest — never the token itself, whose signed
+    body carries the normalized parameter set.
+    """
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
 class PreviewTokenError(ValueError):

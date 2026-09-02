@@ -35,7 +35,7 @@ from app.models.observation import (
     MetricRollup5m,
     UiEvent,
 )
-from app.models.operation import OperationTask, OperationTaskEvent
+from app.models.operation import OperationTask, OperationTaskEvent, PreviewTokenUse
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -421,6 +421,85 @@ class TestOperationTaskRetention:
         assert db_session.scalar(select(func.count()).select_from(OperationTask)) == 2
 
 
+class TestPreviewTokenUseRetention:
+    """Single-use preview-token ledger sweep (migration 0010).
+
+    Ledger rows only cover the 60-second token window: consumed AND
+    expired-unconsumed rows older than the 1-hour retention carry no value
+    (the operation.create audit row and the task itself are the permanent
+    record) and are purged; live (unexpired) rows — unconsumed tokens the
+    user may still confirm, and just-consumed ones whose confirm is still
+    within the window — survive.
+    """
+
+    def test_consumed_and_expired_preview_token_rows_are_swept(
+        self, db_session: Session
+    ) -> None:
+        device = make_collection_device(db_session, index=16)
+        user = _user(db_session)
+        # A QUEUED task (never purged by retention) anchors the consumed rows:
+        # the ledger's consumed_by_task_id FK stays valid for the whole pass.
+        holder_task = make_task(
+            db_session,
+            device_id=device.id,
+            requested_by=user.id,
+            index=16,
+            requirement_id="SRV-ACT-02",
+            capability_key="power.on",
+            state="queued",
+            idempotency_key="ledger-holder-16",
+        )
+        db_session.commit()
+
+        def _row(
+            *,
+            expires_at: datetime.datetime,
+            consumed_at: datetime.datetime | None,
+            consumed_by_task_id: object = None,
+        ) -> PreviewTokenUse:
+            return PreviewTokenUse(
+                token_hash=uuid.uuid4().hex,
+                user_id=user.id,
+                device_id=device.id,
+                created_at=expires_at,
+                expires_at=expires_at,
+                consumed_at=consumed_at,
+                consumed_by_task_id=consumed_by_task_id,
+            )
+
+        db_session.add_all(
+            [
+                # Old and fully expired: swept (both states).
+                _row(expires_at=NOW - datetime.timedelta(hours=2), consumed_at=None),
+                _row(
+                    expires_at=NOW - datetime.timedelta(hours=2),
+                    consumed_at=NOW - datetime.timedelta(hours=2),
+                    consumed_by_task_id=holder_task.id,
+                ),
+                # Still live: kept (unconsumed token may still confirm; the
+                # just-consumed confirm is still inside its window).
+                _row(
+                    expires_at=NOW + datetime.timedelta(minutes=30),
+                    consumed_at=None,
+                ),
+                _row(
+                    expires_at=NOW + datetime.timedelta(minutes=30),
+                    consumed_at=NOW - datetime.timedelta(seconds=10),
+                    consumed_by_task_id=holder_task.id,
+                ),
+            ]
+        )
+        db_session.commit()
+
+        report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
+        assert report.preview_token_uses_deleted == 2
+        remaining = db_session.scalars(select(PreviewTokenUse.token_hash)).all()
+        assert len(remaining) == 2
+        # The queued anchor task and its ledger references are untouched.
+        assert report.operation_tasks_deleted == 0
+
+
 class TestUiEventAndSessionRetention:
     def test_ui_events_older_than_10_minutes_are_deleted(self, db_session: Session) -> None:
         make_collection_device(db_session, index=11)
@@ -589,6 +668,7 @@ class TestFunctionSafety:
         assert report.operation_tasks_deleted == 0
         assert report.ui_events_deleted == 0
         assert report.sessions_deleted == 0
+        assert report.preview_token_uses_deleted == 0
         assert report.as_dict()["audit_skipped_append_only"] is True  # report shape is stable
         assert report.as_dict()["operation_task_events_skipped_append_only"] is True
 

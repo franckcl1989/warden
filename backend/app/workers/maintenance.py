@@ -95,6 +95,7 @@ class MaintenanceReport:
     rollup_1h_deleted: int = 0
     device_events_deleted: int = 0
     resolved_alerts_deleted: int = 0
+    preview_token_uses_deleted: int = 0
     operation_tasks_deleted: int = 0
     operation_task_events_skipped_append_only: bool = False
     ui_events_deleted: int = 0
@@ -197,6 +198,7 @@ class MaintenanceLoop:
         report.rollup_1h_deleted = retention_report.rollup_1h_deleted
         report.device_events_deleted = retention_report.device_events_deleted
         report.resolved_alerts_deleted = retention_report.resolved_alerts_deleted
+        report.preview_token_uses_deleted = retention_report.preview_token_uses_deleted
         report.operation_tasks_deleted = retention_report.operation_tasks_deleted
         report.operation_task_events_skipped_append_only = (
             retention_report.operation_task_events_skipped_append_only

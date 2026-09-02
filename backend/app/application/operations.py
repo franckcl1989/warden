@@ -10,18 +10,28 @@ Flow semantics (M2T4):
   per profile risk), device state, capability support, mutex, parameter schema
   and (high risk) the 5-minute reauth window are checked; the device is NEVER
   contacted (DEVICE_ADAPTERS.md §2.4). Success signs a 60-second preview token
-  binding user/device/version/capability/risk/parameters (API_CONTRACT §6.1).
+  binding user/device/version/capability/risk/parameters (API_CONTRACT §6.1)
+  and REGISTERS its hash in the single-use ledger (``preview_token_uses``,
+  migration 0010 — SECURITY.md §4 item 7: 一次性).
 - ``confirm_and_create_task``: re-verifies EVERYTHING against the token claims
   and the CURRENT persisted state; any drift is 409 ``preview_stale``
   (API_CONTRACT.md §6.1: 任何变化返回 409 preview_stale，要求重新预览). Task
-  creation + its audit commit in ONE transaction (DATA_MODEL.md §11); the
-  (requested_by, idempotency_key) unique constraint is the idempotency
-  authority — a duplicate key returns 409 ``idempotency_conflict`` with the
-  ORIGINAL task id even when the request differs (scope is per user, not per
-  device; clients must scope keys per action — documented M2T4 decision).
+  creation + audit + the atomic token claim (conditional UPDATE on
+  ``consumed_at IS NULL``) commit in ONE transaction (DATA_MODEL.md §11): a
+  replayed token with a fresh Idempotency-Key can never create a second task
+  (SECURITY.md §13 — 重放确认令牌不能产生第二次执行), and a rolled-back
+  confirm un-consumes automatically. The (requested_by, idempotency_key)
+  unique constraint is the idempotency authority — a duplicate key returns 409
+  ``idempotency_conflict`` with the ORIGINAL task id even when the request
+  differs (scope is per user, not per device; clients must scope keys per
+  action — documented M2T4 decision).
 - ``cancel_task`` / ``verify_task`` / ``resolve_task`` implement the §6.2
   semantics; verify/resolve are admin-only (M2T4 controller decision) and
-  terminal transitions + their audit commit atomically.
+  terminal transitions + their audit commit atomically. ``verify_task``
+  rebuilds the previous execution result from the PERSISTED task row
+  (device_job_id / evidence / error fields) and hands it to
+  ``adapter.verify_operation`` — a device_job_status verify only ever queries
+  the persisted job (DATA_MODEL.md §7.1: 存在时只查询，不重复创建).
 
 The worker's preflight -> fence -> execute -> verify wiring is M2T6; tasks
 created here stay ``queued``.
@@ -36,13 +46,19 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.adapters import UnknownAdapterError, get_adapter
 from app.config import WardenSettings
 from app.domain import auth_errors
-from app.domain.adapter import AdapterError, DeviceAdapter, DeviceSession
+from app.domain.adapter import (
+    AdapterError,
+    DeviceAdapter,
+    DeviceSession,
+    OperationResult,
+)
 from app.domain.errors import AppError
 from app.domain.operation import MUTEX_SCOPES, TaskState, VerificationState
 from app.domain.operation_plan import (
@@ -66,6 +82,7 @@ from app.infrastructure.preview_tokens import (
     PreviewTokenExpired,
     PreviewTokenInvalid,
     PreviewTokenSigner,
+    token_hash,
 )
 from app.infrastructure.sessions import is_reauthenticated
 from app.infrastructure.tasks import ACTIVE_MUTEX_STATES, append_event
@@ -73,13 +90,15 @@ from app.infrastructure.time import utcnow
 from app.models.auth import Session as AuthSession
 from app.models.auth import User
 from app.models.devices import Device, DeviceCapability, DeviceCredential
-from app.models.operation import OperationTask, OperationTaskEvent
+from app.models.operation import OperationTask, OperationTaskEvent, PreviewTokenUse
 
 PLT_05 = "PLT-05"
 
 MESSAGE_PREVIEW_EXPIRED = "预览令牌已过期，请重新预览"
 MESSAGE_PREVIEW_NEEDED = "需要先获取有效的操作预览"
 MESSAGE_PREVIEW_STALE = "设备或能力状态已变化，请重新预览"
+MESSAGE_PREVIEW_USED = "预览令牌已被使用，请重新预览"
+MESSAGE_PREVIEW_NOT_REGISTERED = "预览令牌未在服务端登记，请重新预览"
 MESSAGE_IDEMPOTENCY_CONFLICT = "已存在使用该幂等键提交的操作任务"
 MESSAGE_DEVICE_BUSY = "该设备已有正在执行的任务，请稍后重试"
 
@@ -111,7 +130,16 @@ def _audit_denial(
     audit: AuditContext,
     *,
     permission: str,
+    path: str,
+    device_id: uuid.UUID | None = None,
 ) -> None:
+    """Audit one permission denial with the REAL endpoint resource (M2T4 fix).
+
+    Denials must name the target endpoint resource (the actual path with the
+    real device/task id) so a security investigation can reconstruct what was
+    attempted; the hardcoded placeholder path of the original M2T4 build is
+    gone. ``resource_id`` mirrors the deps.py truncation (varchar(64)).
+    """
     if logger is None:
         return
     logger.record(
@@ -119,12 +147,14 @@ def _audit_denial(
         actor_user_id=audit.actor_user_id,
         session_id=audit.session_id,
         resource_type="operation",
+        resource_id=path[:64],
+        device_id=device_id,
         requirement_id=PLT_05,
         request_id=audit.request_id,
         result="permission_denied",
         source_ip=audit.source_ip,
         user_agent_summary=audit.user_agent_summary,
-        detail={"permission": permission, "method": "POST", "path": "operations"},
+        detail={"permission": permission, "method": "POST", "path": path},
     )
 
 
@@ -134,12 +164,16 @@ def _enforce_execute_permission(
     *,
     logger: AuditLogger | None,
     audit: AuditContext,
+    path: str,
+    device_id: uuid.UUID | None = None,
 ) -> None:
     """SECURITY.md §3.1: operation.execute.<risk> per profile risk."""
     permission = execute_permission_for(risk_level)
     if matrix_require(user.role, permission):
         return
-    _audit_denial(logger, audit, permission=permission)
+    _audit_denial(
+        logger, audit, permission=permission, path=path, device_id=device_id
+    )
     raise auth_errors.permission_denied(permission)
 
 
@@ -276,7 +310,8 @@ def create_preview(
     not_configured, permission_denied, validation_failed, device_busy,
     reauthentication_required. Never talks to the device — only the persisted
     snapshot (DEVICE_ADAPTERS.md §2.4; tests enforce it via adapter call
-    counters).
+    counters). Registers the issued token's hash in the single-use ledger
+    (migration 0010) so confirm can claim it atomically.
     """
     current = now if now is not None else utcnow()
     if not device.enabled:
@@ -287,7 +322,15 @@ def create_preview(
         _snapshot(db, device),
         OperationRequest(capability_key=capability_key, parameters=parameters),
     )
-    _enforce_execute_permission(user, probe_plan.risk_level, logger=logger, audit=audit)
+    preview_path = f"/devices/{device.id}/operation-previews"
+    _enforce_execute_permission(
+        user,
+        probe_plan.risk_level,
+        logger=logger,
+        audit=audit,
+        path=preview_path,
+        device_id=device.id,
+    )
     conflict = _active_mutex_task(db, device.id, probe_plan.conflict_scope)
     if conflict is not None:
         raise _device_busy(conflict, now=current)
@@ -308,6 +351,22 @@ def create_preview(
         parameters=probe_plan.normalized_parameters,
         parameter_hash=probe_plan.parameter_hash,
         expires_at=expires_at,
+    )
+    # Register the token in the single-use ledger (migration 0010): the
+    # confirm-time claim needs a row to consume. ON CONFLICT DO NOTHING keeps
+    # two identical preview requests in the same second (deterministic token —
+    # same payload/expiry) from raising; both receive the same token and only
+    # the first confirm can claim it. The caller (route) commits.
+    db.execute(
+        pg_insert(PreviewTokenUse)
+        .values(
+            token_hash=token_hash(token),
+            user_id=user.id,
+            device_id=device.id,
+            created_at=current,
+            expires_at=expires_at,
+        )
+        .on_conflict_do_nothing()
     )
     if logger is not None:
         logger.record(
@@ -343,6 +402,40 @@ def _map_plan_drift(exc: AppError) -> AppError:
     return _preview_stale(f"{MESSAGE_PREVIEW_STALE}（{exc.message}）")
 
 
+def _claim_preview_token(
+    db: Session,
+    *,
+    preview_token: str,
+    task_id: uuid.UUID,
+    consumed_at: datetime.datetime,
+) -> bool:
+    """Atomically claim one issued preview token for ``task_id``.
+
+    Single-use enforcement (SECURITY.md §4 item 7 / §13, migration 0010):
+    the conditional UPDATE matches ONLY an unconsumed ledger row — a replay
+    of an already-consumed token returns zero rows and can never reach a
+    second task insert. The claim runs in the CALLER's transaction (the same
+    one that creates the task — the task row already exists because the
+    caller flushed it before claiming, which the consumed_by_task_id FK
+    requires): commit makes it durable, rollback un-consumes, and the row
+    lock serializes concurrent confirms of the same token (the second one
+    sees ``consumed_at`` set).
+    """
+    claimed_id = db.execute(
+        update(PreviewTokenUse)
+        .where(
+            PreviewTokenUse.token_hash == token_hash(preview_token),
+            PreviewTokenUse.consumed_at.is_(None),
+        )
+        .values(
+            consumed_at=consumed_at,
+            consumed_by_task_id=task_id,
+        )
+        .returning(PreviewTokenUse.id)
+    ).scalar_one_or_none()
+    return claimed_id is not None
+
+
 def _find_existing_task(db: Session, user_id: uuid.UUID, idempotency_key: str) -> OperationTask | None:
     return db.scalar(
         select(OperationTask).where(
@@ -369,10 +462,14 @@ def confirm_and_create_task(
     """Protection-chain steps 6-8: confirm and persist the operation task.
 
     Every preview check is re-run against the CURRENT state; drift raises 409
-    ``preview_stale``. Task insert + initial event + audit commit in ONE
-    transaction (DATA_MODEL.md §11); the DB unique constraint
-    (requested_by, idempotency_key) is the idempotency authority and its
-    IntegrityError maps to 409 ``idempotency_conflict`` + existing_task_id.
+    ``preview_stale``. The single-use token claim (conditional UPDATE on the
+    ledger row, migration 0010), the task insert, its initial event and the
+    audit commit in ONE transaction (DATA_MODEL.md §11) — a replay of an
+    already-consumed token matches zero rows and raises 409 preview_stale
+    (SECURITY.md §13: 重放不能产生第二次执行), and a rolled-back transaction
+    un-consumes automatically. The DB unique constraint (requested_by,
+    idempotency_key) is the idempotency authority and its IntegrityError maps
+    to 409 ``idempotency_conflict`` + existing_task_id.
     """
     current = now if now is not None else utcnow()
     _require_valid_idempotency_key(idempotency_key)
@@ -415,7 +512,15 @@ def confirm_and_create_task(
                 "capability_key": probe_plan.capability_key,
             },
         )
-    _enforce_execute_permission(user, probe_plan.risk_level, logger=logger, audit=audit)
+    submit_path = f"/devices/{device.id}/operations"
+    _enforce_execute_permission(
+        user,
+        probe_plan.risk_level,
+        logger=logger,
+        audit=audit,
+        path=submit_path,
+        device_id=device.id,
+    )
     if confirmation_text != device.name:
         raise auth_errors.validation_failed(
             "confirmation_text", "输入的设备名称与目标设备不一致，请重新确认"
@@ -429,6 +534,9 @@ def confirm_and_create_task(
     conflict = _active_mutex_task(db, device.id, probe_plan.conflict_scope)
     if conflict is not None:
         raise _device_busy(conflict, now=current)
+    # _verify_preview_token raised unless a syntactically valid token string
+    # was supplied; the ledger claim needs the concrete token for its hash.
+    assert preview_token is not None
 
     task = OperationTask(
         requirement_id=probe_plan.requirement_id,
@@ -446,9 +554,32 @@ def confirm_and_create_task(
         timeout_at=current + datetime.timedelta(seconds=probe_plan.timeout_seconds),
     )
     db.add(task)
-    # Flush so the uuid7 default materializes BEFORE the append-only event row
-    # that references task_id (append_event rows carry the FK).
+    # Flush so the task row exists BEFORE the claim (the consumed_by_task_id
+    # FK requires the referenced task row) and before the append-only event
+    # row that references task_id (append_event rows carry the FK).
     db.flush()
+    claimed = _claim_preview_token(
+        db,
+        preview_token=preview_token,
+        task_id=task.id,
+        consumed_at=current,
+    )
+    if not claimed:
+        # The token was never registered OR is already consumed; roll back
+        # the just-flushed task row and distinguish so an honest 422
+        # (forged/unknown) never masks a real replay. The claim failure ends
+        # the transaction: nothing of the confirm may persist.
+        db.rollback()
+        use_row = db.scalar(
+            select(PreviewTokenUse).where(
+                PreviewTokenUse.token_hash == token_hash(preview_token)
+            )
+        )
+        if use_row is not None and use_row.consumed_at is not None:
+            raise _preview_stale(MESSAGE_PREVIEW_USED)
+        raise auth_errors.validation_failed(
+            "preview_token", MESSAGE_PREVIEW_NOT_REGISTERED
+        )
     append_event(
         db,
         task_id=task.id,
@@ -623,7 +754,14 @@ def cancel_task(
     from app.domain.operation import TaskCancellationPolicy
 
     current = now if now is not None else utcnow()
-    _enforce_execute_permission(user, task.risk_level, logger=logger, audit=audit)
+    _enforce_execute_permission(
+        user,
+        task.risk_level,
+        logger=logger,
+        audit=audit,
+        path=f"/operations/{task.id}/cancel",
+        device_id=task.device_id,
+    )
     state = TaskState(task.state)
     fenced = task.dispatch_started_at is not None
     if not TaskCancellationPolicy.can_cancel(
@@ -747,8 +885,21 @@ def verify_task(
         OperationRequest(capability_key=task.capability_key, parameters=dict(task.parameters)),
     )
     device_session = _device_session(db, device=device, keyring=keyring)
+    # Verify only ever QUERIES the persisted execution (DATA_MODEL.md §7.1:
+    # 存在时只查询，不重复创建; DEVICE_ADAPTERS.md §9): the stored
+    # device_job_id / evidence / error fields are handed to the adapter as
+    # the previous OperationResult so device_job_status strategies poll the
+    # PERSISTED job instead of re-executing or inventing one. The M2T6
+    # executor stores those fields; M2T4's admin verify honors them.
+    persisted_result = OperationResult(
+        ok=task.error_code is None,
+        evidence=dict(task.evidence) if task.evidence else {},
+        error_code=task.error_code,
+        error_detail=task.error_detail,
+        device_job_id=task.device_job_id,
+    )
     try:
-        result = adapter.verify_operation(device_session, probe_plan, None)
+        result = adapter.verify_operation(device_session, probe_plan, persisted_result)
     except AdapterError as exc:
         raise AppError(exc.code, exc.message) from None
     evidence: dict[str, object] = {

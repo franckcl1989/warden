@@ -36,6 +36,10 @@ from tests.db.test_retention_privileges import (
 )
 from tests.observation_factories import make_collection_device
 
+# Tables that exist at head (the effective-matrix loops cover every base
+# table via pg_class; this list only pins the EXPECTED set for the subset
+# assertions below and must be extended by tests when a migration adds a
+# table — 0010 added preview_token_uses).
 NON_PURGEABLE_TABLES = (
     "alembic_version",
     "users",
@@ -56,6 +60,7 @@ NON_PURGEABLE_TABLES = (
     "ui_events",
     "metric_rollups_5m",
     "metric_rollups_1h",
+    "preview_token_uses",
 )
 
 

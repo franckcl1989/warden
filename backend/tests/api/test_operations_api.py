@@ -14,9 +14,10 @@ import datetime
 import uuid
 
 import pytest
+from app.infrastructure.preview_tokens import token_hash
 from app.infrastructure.time import utcnow
 from app.models.auth import AuditLog, User
-from app.models.operation import OperationTask
+from app.models.operation import OperationTask, PreviewTokenUse
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -739,3 +740,127 @@ def test_operations_list_filters_and_get_detail(
     missing = device_client.get(f"{API}/operations/{uuid.uuid4()}")
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "resource_not_found"
+
+
+@pytest.mark.integration
+def test_confirm_token_replay_with_fresh_key_after_success_is_preview_stale(
+    device_client: TestClient, db_session: Session, onboarded_device: tuple[str, dict[str, object]],
+) -> None:
+    """SECURITY.md §13: a consumed token replayed with a FRESH Idempotency-Key
+    must never create a second task — even for the non-mutex read scope where
+    the DB mutex index cannot guard (0010 ledger claim)."""
+    device_id, _ = onboarded_device
+    _, csrf = _user_csrf(
+        device_client, db_session, username="op-replay", password=OPERATOR_PASSWORD, role="operator"
+    )
+    preview = _preview(device_client, csrf, device_id, "logs.support_bundle.collect")
+    assert preview.status_code == 200
+    token = str(preview.json()["preview_token"])
+    first = _confirm(
+        device_client, csrf, device_id, token,
+        confirmation_text="fake-srv-01", idempotency_key="replay-api-key-01",
+    )
+    assert first.status_code == 202
+    first_id = first.json()["id"]
+
+    replay = _confirm(
+        device_client, csrf, device_id, token,
+        confirmation_text="fake-srv-01", idempotency_key="replay-api-key-02",
+    )
+    assert replay.status_code == 409
+    error = replay.json()["error"]
+    assert error["code"] == "preview_stale"
+    assert "已被使用" in error["details"]["reason"]
+    assert len(_task_rows(db_session)) == 1
+
+    use_row = db_session.scalar(
+        select(PreviewTokenUse).where(PreviewTokenUse.token_hash == token_hash(token))
+    )
+    assert use_row is not None
+    assert use_row.consumed_at is not None
+    assert use_row.consumed_by_task_id == uuid.UUID(first_id)
+
+
+@pytest.mark.integration
+def test_verify_passes_persisted_device_job_to_the_adapter(
+    device_client: TestClient, db_session: Session, onboarded_device: tuple[str, dict[str, object]],
+) -> None:
+    """Verify honors the persisted execution (M2T4 fix): the adapter receives
+    the stored device_job_id — a device_job_status verify only queries the
+    persisted job (DATA_MODEL.md §7.1: 存在时只查询，不重复创建)."""
+    device_id, _ = onboarded_device
+    operator = create_user(
+        db_session, username="op-verifyjob", password=OPERATOR_PASSWORD, role="operator"
+    )
+    admin, admin_csrf = _admin(device_client, db_session)
+    task = make_task(
+        db_session,
+        device_id=uuid.UUID(device_id),
+        requested_by=operator.id,
+        index=0,
+        idempotency_key="seed-verify-job",
+        requirement_id="SRV-ACT-02",
+        capability_key="power.on",
+        state="verification_required",
+        device_job_id="fake-job-1",
+        evidence={"command": "fake-ok", "job": "fake-job-1"},
+    )
+    verified = device_client.post(
+        f"{API}/operations/{task.id}/verify",
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert verified.status_code == 200
+    body = verified.json()
+    assert body["state"] == "succeeded"
+    verification = body["evidence"]["verification"]
+    assert verification["succeeded"] is True
+    assert verification["device_job_id"] == "fake-job-1"
+
+
+@pytest.mark.integration
+def test_preview_rate_limited_after_30_per_minute(
+    device_client: TestClient, db_session: Session,
+) -> None:
+    """API_CONTRACT.md §11: 操作预览 30/min/用户. The limiter runs before the
+    device lookup, so failing attempts still count (each returns 404 until
+    the budget is exhausted)."""
+    _, csrf = _user_csrf(
+        device_client, db_session, username="op-ratelimit-p", password=OPERATOR_PASSWORD,
+        role="operator",
+    )
+    missing_device = str(uuid.uuid4())
+    for _ in range(30):
+        response = _preview(device_client, csrf, missing_device, "power.on")
+        assert response.status_code == 404
+    thirty_first = _preview(device_client, csrf, missing_device, "power.on")
+    assert thirty_first.status_code == 429
+    error = thirty_first.json()["error"]
+    assert error["code"] == "rate_limited"
+    assert error["details"]["scope"] == "operation_preview"
+
+
+@pytest.mark.integration
+def test_submit_rate_limited_after_10_per_minute(
+    device_client: TestClient, db_session: Session,
+) -> None:
+    """API_CONTRACT.md §11: 操作提交 10/min/用户 (the device mutex adds the
+    real concurrency bound)."""
+    _, csrf = _user_csrf(
+        device_client, db_session, username="op-ratelimit-s", password=OPERATOR_PASSWORD,
+        role="operator",
+    )
+    missing_device = str(uuid.uuid4())
+    for _ in range(10):
+        response = _confirm(
+            device_client, csrf, missing_device, "not-a-token",
+            confirmation_text="fake-srv-01", idempotency_key="ratelimit-submit-01",
+        )
+        assert response.status_code == 404
+    eleventh = _confirm(
+        device_client, csrf, missing_device, "not-a-token",
+        confirmation_text="fake-srv-01", idempotency_key="ratelimit-submit-01",
+    )
+    assert eleventh.status_code == 429
+    error = eleventh.json()["error"]
+    assert error["code"] == "rate_limited"
+    assert error["details"]["scope"] == "operation_submit"

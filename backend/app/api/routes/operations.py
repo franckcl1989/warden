@@ -361,6 +361,10 @@ def device_operation_previews_create(
         logger=logger,
         audit=_audit_context(request, context),
     )
+    # Persist the single-use token ledger row (migration 0010): the token is
+    # issued NOW, so its ledger registration must be durable before the
+    # response leaves — confirm claims it in its own transaction.
+    db.commit()
     plan = outcome.plan
     return OperationPreviewResponse(
         requirement_id=plan.requirement_id,

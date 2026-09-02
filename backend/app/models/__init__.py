@@ -36,6 +36,7 @@ from app.models.operation import (
     OperationTask,
     OperationTaskAppendOnlyError,
     OperationTaskEvent,
+    PreviewTokenUse,
 )
 
 __all__ = [
@@ -70,6 +71,7 @@ __all__ = [
     "OperationTask",
     "OperationTaskAppendOnlyError",
     "OperationTaskEvent",
+    "PreviewTokenUse",
     "Session",
     "UiEvent",
     "User",

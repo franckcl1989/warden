@@ -20,12 +20,14 @@ from app.application import operations as op_service
 from app.application.operations import AuditContext, OperationPreview
 from app.config import WardenSettings
 from app.domain.errors import AppError
-from app.infrastructure.preview_tokens import PreviewTokenSigner
+from app.infrastructure.db import create_db_engine, create_session_factory
+from app.infrastructure.preview_tokens import PreviewTokenSigner, token_hash
 from app.infrastructure.time import utcnow
 from app.models.auth import Session as AuthSession
 from app.models.auth import User
 from app.models.devices import Device, DeviceCapability
-from app.models.operation import OperationTask
+from app.models.operation import OperationTask, PreviewTokenUse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from tests.api.auth_helpers import create_admin, create_user
@@ -128,6 +130,18 @@ def operator(db_session: Session) -> User:
 @pytest.fixture
 def operator_session(db_session: Session, operator: User) -> AuthSession:
     return _session_row(db_session, operator, reauthenticated_at=utcnow())
+
+
+@pytest.fixture
+def session_factory(fresh_test_db_dsn: str):
+    """Extra session factory over the same recreated database (multi-session
+    atomicity tests: one transaction's abort must not poison the others)."""
+    engine = create_db_engine(fresh_test_db_dsn)
+    factory = create_session_factory(engine)
+    try:
+        yield factory
+    finally:
+        engine.dispose()
 
 
 def _preview(
@@ -613,3 +627,177 @@ def test_confirm_rechecks_reauth_window_for_high_risk(
     with pytest.raises(AppError) as excinfo:
         _confirm(db_session, settings, device, operator, operator_session, audit, preview)
     assert _error_code(excinfo) == "reauthentication_required"
+
+
+# ------------------------------------------------- single-use token ledger (0010)
+
+def _ledger_row(db: Session, token: str) -> PreviewTokenUse | None:
+    return db.scalar(
+        select(PreviewTokenUse).where(PreviewTokenUse.token_hash == token_hash(token))
+    )
+
+
+def _count_tasks_for_device(db: Session, device_id: uuid.UUID) -> int:
+    from sqlalchemy import func
+
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(OperationTask)
+            .where(OperationTask.device_id == device_id)
+        )
+        or 0
+    )
+
+
+@pytest.mark.integration
+def test_preview_registers_token_in_the_single_use_ledger(
+    db_session: Session, settings: WardenSettings, device: Device, operator: User,
+    operator_session: AuthSession, audit: AuditContext,
+) -> None:
+    preview = _preview(db_session, settings, device, operator, operator_session, audit)
+    db_session.commit()
+    row = _ledger_row(db_session, preview.preview_token)
+    assert row is not None
+    assert row.user_id == operator.id
+    assert row.device_id == device.id
+    assert row.consumed_at is None
+    assert row.consumed_by_task_id is None
+    assert row.expires_at > utcnow()
+
+
+@pytest.mark.integration
+def test_confirm_token_replay_with_fresh_key_is_preview_stale_and_single_task(
+    db_session: Session, settings: WardenSettings, device: Device, operator: User,
+    operator_session: AuthSession, audit: AuditContext,
+) -> None:
+    # SECURITY.md §13 regression (non-mutex scope — the mutex index cannot
+    # guard read-scope duplicates, the token ledger must): a replayed token
+    # with a FRESH Idempotency-Key after a successful confirm can never
+    # create a second task.
+    preview = _preview(db_session, settings, device, operator, operator_session, audit,
+                       capability_key="logs.support_bundle.collect")
+    first = _confirm(db_session, settings, device, operator, operator_session, audit,
+                     preview, idempotency_key="replay-fresh-key-1")
+    with pytest.raises(AppError) as excinfo:
+        _confirm(db_session, settings, device, operator, operator_session, audit,
+                 preview, idempotency_key="replay-fresh-key-2")
+    assert _error_code(excinfo) == "preview_stale"
+    assert "已被使用" in str(excinfo.value.details.get("reason", ""))
+    assert _count_tasks_for_device(db_session, device.id) == 1
+    row = _ledger_row(db_session, preview.preview_token)
+    assert row is not None
+    assert row.consumed_at is not None
+    assert row.consumed_by_task_id == first.id
+
+
+@pytest.mark.integration
+def test_confirm_aborted_transaction_unconsumes_the_token(
+    db_session: Session, settings: WardenSettings, device: Device, operator: User,
+    operator_session: AuthSession, audit: AuditContext,
+    session_factory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Atomicity (DATA_MODEL.md §11 + migration 0010): the claim lives in the
+    # SAME transaction as the task insert — a task-insert failure (here a
+    # simulated abort between claim and commit) must roll the claim back so
+    # the token stays usable for a retry.
+    with session_factory() as session:
+        preview = op_service.create_preview(
+            session,
+            device=device,
+            capability_key="logs.support_bundle.collect",
+            parameters={},
+            user=operator,
+            session=operator_session,
+            settings=settings,
+            logger=None,
+            audit=audit,
+        )
+        session.commit()
+
+    real_append_event = op_service.append_event
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("simulated task-insert failure")
+
+    monkeypatch.setattr(op_service, "append_event", _boom)
+    try:
+        with pytest.raises(RuntimeError, match="simulated task-insert failure"), session_factory() as session:
+            op_service.confirm_and_create_task(
+                session,
+                device=device,
+                preview_token=preview.preview_token,
+                confirmation_text=device.name,
+                idempotency_key="atomic-fail-key-1",
+                user=operator,
+                session=operator_session,
+                settings=settings,
+                logger=None,
+                audit=audit,
+            )
+    finally:
+        monkeypatch.setattr(op_service, "append_event", real_append_event)
+
+    with session_factory() as session:
+        retried = op_service.confirm_and_create_task(
+            session,
+            device=device,
+            preview_token=preview.preview_token,
+            confirmation_text=device.name,
+            idempotency_key="atomic-retry-key-2",
+            user=operator,
+            session=operator_session,
+            settings=settings,
+            logger=None,
+            audit=audit,
+        )
+        session.commit()
+        assert retried.state == "queued"
+        row = _ledger_row(session, preview.preview_token)
+        assert row is not None
+        assert row.consumed_at is not None
+        assert row.consumed_by_task_id == retried.id
+    assert _count_tasks_for_device(db_session, device.id) == 1
+
+
+@pytest.mark.integration
+def test_confirm_token_valid_but_never_registered_is_validation_failed(
+    db_session: Session, settings: WardenSettings, device: Device, operator: User,
+    operator_session: AuthSession, audit: AuditContext,
+) -> None:
+    # A signature-valid token with NO ledger row (e.g. ledger lost/rotated
+    # between issue and confirm) is not a replay: honest 422, never a 409
+    # that would mask the real single-use violation.
+    # A signature-valid token with NO ledger row (e.g. ledger lost/rotated
+    # between issue and confirm) is not a replay: honest 422, never a 409
+    # that would mask the real single-use violation. The forged token reuses
+    # a REAL plan's parameter_hash so every drift check passes and only the
+    # missing ledger row can trip the confirm.
+    real_preview = _preview(db_session, settings, device, operator, operator_session, audit)
+    forged = PreviewTokenSigner(settings.session_secret).create(
+        user_id=operator.id,
+        device_id=device.id,
+        device_version=device.version,
+        requirement_id="SRV-ACT-02",
+        capability_key="power.on",
+        risk_level="high",
+        parameters={},
+        parameter_hash=real_preview.plan.parameter_hash,
+        expires_at=utcnow() + datetime.timedelta(seconds=60),
+    )
+    with pytest.raises(AppError) as excinfo:
+        op_service.confirm_and_create_task(
+            db_session,
+            device=device,
+            preview_token=forged,
+            confirmation_text=device.name,
+            idempotency_key="never-registered-1",
+            user=operator,
+            session=operator_session,
+            settings=settings,
+            logger=None,
+            audit=audit,
+        )
+    assert _error_code(excinfo) == "validation_failed"
+    assert excinfo.value.details.get("field") == "preview_token"
+    assert _count_tasks_for_device(db_session, device.id) == 0

@@ -34,6 +34,7 @@ PURGEABLE_TABLES = (
     "metric_rollups_1h",
     "device_events",
     "alerts",
+    "preview_token_uses",
     "operation_tasks",
     "ui_events",
     "sessions",
@@ -172,6 +173,42 @@ def test_warden_app_has_delete_privilege_on_every_purgeable_table(
 
 
 # ------------------------------------------------- (c) partition lifecycle
+
+@pytest.mark.integration
+def test_0010_preview_token_ledger_owned_by_warden_app_and_purgeable(
+    warden_app_dsn: str, superuser_session_factory
+) -> None:
+    """The preview-token ledger (migration 0010) follows the 0008 ownership
+    pattern: warden_app OWNS it, so the retention sweep (which runs as the
+    app account) can DELETE expired rows; INSERT/DELETE work as warden_app
+    and the append-only pair is untouched."""
+    with superuser_session_factory() as session:
+        user = make_user(session, index=2)
+        device = make_collection_device(session, index=2)
+        user_id = user.id
+        device_id = device.id
+
+    with psycopg.connect(base_test_dsn()) as connection:
+        owner = connection.execute(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class "
+            "WHERE oid = 'preview_token_uses'::regclass"
+        ).fetchone()[0]
+    assert owner == WARDEN_APP_ROLE
+
+    with psycopg.connect(warden_app_dsn) as connection:
+        connection.execute(
+            "INSERT INTO preview_token_uses (id, token_hash, user_id, device_id, "
+            "created_at, expires_at) VALUES (gen_random_uuid(), %s, %s, %s, "
+            "now(), now() + interval '1 minute')",
+            ("0010-ledger-hash-1", user_id, device_id),
+        )
+        connection.commit()
+        deleted = connection.execute(
+            "DELETE FROM preview_token_uses WHERE token_hash = '0010-ledger-hash-1'"
+        )
+        connection.commit()
+        assert deleted.rowcount == 1
+
 
 @pytest.mark.integration
 def test_warden_app_can_create_and_drop_metric_points_partitions(

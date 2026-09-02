@@ -98,6 +98,10 @@ ROLLUP_REGENERATION_LOOKBACK = datetime.timedelta(minutes=15)
 
 # ui_events retention (DATA_MODEL.md §11: SSE 窗口保留 10 分钟).
 UI_EVENT_RETENTION = datetime.timedelta(minutes=10)
+# Preview-token ledger retention (migration 0010): each row covers one
+# 60-second token window plus a margin; consumed rows carry no value past it
+# (the audit trail lives in audit_logs.operation.create, which is permanent).
+PREVIEW_TOKEN_USE_RETENTION = datetime.timedelta(hours=1)
 # Login session cleanup (DATA_MODEL.md §10: 登录会话 过期后 30 天清理).
 SESSION_CLEANUP_DELAY = datetime.timedelta(days=30)
 
@@ -121,6 +125,7 @@ _RETENTION_TABLES = frozenset(
         "metric_rollups_1h",
         "device_events",
         "alerts",
+        "preview_token_uses",
         "operation_tasks",
         "ui_events",
         "sessions",
@@ -147,6 +152,16 @@ _CHUNKED_DELETE_SQL: dict[str, str] = {
     "alerts": (
         "DELETE FROM alerts WHERE id IN "
         "(SELECT id FROM alerts WHERE status = 'resolved' AND resolved_at < :cutoff "
+        "ORDER BY id LIMIT 2000)"
+    ),
+    "preview_token_uses": (
+        # Single-use preview-token ledger (migration 0010): rows only cover
+        # the 60-second token window plus the retention margin — expired
+        # unconsumed AND consumed rows older than the cutoff carry no value
+        # (the task/audit trail is permanent). Runs as warden_app, which owns
+        # the table after 0010 (0008 ownership pattern).
+        "DELETE FROM preview_token_uses WHERE id IN "
+        "(SELECT id FROM preview_token_uses WHERE expires_at < :cutoff "
         "ORDER BY id LIMIT 2000)"
     ),
     "operation_tasks": (
@@ -221,6 +236,7 @@ class RetentionReport:
     rollup_1h_deleted: int = 0
     device_events_deleted: int = 0
     resolved_alerts_deleted: int = 0
+    preview_token_uses_deleted: int = 0
     operation_tasks_deleted: int = 0
     ui_events_deleted: int = 0
     sessions_deleted: int = 0
@@ -735,6 +751,14 @@ def enforce_retention(
         db,
         "alerts",
         {"cutoff": _days_ago(settings.resolved_alert_retention_days)},
+    )
+    # Preview-token single-use ledger rows (migration 0010): expired and
+    # consumed rows leave after a 1-hour lifetime (the 60 s token window plus
+    # margin is all they cover; confirm rejects any token past its window).
+    report.preview_token_uses_deleted = _chunked_delete(
+        db,
+        "preview_token_uses",
+        {"cutoff": now - PREVIEW_TOKEN_USE_RETENTION},
     )
     # Terminal tasks age out by DELETE — the chunked statement's NOT EXISTS
     # guard keeps the 0005 append-only stream intact (see the SQL comment):

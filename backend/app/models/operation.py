@@ -156,6 +156,52 @@ class OperationTaskEvent(Base):
     )
 
 
+class PreviewTokenUse(Base):
+    """Single-use ledger for operation preview tokens (migration 0010).
+
+    SECURITY.md §4 item 7 (一次性) + §13 (重放确认令牌不能产生第二次执行):
+    the signed 60 s TTL is not enough on its own — within the window a
+    replayed token with a fresh Idempotency-Key would create a second task
+    for non-mutex conflict scopes. Every issued token hash is INSERTed at
+    issue time; confirm atomically claims the row (conditional UPDATE on
+    ``consumed_at IS NULL``) in the SAME transaction that creates the task,
+    so a replay matches zero rows and a rolled-back confirm un-consumes.
+
+    The table is purgeable (rows only cover the token window): the retention
+    sweep removes them after a 1-hour lifetime
+    (``application/maintenance.py``); 0010 transferred ownership to
+    ``warden_app`` so the sweep's DELETE runs as the worker account.
+    """
+
+    __tablename__ = "preview_token_uses"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("devices.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_by_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("operation_tasks.id", ondelete="CASCADE")
+    )
+
+    __table_args__ = (
+        Index("ix_preview_token_uses_expires_at", "expires_at"),
+        CheckConstraint(
+            "(consumed_at IS NULL AND consumed_by_task_id IS NULL) OR "
+            "(consumed_at IS NOT NULL AND consumed_by_task_id IS NOT NULL)",
+            name="ck_preview_token_uses_consumed",
+        ),
+    )
+
+
 @event.listens_for(OperationTaskEvent, "before_update")
 def _reject_event_update(_mapper: object, _connection: object, _target: object) -> None:
     raise OperationTaskAppendOnlyError("operation_task_events is append-only: updates are rejected")
