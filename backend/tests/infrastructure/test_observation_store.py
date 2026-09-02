@@ -310,6 +310,107 @@ class TestBatchPersistence:
         )
         assert retired == 0
 
+    def test_reobserved_component_clears_retired_at(self, db_session: Session) -> None:
+        from app.models.devices import Component
+
+        device = make_collection_device(db_session)
+        run = make_collection_run(db_session, device_id=device.id)
+        # batch 1: drive observed; batch 2: drive missing -> retired;
+        # batch 3: drive re-observed -> retired_at must be cleared so the
+        # component is visible again (M2T2 review finding 3).
+        persist_observation_batch(db_session, device_id=device.id, batch=_normal_batch(), run_id=run.id, now=NOW)
+        db_session.commit()
+        retire = ObservationBatch(
+            observations=(Observation("health.overall", "healthy", NOW, source="redfish"),),
+            components=(ComponentObserved(kind="processor", native_id="cpu-0", name="CPU", status="ok"),),
+        )
+        persist_observation_batch(db_session, device_id=device.id, batch=retire, run_id=run.id, now=NOW)
+        db_session.commit()
+        drive = db_session.scalar(
+            select(Component).where(Component.device_id == device.id, Component.native_id == "drive-0")
+        )
+        assert drive is not None and drive.retired_at is not None
+        back = _normal_batch()
+        persist_observation_batch(db_session, device_id=device.id, batch=back, run_id=run.id, now=NOW)
+        db_session.commit()
+        drive = db_session.scalar(
+            select(Component).where(Component.device_id == device.id, Component.native_id == "drive-0")
+        )
+        assert drive is not None
+        assert drive.retired_at is None
+        assert drive.last_seen_at == NOW
+
+    def test_unsupported_metric_becomes_error_not_point(self, db_session: Session) -> None:
+        from app.models.devices import DeviceCapability
+
+        device = make_collection_device(db_session)
+        # remove the drive.status capability: the device does not support it
+        row = db_session.scalar(
+            select(DeviceCapability).where(
+                DeviceCapability.device_id == device.id,
+                DeviceCapability.capability_key == "drive.status",
+            )
+        )
+        assert row is not None
+        db_session.delete(row)
+        db_session.commit()
+        run = make_collection_run(db_session, device_id=device.id)
+        outcome = persist_observation_batch(
+            db_session, device_id=device.id, batch=_normal_batch(), run_id=run.id, now=NOW
+        )
+        db_session.commit()
+        # drive.status -> unsupported_capability error; the rest persists
+        assert outcome.successes == 2
+        assert outcome.errors == 1
+        points = db_session.scalars(
+            select(MetricPoint).where(
+                MetricPoint.device_id == device.id, MetricPoint.metric_key == "drive.status"
+            )
+        ).all()
+        assert points == []
+        latest = db_session.scalars(
+            select(MetricLatest).where(
+                MetricLatest.device_id == device.id, MetricLatest.metric_key == "drive.status"
+            )
+        ).all()
+        assert latest == []
+        errors = db_session.scalars(
+            select(CollectionObservationError).where(CollectionObservationError.device_id == device.id)
+        ).all()
+        assert [(row.metric_key_or_event_key, row.error_code) for row in errors] == [
+            ("drive.status", "unsupported_capability")
+        ]
+        events = db_session.scalars(select(DeviceEvent).where(DeviceEvent.device_id == device.id)).all()
+        assert len(events) == 1  # event.sel is still supported
+
+    def test_unsupported_event_becomes_error_not_row(self, db_session: Session) -> None:
+        from app.models.devices import DeviceCapability
+
+        device = make_collection_device(db_session)
+        row = db_session.scalar(
+            select(DeviceCapability).where(
+                DeviceCapability.device_id == device.id,
+                DeviceCapability.capability_key == "event.sel",
+            )
+        )
+        assert row is not None
+        db_session.delete(row)
+        db_session.commit()
+        run = make_collection_run(db_session, device_id=device.id)
+        outcome = persist_observation_batch(
+            db_session, device_id=device.id, batch=_normal_batch(), run_id=run.id, now=NOW
+        )
+        db_session.commit()
+        assert outcome.successes == 3
+        assert outcome.errors == 1
+        events = db_session.scalars(select(DeviceEvent).where(DeviceEvent.device_id == device.id)).all()
+        assert events == []
+        errors = db_session.scalars(
+            select(CollectionObservationError).where(CollectionObservationError.device_id == device.id)
+        ).all()
+        assert errors[0].metric_key_or_event_key == "event.sel"
+        assert errors[0].error_code == "unsupported_capability"
+
 
 class TestPartitions:
     def test_rows_land_in_today_partition(self, db_session: Session) -> None:

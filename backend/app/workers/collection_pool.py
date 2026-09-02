@@ -60,9 +60,12 @@ class CollectionPool(ConcurrencyPool):
             msg = "collection pool requires a credential keyring"
             raise RuntimeError(msg)
         with self._session_factory() as session:
+            # run_id (not the detached claimed instance): run_collection
+            # re-loads the row in this session so the terminal-state writes
+            # are not silently dropped.
             run_collection(
                 session,
-                task,
+                task.id,
                 settings=self._settings,
                 keyring=self._keyring,
             )

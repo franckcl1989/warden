@@ -52,15 +52,17 @@ from app.domain.observation import (
 )
 from app.generated.alerts import ALERT_RULES, BOOLEAN_VALUE_MAPS, ENUM_VALUE_MAPS
 from app.generated.capabilities import REQUIREMENTS
+from app.generated.events import EVENT_DEFINITIONS
 from app.generated.metrics import METRIC_DEFINITIONS
 from app.infrastructure.crypto import CredentialKeyring, DecryptionError, EncryptedSecret, credential_aad
 from app.infrastructure.observation_store import (
     apply_alert_signals,
     collection_state_last_run,
     persist_observation_batch,
+    supported_capability_keys,
 )
 from app.infrastructure.time import utcnow
-from app.models.devices import Device, DeviceCapability, DeviceCredential
+from app.models.devices import Device, DeviceCredential
 from app.models.observation import CollectionRun, MetricLatest, UiEvent
 
 # ARCHITECTURE.md §8 default periods; reachability and health share the 30s
@@ -83,6 +85,27 @@ def collection_intervals(settings: WardenSettings) -> dict[str, int]:
         "logs": settings.logs_interval_seconds,
         "discovery": settings.discovery_interval_seconds,
     }
+
+
+def collection_type_for_capability_key(capability_key: str) -> str:
+    """Capability key -> the collection type whose cadence refreshes it.
+
+    Single documented mapping (docs/ARCHITECTURE.md §8) used by the data
+    freshness computation:
+
+    - metrics.json keys — health and metric values (设备指标、端口、磁盘、
+      电源、风扇) — are carried by the ``metrics`` collection -> metrics
+      interval;
+    - events.json keys (SEL/DSM 日志/交换机关键日志) by the ``logs``
+      collection -> logs interval;
+    - everything else (operations, capability discovery: 资产、FRU、固件、
+      能力发现) by the ``discovery`` collection -> discovery interval.
+    """
+    if capability_key in METRIC_DEFINITIONS:
+        return "metrics"
+    if capability_key in EVENT_DEFINITIONS:
+        return "logs"
+    return "discovery"
 
 
 def _parse_iso(value: object) -> datetime.datetime | None:
@@ -283,14 +306,16 @@ def emit_ui_event(
 
 
 def _supported_metric_keys(db: Session, *, device_id: uuid.UUID) -> frozenset[str]:
-    rows = db.scalars(
-        select(DeviceCapability).where(
-            DeviceCapability.device_id == device_id,
-            DeviceCapability.support_state == "supported",
-        )
-    ).all()
+    """Supported contract metric keys (device_capabilities, ADR-014).
+
+    Single source with the persist filter (observation_store.
+    supported_capability_keys) so a metric is either supported everywhere —
+    point written, latest updated, signal possible — or nowhere.
+    """
     return frozenset(
-        row.capability_key for row in rows if row.capability_key in METRIC_DEFINITIONS
+        key
+        for key in supported_capability_keys(db, device_id=device_id)
+        if key in METRIC_DEFINITIONS
     )
 
 
@@ -478,8 +503,13 @@ def _capability_freshness(
     group state is the worst freshness among the group's supported metrics
     (a supported-but-never-observed metric contributes ``unknown``, which
     blocks ``fresh`` resolution — conservative, ADR-025 policy.resolution).
+
+    The freshness cadence comes from the per-collection-type intervals in
+    settings via ``collection_type_for_capability_key`` (the single
+    key->collection-type mapping, ARCHITECTURE.md §8): each metric's age is
+    judged against the interval of the collection type that refreshes it.
     """
-    metrics_interval = collection_intervals(settings)["metrics"]
+    intervals = collection_intervals(settings)
     groups: list[CapabilityGroupFreshness] = []
     for requirement in REQUIREMENTS.values():
         if requirement.device_type != device.device_type or requirement.kind != "monitoring":
@@ -487,6 +517,11 @@ def _capability_freshness(
         group_metrics = [key for key in requirement.metrics if key in supported_metric_keys]
         if not group_metrics:
             continue
+        # The slowest refresher cadence among the group's metrics (all
+        # metrics.json keys map to the ``metrics`` collection type).
+        group_interval = max(
+            intervals[collection_type_for_capability_key(key)] for key in group_metrics
+        )
         states: list[str] = []
         for metric_key in group_metrics:
             rows = [row for row in latest_rows if row.metric_key == metric_key]
@@ -495,7 +530,7 @@ def _capability_freshness(
                 continue
             for row in rows:
                 states.append(
-                    FreshnessCalculator.freshness(row.observed_at, metrics_interval, now)
+                    FreshnessCalculator.freshness(row.observed_at, group_interval, now)
                 )
         groups.append(
             CapabilityGroupFreshness(
@@ -542,6 +577,7 @@ def _build_alert_snapshot(
             component_id=row.component_id,
         )
         for row in latest_rows
+        if row.metric_key in supported  # the evaluator only sees supported metrics (ADR-014)
     )
     return DeviceAlertSnapshot(
         device_id=device.id,
@@ -589,7 +625,7 @@ def process_collection_events(
 
 def run_collection(
     db: Session,
-    run: CollectionRun,
+    run_id: uuid.UUID,
     *,
     settings: WardenSettings,
     keyring: CredentialKeyring,
@@ -597,12 +633,24 @@ def run_collection(
 ) -> None:
     """Execute one claimed collection run end-to-end (ARCHITECTURE.md §5.1).
 
+    ``run_id`` identifies the claimed run; the run row is RE-LOADED inside
+    this session so every terminal-state mutation (state/success_count/
+    failure_count/finished_at/error_code/error_summary) attaches to this
+    session's identity map and commits with the batch. Callers claim in one
+    session (``claim_collection_run``) and execute in another (the collection
+    pool, ``--once``, the smoke script): passing a detached instance across
+    would silently drop those writes, leaving the run ``running`` forever.
+
     The adapter call happens first; everything else (batch persistence,
     reachability/health, run terminal state, alerts, ui_events, device
     schedule) commits in ONE transaction (DATA_MODEL.md §11). The caller
     commits.
     """
     now = now or utcnow()
+    run = db.get(CollectionRun, run_id)
+    if run is None:
+        msg = f"collection run not found: {run_id}"
+        raise ValueError(msg)
     device = db.get(Device, run.device_id)
     if device is None:
         run.state = "failed"

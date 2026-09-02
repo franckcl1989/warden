@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 
+import pytest
 from app.adapters.fake import FAILURE_MODE_KEY
 from app.application.collection import (
     AUTH_FAILURE_BACKOFF_MULTIPLIER,
@@ -30,7 +31,7 @@ from app.models.observation import (
     UiEvent,
 )
 from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from tests.observation_factories import make_collection_device, make_keyring
 
@@ -50,10 +51,98 @@ def _claim_and_run(
     if run is None:
         return None
     db.commit()
-    run_collection(db, run, settings=settings, keyring=make_keyring(), now=now)
+    run_collection(db, run.id, settings=settings, keyring=make_keyring(), now=now)
     db.commit()
     db.refresh(run)
     return run
+
+
+class TestCrossSessionRunTerminalState:
+    """Regression: the production worker claims in session A and executes in
+    session B (collection_pool._default_handler, run.py --once, the smoke
+    script). The run row must reach its terminal state with correct counts —
+    a detached ORM instance passed across sessions must never silently lose
+    the terminal-state writes (M2T2 review finding 1).
+    """
+
+    @pytest.mark.parametrize(
+        (
+            "index",
+            "connection_config",
+            "expected_state",
+            "expected_successes",
+            "expected_failures",
+            "expected_error_code",
+        ),
+        [
+            (20, {}, "succeeded", 19, 0, None),
+            (21, {"partial_mode": True}, "partial", 17, 2, None),
+            (22, {FAILURE_MODE_KEY: "network_unreachable"}, "failed", 0, 1, "network_unreachable"),
+        ],
+    )
+    def test_terminal_state_persists_across_claim_and_execute_sessions(
+        self,
+        db_session: Session,
+        db_settings: object,
+        index: int,
+        connection_config: dict[str, object],
+        expected_state: str,
+        expected_successes: int,
+        expected_failures: int,
+        expected_error_code: str | None,
+    ) -> None:
+        make_collection_device(
+            db_session,
+            index=index,
+            connection_config=connection_config,
+            next_poll_at=T0 - TICK,
+        )
+        schedule_due_collections(db_session, now=T0, settings=db_settings)
+        db_session.commit()
+        factory = sessionmaker(bind=db_session.get_bind())
+        with factory() as session_a:
+            run = claim_collection_run(session_a, lease_owner="cross-session-worker", lease_seconds=300)
+            assert run is not None
+            session_a.commit()
+            run_id = run.id
+        with factory() as session_b:
+            run_collection(session_b, run_id, settings=db_settings, keyring=make_keyring(), now=T0)
+            session_b.commit()
+        with factory() as session_c:
+            row = session_c.get(CollectionRun, run_id)
+            assert row is not None
+            assert row.state == expected_state
+            assert row.success_count == expected_successes
+            assert row.failure_count == expected_failures
+            assert row.finished_at is not None
+            assert row.error_code == expected_error_code
+
+
+class TestCollectionTypeMapping:
+    """Capability key -> collection type (the freshness cadence source, one
+    documented place, M2T2 review finding 4)."""
+
+    @pytest.mark.parametrize(
+        ("capability_key", "expected_type"),
+        [
+            # metrics.json keys (health and metric values) -> metrics collection
+            ("health.overall", "metrics"),
+            ("indicator.led", "metrics"),
+            ("temperature.cpu", "metrics"),
+            ("drive.status", "metrics"),
+            # events.json keys -> logs collection
+            ("event.sel", "logs"),
+            ("event.system_log", "logs"),
+            # operations / capability discovery -> discovery collection
+            ("power.on", "discovery"),
+            ("console.kvm.open", "discovery"),
+            ("firmware.update", "discovery"),
+        ],
+    )
+    def test_mapping(self, capability_key: str, expected_type: str) -> None:
+        from app.application.collection import collection_type_for_capability_key
+
+        assert collection_type_for_capability_key(capability_key) == expected_type
 
 
 class TestScheduling:
@@ -381,6 +470,54 @@ class TestAlertsEndToEnd:
         expired = [alert for alert in resolved if alert.rule_key == "data.expired"]
         assert len(expired) == 1
 
+    def test_data_expired_uses_configured_metrics_interval(self, db_session: Session, db_settings: object) -> None:
+        # The freshness cadence comes from settings by collection type, not a
+        # hardcoded 60s (M2T2 review finding 4): with a 90s metrics interval,
+        # 200s-old data is stale (not expired) and only >270s opens.
+        from app.application.collection import process_collection_events
+        from app.config import WardenSettings
+        from app.models.observation import MetricLatest
+
+        assert isinstance(db_settings, WardenSettings)
+        settings = db_settings.model_copy(update={"metrics_interval_seconds": 90})
+        device = make_collection_device(db_session, next_poll_at=None)
+        stale_at = T0 - datetime.timedelta(seconds=200)  # within 3x90=270s
+        for metric_key in ("temperature.cpu", "temperature.memory", "temperature.inlet", "temperature.board"):
+            db_session.add(
+                MetricLatest(
+                    device_id=device.id,
+                    metric_key=metric_key,
+                    value_double=42.5,
+                    value_text=None,
+                    unit="Cel",
+                    quality="good",
+                    source="redfish",
+                    observed_at=stale_at,
+                )
+            )
+        db_session.commit()
+        process_collection_events(db_session, device=device, now=T0, settings=settings)
+        db_session.commit()
+        active = db_session.scalars(
+            select(Alert).where(Alert.device_id == device.id, Alert.status == "active")
+        ).all()
+        assert all(alert.rule_key != "data.expired" for alert in active)
+
+        # now older than 3x the 90s interval -> expired opens
+        for row in db_session.scalars(
+            select(MetricLatest).where(MetricLatest.device_id == device.id)
+        ).all():
+            row.observed_at = T0 - datetime.timedelta(seconds=280)
+        db_session.commit()
+        process_collection_events(db_session, device=device, now=T0, settings=settings)
+        db_session.commit()
+        active = db_session.scalars(
+            select(Alert).where(Alert.device_id == device.id, Alert.status == "active")
+        ).all()
+        expired = [alert for alert in active if alert.rule_key == "data.expired"]
+        assert len(expired) == 1
+        assert "SRV-MON-02" in expired[0].dedupe_key
+
 
 class TestCredentialBackoff:
     def test_authentication_failed_backs_off_next_poll(self, db_session: Session, db_settings: object) -> None:
@@ -453,7 +590,7 @@ class TestOneTransactionPerBatch:
         run = claim_collection_run(db_session, lease_owner="w", lease_seconds=300)
         db_session.commit()
         assert run is not None
-        run_collection(db_session, run, settings=db_settings, keyring=make_keyring(), now=T0)
+        run_collection(db_session, run.id, settings=db_settings, keyring=make_keyring(), now=T0)
         db_session.rollback()  # abort the batch transaction
         counts = (
             db_session.scalar(
@@ -502,3 +639,58 @@ class TestQualitySemantics:
             select(MetricPoint).where(MetricPoint.device_id == device.id, MetricPoint.value_double == 0)
         ).all()
         assert all(point.metric_key == "memory.ecc_errors" for point in zero_values)
+
+
+class TestUnsupportedCapabilityEndToEnd:
+    def test_unsupported_metric_is_error_and_never_drives_status_problem(
+        self, db_session: Session, db_settings: object
+    ) -> None:
+        # critical_mode reports indicator.led=critical, but the device does
+        # NOT support indicator.led: no point, an unsupported_capability
+        # error, run=partial, and no status.problem signal for it — while the
+        # supported metrics still alert normally (M2T2 review finding 2).
+        from app.models.devices import DeviceCapability
+
+        device = make_collection_device(
+            db_session, connection_config={"critical_mode": True}, next_poll_at=T0 - TICK
+        )
+        row = db_session.scalar(
+            select(DeviceCapability).where(
+                DeviceCapability.device_id == device.id,
+                DeviceCapability.capability_key == "indicator.led",
+            )
+        )
+        assert row is not None
+        db_session.delete(row)
+        db_session.commit()
+        schedule_due_collections(db_session, now=T0, settings=db_settings)
+        db_session.commit()
+        run = _claim_and_run(db_session, settings=db_settings, now=T0)
+        assert run is not None
+        assert run.state == "partial"  # 18 good + 1 unsupported error
+        points = db_session.scalars(
+            select(MetricPoint).where(
+                MetricPoint.device_id == device.id, MetricPoint.metric_key == "indicator.led"
+            )
+        ).all()
+        assert points == []
+        latest = db_session.scalars(
+            select(MetricLatest).where(
+                MetricLatest.device_id == device.id, MetricLatest.metric_key == "indicator.led"
+            )
+        ).all()
+        assert latest == []
+        errors = db_session.scalars(
+            select(CollectionObservationError).where(
+                CollectionObservationError.device_id == device.id,
+                CollectionObservationError.metric_key_or_event_key == "indicator.led",
+            )
+        ).all()
+        assert [(row.error_code, row.stage) for row in errors] == [("unsupported_capability", "validate")]
+        active = db_session.scalars(
+            select(Alert).where(Alert.device_id == device.id, Alert.status == "active")
+        ).all()
+        status = [alert for alert in active if alert.rule_key == "status.problem"]
+        assert all("indicator.led" not in alert.dedupe_key for alert in status)
+        assert any("drive.status" in alert.dedupe_key for alert in status)
+        assert any(alert.rule_key == "device.health" for alert in active)

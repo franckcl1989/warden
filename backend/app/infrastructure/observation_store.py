@@ -48,7 +48,7 @@ from app.domain.contracts import AlertRule
 from app.domain.observation import ActiveAlertView, AlertSignal, decide_alert
 from app.generated.events import EVENT_DEFINITIONS
 from app.generated.metrics import ENUM_SETS, METRIC_DEFINITIONS
-from app.models.devices import Component
+from app.models.devices import Component, DeviceCapability
 from app.models.observation import (
     Alert,
     CollectionObservationError,
@@ -80,6 +80,37 @@ def collection_state_last_run(
 ) -> datetime.datetime | None:
     """Last finished_at for a collection type from devices.collection_state."""
     return _parse_iso(device_state.get(collection_type))
+
+
+def supported_capability_keys(db: Session, *, device_id: uuid.UUID) -> frozenset[str]:
+    """Contract metric/event keys the device supports (device_capabilities).
+
+    A key is supported when the device has a capability row for it with
+    ``support_state=supported`` — discovery owns these rows (ADR-014), and
+    the per-device row's requirement_id is the audit link back to
+    contracts/capabilities.json. The generated REQUIREMENT_BY_CAPABILITY
+    registry is deliberately NOT the requirement source for this check:
+    shared keys (psu.status, fan.rpm, indicator.led, raid.status, ...) belong
+    to different requirements per device type (ACCESS vs SRV), and the
+    registry resolves them to a single requirement across all device types —
+    per-device discovery (which assigns the device type's first requirement)
+    would then disagree and falsely mark supported server keys unsupported.
+
+    The supported set feeds the persist filter AND the alert snapshot, so
+    collection and the evaluator never disagree about what a device can
+    produce (不支持 -> 无信号, never a point).
+    """
+    rows = db.scalars(
+        select(DeviceCapability).where(
+            DeviceCapability.device_id == device_id,
+            DeviceCapability.support_state == "supported",
+        )
+    ).all()
+    return frozenset(
+        row.capability_key
+        for row in rows
+        if row.capability_key in METRIC_DEFINITIONS or row.capability_key in EVENT_DEFINITIONS
+    )
 
 
 def claim_collection_run(
@@ -187,6 +218,10 @@ def upsert_components(
                 row.status = component.status
                 row.properties = dict(component.properties)
                 row.last_seen_at = now
+                # A re-observed component is back: clear the soft retirement
+                # so it becomes visible again (retired_at is only for the
+                # "missing from a non-empty batch" state).
+                row.retired_at = None
             component_ids[key] = row.id
         for key, row in existing.items():
             if key not in seen and row.retired_at is None:
@@ -392,6 +427,10 @@ def persist_observation_batch(
     - metric_points: good/partial observations only, INSERT .. ON CONFLICT DO
       NOTHING (at-least-once dedupe via the COALESCE unique index); a point
       with a duplicate unique key is counted as deduped, never overwritten;
+    - metric_points/device_events only for SUPPORTED capabilities: an
+      observation/event for a capability the device does not support becomes
+      an ``unsupported_capability`` observation error and is never persisted
+      as data (ADR-014: 不支持 -> 无信号);
     - metric_latest: upsert on the COALESCE unique index — good observations
       only (a partial value is suspect and must not become "current");
     - device_events: dedup via the native-id and content-hash unique indexes;
@@ -400,6 +439,7 @@ def persist_observation_batch(
       terminal state is derived by the caller from ``PersistOutcome``.
     """
     outcome = PersistOutcome()
+    supported = supported_capability_keys(db, device_id=device_id)
     component_ids = upsert_components(db, device_id=device_id, components=batch.components, now=now)
     component_ids = _resolve_component_id(db, device_id=device_id, component_ids=component_ids)
 
@@ -433,6 +473,18 @@ def persist_observation_batch(
                 _error_row(
                     device_id, run_id, point.key, error_code=point.error_code,
                     stage=point.stage, detail=point.detail, now=now,
+                )
+            )
+            continue
+        if obs.metric_key not in supported:
+            # Contract-valid but the device does not support the capability:
+            # an honest unsupported_capability error, never a fabricated point
+            # (ADR-014).
+            outcome.errors += 1
+            error_rows.append(
+                _error_row(
+                    device_id, run_id, obs.metric_key, error_code="unsupported_capability",
+                    stage="validate", detail="设备能力不支持该指标，未写入指标点", now=now,
                 )
             )
             continue
@@ -522,6 +574,15 @@ def persist_observation_batch(
                 _error_row(
                     device_id, run_id, row.key, error_code=row.error_code,
                     stage=row.stage, detail=row.detail, now=now,
+                )
+            )
+            continue
+        if event.event_type not in supported:
+            outcome.errors += 1
+            error_rows.append(
+                _error_row(
+                    device_id, run_id, event.event_type, error_code="unsupported_capability",
+                    stage="validate", detail="设备能力不支持该事件，未写入事件表", now=now,
                 )
             )
             continue

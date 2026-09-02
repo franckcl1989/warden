@@ -63,7 +63,9 @@ def _process_due_collections_once(
         if run is None:
             break
         with session_factory() as session:
-            run_collection(session, run, settings=settings, keyring=keyring)
+            # run.id, not the detached instance: run_collection re-loads the
+            # row in this session (terminal-state writes must not be lost).
+            run_collection(session, run.id, settings=settings, keyring=keyring)
             session.commit()
         processed += 1
     return processed

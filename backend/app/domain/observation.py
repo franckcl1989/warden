@@ -549,6 +549,10 @@ class AlertEvaluator:
         policies = frozenset(rule.selector.split("|"))
         signals: list[AlertSignal] = []
         for row in snapshot.metric_signals:
+            # Unsupported metrics are a capability state, never a signal:
+            # they must not open, refresh or resolve status.problem (ADR-014).
+            if row.metric_key not in snapshot.supported_metric_keys:
+                continue
             metric = self._metrics.get(row.metric_key)
             if metric is None or metric.alert_policy not in policies:
                 continue

@@ -102,10 +102,23 @@ def main() -> int:
             if run is None:
                 break
             with factory() as session:
-                run_collection(session, run, settings=settings, keyring=keyring)
+                run_collection(session, run.id, settings=settings, keyring=keyring)
                 session.commit()
             processed += 1
         print(f"[smoke] collection runs processed: {processed}")
+
+        with factory() as session:
+            runs = session.scalars(
+                select(CollectionRun)
+                .where(CollectionRun.device_id == device_id)
+                .order_by(CollectionRun.collection_type)
+            ).all()
+            terminal = [(r.collection_type, r.state) for r in runs]
+            print(f"[smoke] run terminal states: {terminal}")
+            assert terminal, "no collection runs were created"
+            assert all(
+                state == "succeeded" for _, state in terminal
+            ), f"runs must reach their terminal state (found {terminal})"
 
         with factory() as session:
             device = session.get(Device, device_id)

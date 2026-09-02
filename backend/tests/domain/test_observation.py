@@ -378,6 +378,25 @@ class TestAlertEvaluatorStatusPolicies:
         signal = next(s for s in signals if s.rule_key == "status.problem")
         assert "device" in signal.dedupe_key
 
+    def test_unsupported_status_metric_produces_no_signal(self) -> None:
+        # An alert-worthy value on a metric the device does NOT support is a
+        # capability state, never a signal (ADR-014: 不支持 -> 无信号): it must
+        # not open, refresh or resolve anything.
+        evaluator = AlertEvaluator()
+        signals = evaluator.evaluate(
+            _snapshot(
+                metrics=(
+                    _metric_signal("drive.status", "critical"),
+                    _metric_signal("indicator.led", "critical"),
+                ),
+                supported=frozenset({"drive.status"}),
+            )
+        )
+        status = [s for s in signals if s.rule_key == "status.problem"]
+        assert len(status) == 1
+        assert status[0].dedupe_key.endswith("drive.status")
+        assert all("indicator.led" not in s.dedupe_key for s in status)
+
 
 class TestAlertEvaluatorDataExpired:
     def test_expired_opens_warning_per_group(self) -> None:
