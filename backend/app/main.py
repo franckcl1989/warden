@@ -19,7 +19,18 @@ from fastapi import APIRouter, Depends, FastAPI
 
 from app.api.deps import require_password_changed
 from app.api.errors import register_exception_handlers
-from app.api.routes import alerts, audit, auth, collection_runs, devices, metrics, overview, roles, users
+from app.api.routes import (
+    alerts,
+    audit,
+    auth,
+    collection_runs,
+    devices,
+    metrics,
+    operations,
+    overview,
+    roles,
+    users,
+)
 from app.api.routes.health import router as health_router
 from app.config import WardenSettings, get_settings
 from app.infrastructure.audit import AuditLogger
@@ -47,6 +58,8 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
         login_per_minute=configured_settings.login_rate_limit_per_minute,
         session_per_minute=configured_settings.session_rate_limit_per_minute,
         probe_per_minute=configured_settings.probe_rate_limit_per_minute,
+        operation_preview_per_minute=configured_settings.operation_preview_rate_limit_per_minute,
+        operation_submit_per_minute=configured_settings.operation_submit_rate_limit_per_minute,
     )
     app.state.session_factory = None
     app.state.audit_logger = None
@@ -77,6 +90,8 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     api_v1_router.include_router(collection_runs.router, dependencies=[Depends(require_password_changed)])
     api_v1_router.include_router(overview.router, dependencies=[Depends(require_password_changed)])
     api_v1_router.include_router(alerts.router, dependencies=[Depends(require_password_changed)])
+    # M2T4 two-phase operations API (PLT-05): preview/confirm + task lifecycle.
+    api_v1_router.include_router(operations.router, dependencies=[Depends(require_password_changed)])
     app.include_router(api_v1_router)
     return app
 

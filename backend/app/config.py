@@ -46,6 +46,10 @@ class WardenSettings(BaseSettings):
     login_rate_limit_per_minute: int = Field(default=5, ge=1)
     session_rate_limit_per_minute: int = Field(default=300, ge=1)
     probe_rate_limit_per_minute: int = Field(default=10, ge=1)
+    # API_CONTRACT.md §11: 操作预览 30/min、操作提交 10/min（每用户）；
+    # 提交还有设备互斥作为真实并发边界。
+    operation_preview_rate_limit_per_minute: int = Field(default=30, ge=1)
+    operation_submit_rate_limit_per_minute: int = Field(default=10, ge=1)
 
     # Database
     postgres_dsn_file: Path | None = Field(default=None)

@@ -66,7 +66,8 @@ class RateLimiter:
 
     docs/API_CONTRACT.md §11: login 5/min per IP; ordinary reads and all
     session-bearing requests 300/min per session; device probes 10/min per
-    user.
+    user; operation previews 30/min per user; operation submits 10/min per
+    user (and the device mutex adds the real concurrency bound).
     """
 
     def __init__(
@@ -75,11 +76,19 @@ class RateLimiter:
         login_per_minute: int = 5,
         session_per_minute: int = 300,
         probe_per_minute: int = 10,
+        operation_preview_per_minute: int = 30,
+        operation_submit_per_minute: int = 10,
         clock: Clock | None = None,
     ) -> None:
         self._login = FixedWindowLimiter(limit=login_per_minute, window_seconds=60, clock=clock)
         self._session = FixedWindowLimiter(limit=session_per_minute, window_seconds=60, clock=clock)
         self._probe = FixedWindowLimiter(limit=probe_per_minute, window_seconds=60, clock=clock)
+        self._preview = FixedWindowLimiter(
+            limit=operation_preview_per_minute, window_seconds=60, clock=clock
+        )
+        self._submit = FixedWindowLimiter(
+            limit=operation_submit_per_minute, window_seconds=60, clock=clock
+        )
 
     def check_login(self, source_ip: str) -> RateLimitResult:
         return self._login.check(f"login:{source_ip}")
@@ -89,3 +98,9 @@ class RateLimiter:
 
     def check_probe(self, user_id: str) -> RateLimitResult:
         return self._probe.check(f"probe:{user_id}")
+
+    def check_operation_preview(self, user_id: str) -> RateLimitResult:
+        return self._preview.check(f"preview:{user_id}")
+
+    def check_operation_submit(self, user_id: str) -> RateLimitResult:
+        return self._submit.check(f"submit:{user_id}")

@@ -66,6 +66,9 @@ def make_task(
     device_job_id: str | None = None,
     timeout_at: datetime.datetime | None = None,
     verification_state: str | None = None,
+    error_code: str | None = None,
+    finished_at: datetime.datetime | None = None,
+    evidence: dict[str, object] | None = None,
     created_at: datetime.datetime | None = None,
 ) -> OperationTask:
     task = OperationTask(
@@ -84,6 +87,9 @@ def make_task(
         device_job_id=device_job_id,
         timeout_at=timeout_at,
         verification_state=verification_state,
+        error_code=error_code,
+        finished_at=finished_at,
+        evidence=evidence,
     )
     if created_at is not None:
         task.created_at = created_at

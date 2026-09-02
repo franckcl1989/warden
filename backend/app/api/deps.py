@@ -111,7 +111,10 @@ def _audit_security_event(
         actor_user_id=user.id if user is not None else (session.user_id if session is not None else None),
         session_id=session.id if session is not None else None,
         resource_type="request",
-        resource_id=request.url.path,
+        # audit_logs.resource_id is varchar(64); long operation paths (e.g.
+        # /operations/{uuid}/resolve-verification) are truncated so a security
+        # event never fails its own audit row (fail-closed denial must record).
+        resource_id=request.url.path[:64],
         requirement_id=PLT_01,
         request_id=str(request.scope.get("request_id") or ""),
         result=result,

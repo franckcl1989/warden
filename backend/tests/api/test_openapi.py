@@ -85,6 +85,16 @@ MONITOR_ENDPOINTS = {
     "alerts_get": ("GET", "/alerts/{id}"),
 }
 
+OPERATIONS_ENDPOINTS = {
+    "device_operation_previews_create": ("POST", "/devices/{id}/operation-previews"),
+    "device_operations_create": ("POST", "/devices/{id}/operations"),
+    "operations_list": ("GET", "/operations"),
+    "operations_get": ("GET", "/operations/{id}"),
+    "operations_cancel": ("POST", "/operations/{id}/cancel"),
+    "operations_verify": ("POST", "/operations/{id}/verify"),
+    "operations_resolve_verification": ("POST", "/operations/{id}/resolve-verification"),
+}
+
 
 def _assert_operation_ids(
     schema: dict[str, object],
@@ -127,3 +137,9 @@ def test_exported_openapi_audit_operation_ids_match_contract() -> None:
 def test_exported_openapi_monitoring_operation_ids_match_contract() -> None:
     """M2T3 monitoring read endpoints carry the EXACT operationIds of http-api.json."""
     _assert_operation_ids(exported_schema(), MONITOR_ENDPOINTS)
+
+
+@pytest.mark.unit
+def test_exported_openapi_operations_operation_ids_match_contract() -> None:
+    """M2T4 operation endpoints carry the EXACT operationIds of http-api.json."""
+    _assert_operation_ids(exported_schema(), OPERATIONS_ENDPOINTS)

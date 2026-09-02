@@ -79,3 +79,46 @@ class AuditLogger:
             session.commit()
             session.refresh(row)
         return row
+
+    def record_in(
+        self,
+        session: Session,
+        *,
+        action: str,
+        actor_user_id: uuid.UUID | None = None,
+        session_id: uuid.UUID | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        device_id: uuid.UUID | None = None,
+        requirement_id: str | None = None,
+        request_id: str = "",
+        task_id: uuid.UUID | None = None,
+        result: str = "success",
+        source_ip: str | None = None,
+        user_agent_summary: str | None = None,
+        detail: object | None = None,
+    ) -> AuditLog:
+        """Append the audit row into the CALLER's transaction.
+
+        DATA_MODEL.md §11 requires operation task creation/terminal
+        transitions and their audit to commit in ONE transaction; the
+        operations flow uses this instead of ``record`` (which commits on its
+        own session). The caller owns the commit/rollback.
+        """
+        row = AuditLog(
+            actor_user_id=actor_user_id,
+            session_id=session_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            device_id=device_id,
+            requirement_id=requirement_id,
+            request_id=request_id or None,
+            task_id=task_id,
+            result=result,
+            source_ip=source_ip,
+            user_agent_summary=user_agent_summary,
+            detail_jsonb=sanitize_detail(detail) if detail is not None else {},
+        )
+        session.add(row)
+        return row

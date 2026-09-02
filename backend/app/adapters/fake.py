@@ -1,4 +1,4 @@
-"""Fake adapter for tests and dev onboarding (M1T3 probe/discover, M2T2 collect).
+"""Fake adapter for tests and dev onboarding (M1T3 probe/discover, M2T2 collect, M2T4 operations).
 
 ``fake.simple`` is the CI-grade onboarding stand-in for device_type ``server``:
 it reports stage-by-stage success, full identity and capability discovery
@@ -26,14 +26,35 @@ and units from contracts/metrics.json. Collection modes (dev/test only):
   (drive.status critical, drive.predictive_failure true) for alert tests;
 - ``no_data_mode``: an empty supported batch with explicit error entries —
   never a fabricated empty success.
+
+Operation methods (M2T4, DEVICE_ADAPTERS.md §2.4/§4.2/§9): planning mirrors
+the shared domain planner over the persisted snapshot; preflight/execute/
+verify simulate the device-side flow. Modes (dev/test only, mirrors the
+fail_credentials/fail_tls pattern):
+
+- ``fail_preflight_mode`` / ``stale_preflight_mode``: preflight rejects the
+  plan (validation_failed) or signals device-version drift;
+- ``execute_fail_mode``: the device explicitly rejects the action
+  (operation_failed);
+- ``execute_timeout_mode``: the device call times out after ~1 s
+  (AdapterTimeoutError — worker wiring in M2T6 decides the outcome);
+- ``ambiguous_mode``: the action is accepted but the connection drops before
+  any verifiable result (disconnected, no job id) so verification turns
+  ambiguous -> verification_required;
+- ``device_job_mode``: returns ``device_job_id=fake-job-1`` so verify polls
+  the persisted job instead of re-creating it;
+- ``verify_fail_mode`` / ``verify_ambiguous_mode``: read-back explicitly fails
+  or cannot prove either outcome.
 """
 
 from __future__ import annotations
 
 import datetime
+import time
 
 from app.domain.adapter import (
     AdapterError,
+    AdapterTimeoutError,
     CapabilitySupport,
     CollectionRequest,
     ComponentObserved,
@@ -44,9 +65,14 @@ from app.domain.adapter import (
     Observation,
     ObservationBatch,
     ObservationError,
+    OperationProgress,
+    OperationResult,
+    PreflightResult,
     ProbeResult,
     ProbeStage,
+    VerificationResult,
 )
+from app.domain.operation_plan import DeviceSnapshot, OperationPlan, OperationRequest, plan_operation
 from app.generated.capabilities import REQUIREMENTS
 
 FAIL_CREDENTIALS_KEY = "fail_credentials"
@@ -56,7 +82,18 @@ PARTIAL_MODE_KEY = "partial_mode"
 CRITICAL_MODE_KEY = "critical_mode"
 NO_DATA_MODE_KEY = "no_data_mode"
 
+FAIL_PREFLIGHT_MODE_KEY = "fail_preflight_mode"
+STALE_PREFLIGHT_MODE_KEY = "stale_preflight_mode"
+EXECUTE_FAIL_MODE_KEY = "execute_fail_mode"
+EXECUTE_TIMEOUT_MODE_KEY = "execute_timeout_mode"
+AMBIGUOUS_MODE_KEY = "ambiguous_mode"
+DEVICE_JOB_MODE_KEY = "device_job_mode"
+VERIFY_FAIL_MODE_KEY = "verify_fail_mode"
+VERIFY_AMBIGUOUS_MODE_KEY = "verify_ambiguous_mode"
+
 FAILURE_CODES = ("network_unreachable", "authentication_failed", "protocol_error")
+
+FAKE_DEVICE_JOB_ID = "fake-job-1"
 
 
 def batch_events(now: datetime.datetime) -> tuple[EventObservation, ...]:
@@ -124,6 +161,16 @@ class FakeSimpleAdapter:
             PARTIAL_MODE_KEY: {"type": "boolean"},
             CRITICAL_MODE_KEY: {"type": "boolean"},
             NO_DATA_MODE_KEY: {"type": "boolean"},
+            # M2T4 operation-flow modes (dev/test only): preflight/execute/
+            # verify behavior injection for the two-phase operation tests.
+            FAIL_PREFLIGHT_MODE_KEY: {"type": "boolean"},
+            STALE_PREFLIGHT_MODE_KEY: {"type": "boolean"},
+            EXECUTE_FAIL_MODE_KEY: {"type": "boolean"},
+            EXECUTE_TIMEOUT_MODE_KEY: {"type": "boolean"},
+            AMBIGUOUS_MODE_KEY: {"type": "boolean"},
+            DEVICE_JOB_MODE_KEY: {"type": "boolean"},
+            VERIFY_FAIL_MODE_KEY: {"type": "boolean"},
+            VERIFY_AMBIGUOUS_MODE_KEY: {"type": "boolean"},
         },
     }
 
@@ -247,6 +294,119 @@ class FakeSimpleAdapter:
         if config.get(PARTIAL_MODE_KEY):
             return self._batch_partial(now)
         return self._batch_normal(now)
+
+    def plan_operation(self, snapshot: DeviceSnapshot, request: OperationRequest) -> OperationPlan:
+        """Mirror the shared domain planner (DEVICE_ADAPTERS.md §2.4).
+
+        Planning semantics come from contracts/operations.json via the
+        generated registry; the fake adds nothing of its own — real adapters
+        override planning only when vendor specifics must feed the plan.
+        """
+        return plan_operation(snapshot, request)
+
+    def preflight_operation(self, session: DeviceSession, plan: OperationPlan) -> PreflightResult:
+        """Real-time read-only preflight (DEVICE_ADAPTERS.md §2.4).
+
+        Success by default; ``fail_preflight_mode`` rejects with
+        validation_failed, ``stale_preflight_mode`` signals device-version
+        drift so the worker fails the task as preview_stale.
+        """
+        del plan
+        config = session.connection_config
+        if config.get(STALE_PREFLIGHT_MODE_KEY):
+            return PreflightResult(
+                ok=False,
+                error_code="preview_stale",
+                detail="stale_preflight_mode：设备版本与计划不一致",
+                stale=True,
+            )
+        if config.get(FAIL_PREFLIGHT_MODE_KEY):
+            return PreflightResult(
+                ok=False,
+                error_code="validation_failed",
+                detail="fail_preflight_mode：实时前置检查未通过",
+            )
+        return PreflightResult(ok=True)
+
+    def execute_operation(
+        self,
+        session: DeviceSession,
+        plan: OperationPlan,
+        progress: OperationProgress,
+    ) -> OperationResult:
+        """Simulated device-side execution (DEVICE_ADAPTERS.md §4.2/§9).
+
+        Success by default with device-side evidence. Mode flags:
+        execute_fail_mode -> explicit device failure (operation_failed);
+        execute_timeout_mode -> AdapterTimeoutError after ~1 s;
+        ambiguous_mode -> accepted but unverifiable (disconnected, no job);
+        device_job_mode -> returns the persisted vendor job id (fake-job-1).
+        """
+        del plan
+        config = session.connection_config
+        if config.get(EXECUTE_TIMEOUT_MODE_KEY):
+            time.sleep(1.0)
+            raise AdapterTimeoutError("execute_timeout_mode：模拟设备调用超时")
+        if config.get(AMBIGUOUS_MODE_KEY):
+            progress(50, "模拟命令已被设备接受，连接随后中断")
+            return OperationResult(
+                ok=True,
+                evidence={"command": "fake-accepted", "mode": "ambiguous"},
+                disconnected=True,
+            )
+        if config.get(DEVICE_JOB_MODE_KEY):
+            progress(60, "设备已接受并创建异步作业")
+            return OperationResult(
+                ok=True,
+                evidence={"command": "fake-ok", "job": FAKE_DEVICE_JOB_ID},
+                device_job_id=FAKE_DEVICE_JOB_ID,
+            )
+        if config.get(EXECUTE_FAIL_MODE_KEY):
+            return OperationResult(
+                ok=False,
+                error_code="operation_failed",
+                error_detail="execute_fail_mode：设备明确拒绝该操作",
+                evidence={"command": "fake-fail"},
+            )
+        progress(100, "模拟执行完成")
+        return OperationResult(ok=True, evidence={"command": "fake-ok"})
+
+    def verify_operation(
+        self,
+        session: DeviceSession,
+        plan: OperationPlan,
+        result: OperationResult | None,
+    ) -> VerificationResult:
+        """Simulated read-back verification (DEVICE_ADAPTERS.md §4.2/§9).
+
+        Reports success by default for every verification strategy (the fake
+        device always confirms). Modes: verify_fail_mode -> explicit failed
+        read-back; verify_ambiguous_mode -> neither outcome provable.
+        """
+        config = session.connection_config
+        if config.get(VERIFY_AMBIGUOUS_MODE_KEY):
+            return VerificationResult(
+                succeeded=False,
+                ambiguous=True,
+                evidence={"mode": "verify_ambiguous", "strategy": plan.verification_strategy},
+                error_code="ambiguous_result",
+            )
+        if config.get(VERIFY_FAIL_MODE_KEY):
+            return VerificationResult(
+                succeeded=False,
+                evidence={"mode": "verify_fail", "strategy": plan.verification_strategy},
+                error_code="operation_failed",
+            )
+        strategy = plan.verification_strategy
+        job = result.device_job_id if result is not None else None
+        return VerificationResult(
+            succeeded=True,
+            evidence={
+                "mode": "verify_ok",
+                "strategy": strategy,
+                "device_job_id": job or (FAKE_DEVICE_JOB_ID if config.get(DEVICE_JOB_MODE_KEY) else None),
+            },
+        )
 
     @staticmethod
     def _components(statuses: dict[str, str]) -> tuple[ComponentObserved, ...]:
