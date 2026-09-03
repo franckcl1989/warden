@@ -14,7 +14,7 @@ import {
   ElSteps,
   ElStep,
 } from 'element-plus';
-import { computed, reactive, ref } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
 import AsyncState from '@/components/AsyncState.vue';
@@ -29,23 +29,30 @@ import { ADAPTER_LABELS, DEVICE_TYPE_LABELS, PROBE_STAGE_LABELS, label } from '@
 // 添加设备向导（PLT-02，PRODUCT_DESIGN §4.2 六步，单页流程）。
 const router = useRouter();
 
-const ADAPTER_KEY = 'fake.simple';
-const DEV_ADAPTER_TYPES = new Set(['server']);
-// 服务器可用的适配器（M3T5）：开发用 fake.simple + 五个厂商管理卡 overlay。
-// 厂商适配器的标签统一标注“真机认证待完成”——能力状态与认证矩阵是正式支持
-// 依据，标签不得声称真机支持（HARDWARE_CERTIFICATION.md）。
-const SERVER_ADAPTER_KEYS = [
-  ADAPTER_KEY,
-  'server.dell_idrac',
-  'server.inspur_ibmc',
-  'server.xfusion_ibmc',
-  'server.lenovo_xcc',
-  'server.huawei_ibmc',
-];
+// 每类设备的向导适配器清单（M4T4 决策）：只列生产适配器——server 提供五个
+// 厂商管理卡 overlay，synology_nas 提供 nas.synology_dsm；fake.simple 只保留
+// 在开发/API 路径（POST /device-probes），不出现在向导（避免界面把测试适配器
+// 当作可选真实路径）。厂商/NAS 标签统一标注“真机认证待完成”——能力状态与认证
+// 矩阵是正式支持依据，标签不得声称真机支持（HARDWARE_CERTIFICATION.md）。
+const TYPE_ADAPTER_KEYS: Record<string, readonly string[]> = {
+  server: [
+    'server.dell_idrac',
+    'server.inspur_ibmc',
+    'server.xfusion_ibmc',
+    'server.lenovo_xcc',
+    'server.huawei_ibmc',
+  ],
+  synology_nas: ['nas.synology_dsm'],
+};
+
+const TYPE_ADAPTER_NOTICES: Record<string, string> = {
+  server: '厂商适配器为注册驱动（服务器管理卡 Redfish）；真机支持需完成逐能力认证，标签仅代表驱动可用，不代表真机已认证',
+  synology_nas: '群晖 DSM 适配器为注册驱动；真机支持需完成逐能力认证，标签仅代表驱动可用，不代表真机已认证',
+};
 
 const step = ref(0);
 const deviceType = ref<string | null>(null);
-const adapterKey = ref<string>(ADAPTER_KEY);
+const adapterKey = ref<string | null>(null);
 const name = ref('');
 const managementEndpoint = ref('');
 const port = ref<number | null>(null);
@@ -53,8 +60,6 @@ const connectionConfig = reactive({
   protocol: 'https',
   verifyTls: true,
   tlsFingerprintSha256: '',
-  failTls: false,
-  failCredentials: false,
 });
 const credentials = reactive({ username: '', password: '' });
 
@@ -66,10 +71,23 @@ const saving = ref(false);
 const saveError = ref<ApiError | null>(null);
 
 const currentTypeSupported = computed(
-  () => deviceType.value !== null && DEV_ADAPTER_TYPES.has(deviceType.value),
+  () => deviceType.value !== null && TYPE_ADAPTER_KEYS[deviceType.value] !== undefined,
+);
+
+const adapterNotice = computed(() =>
+  deviceType.value === null ? '' : (TYPE_ADAPTER_NOTICES[deviceType.value] ?? ''),
 );
 
 const stages = computed(() => probe.value?.stages ?? []);
+
+// 选择类别后默认选中该类别第一个生产适配器（无 fake.simple 兜底）。
+watch(deviceType, (type) => {
+  if (type !== null && TYPE_ADAPTER_KEYS[type] !== undefined) {
+    adapterKey.value = TYPE_ADAPTER_KEYS[type][0] ?? null;
+  } else {
+    adapterKey.value = null;
+  }
+});
 
 function step1Valid(): boolean {
   return currentTypeSupported.value && deviceType.value !== null;
@@ -103,8 +121,6 @@ function probePayload(): Record<string, unknown> {
   if (connectionConfig.tlsFingerprintSha256.trim()) {
     config.tls_fingerprint_sha256 = connectionConfig.tlsFingerprintSha256.trim();
   }
-  if (connectionConfig.failTls) config.fail_tls = true;
-  if (connectionConfig.failCredentials) config.fail_credentials = true;
   const body: Record<string, unknown> = {
     device_type: deviceType.value,
     adapter_key: adapterKey.value,
@@ -194,19 +210,18 @@ async function saveDevice(): Promise<void> {
               data-testid="adapter-key"
             >
               <el-option
-                v-for="key in deviceType === 'server' ? SERVER_ADAPTER_KEYS : [ADAPTER_KEY]"
+                v-for="key in deviceType !== null ? TYPE_ADAPTER_KEYS[deviceType] ?? [] : []"
                 :key="key"
                 :value="key"
                 :label="ADAPTER_LABELS[key] ?? key"
               />
             </el-select>
           </el-form-item>
-          <p v-if="deviceType === 'server'" class="devices-new__notice">
-            厂商适配器为注册驱动（服务器管理卡 Redfish）；真机支持需完成逐能力认证，
-            标签仅代表驱动可用，不代表真机已认证
+          <p v-if="adapterNotice" class="devices-new__notice">
+            {{ adapterNotice }}
           </p>
           <p v-if="deviceType !== null && !currentTypeSupported" class="devices-new__notice">
-            该类别暂无可用适配器，真实适配器随 M3/M4/M5 真机交付加入
+            该类别暂无可用适配器，无法添加设备（真实适配器随对应设备里程碑接入）
           </p>
         </el-form>
       </div>
@@ -268,16 +283,6 @@ async function saveDevice(): Promise<void> {
               autocomplete="new-password"
               data-testid="credential-password"
             />
-          </el-form-item>
-          <el-form-item label="开发用">
-            <div class="devices-new__dev">
-              <el-checkbox v-model="connectionConfig.failTls"
-                >模拟 TLS 失败（测试适配器）</el-checkbox
-              >
-              <el-checkbox v-model="connectionConfig.failCredentials"
-                >模拟认证失败（测试适配器）</el-checkbox
-              >
-            </div>
           </el-form-item>
         </el-form>
         <p class="devices-new__hint">凭据只发送给平台用于连接测试与加密保存，绝不回显</p>
@@ -413,10 +418,6 @@ async function saveDevice(): Promise<void> {
 .devices-new__hint {
   color: var(--warden-status-unknown);
   font-size: 12px;
-}
-.devices-new__dev {
-  display: flex;
-  gap: 16px;
 }
 .devices-new__probe-actions,
 .devices-new__save-actions {

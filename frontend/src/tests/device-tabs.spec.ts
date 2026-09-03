@@ -56,10 +56,39 @@ describe('设备详情页签配置（PRODUCT_DESIGN §5）', () => {
   });
 
   it('群晖 NAS：磁盘/存储/任务与日志（PRODUCT_DESIGN §5.3）', () => {
-    const titles = deviceTabsFor('synology_nas').map((tab) => tab.title);
+    const tabs = deviceTabsFor('synology_nas');
+    const titles = tabs.map((tab) => tab.title);
     expect(titles).toContain('磁盘');
     expect(titles).toContain('存储');
     expect(titles).toContain('任务与日志');
+  });
+
+  it('群晖 NAS 类型专属页签承载 PRODUCT_DESIGN §5.3 需求归属', () => {
+    const tabs = deviceTabsFor('synology_nas');
+    const overview = tabs.find((tab) => tab.id === 'overview');
+    expect(overview?.sections[0]?.requirementIds).toEqual([
+      'NAS-MON-03',
+      'NAS-MON-05',
+      'NAS-MON-06',
+    ]);
+
+    const disks = tabs.find((tab) => tab.id === 'disks');
+    expect(disks?.sections).toEqual([
+      { kind: 'components', kinds: ['disk'] },
+      { kind: 'metric-groups', requirementIds: ['NAS-MON-01'] },
+    ]);
+
+    const storage = tabs.find((tab) => tab.id === 'storage');
+    expect(storage?.sections).toEqual([
+      { kind: 'metric-groups', requirementIds: ['NAS-MON-02', 'NAS-MON-04'] },
+    ]);
+
+    const tasksLogs = tabs.find((tab) => tab.id === 'tasks-logs');
+    // 备份/快照状态视图（NAS-ACT-05 刷新结果）与系统日志事件（NAS-MON-06）
+    expect(tasksLogs?.sections).toEqual([
+      { kind: 'backup-status' },
+      { kind: 'events', eventTypes: ['event.system_log'] },
+    ]);
   });
 
   it('核心交换机：端口/光模块/二层与日志（PRODUCT_DESIGN §5.4）', () => {

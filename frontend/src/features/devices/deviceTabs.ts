@@ -10,7 +10,13 @@
 import { REQUIREMENTS } from '@/api/generated/contracts';
 
 export type TabSectionKind =
-  'overview' | 'metric-groups' | 'components' | 'events' | 'collection-runs' | 'operations';
+  | 'overview'
+  | 'metric-groups'
+  | 'components'
+  | 'events'
+  | 'backup-status'
+  | 'collection-runs'
+  | 'operations';
 
 export interface TabSection {
   kind: TabSectionKind;
@@ -92,7 +98,12 @@ const NAS_EXTRA: DeviceTabDef[] = [
   {
     id: 'tasks-logs',
     title: '任务与日志',
-    sections: [{ kind: 'events', eventTypes: NAS_LOG_EVENT_TYPES }],
+    sections: [
+      // 备份/快照任务状态视图（NAS-ACT-05）：渲染最近一次 backup.status.refresh
+      // 成功任务持久化的清单证据（M4T3 决策：任务 evidence 即结果存储，无独立表）。
+      { kind: 'backup-status' },
+      { kind: 'events', eventTypes: NAS_LOG_EVENT_TYPES },
+    ],
   },
 ];
 

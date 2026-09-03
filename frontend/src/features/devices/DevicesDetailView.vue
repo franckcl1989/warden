@@ -25,6 +25,7 @@ import DeviceIdentity from '@/components/DeviceIdentity.vue';
 import ErrorDetail from '@/components/ErrorDetail.vue';
 import HealthBadge from '@/components/HealthBadge.vue';
 import ReachabilityBadge from '@/components/ReachabilityBadge.vue';
+import BackupStatusPanel from '@/features/devices/panels/BackupStatusPanel.vue';
 import CollectionRunsPanel from '@/features/devices/panels/CollectionRunsPanel.vue';
 import ComponentsPanel from '@/features/devices/panels/ComponentsPanel.vue';
 import EventsPanel from '@/features/devices/panels/EventsPanel.vue';
@@ -407,6 +408,12 @@ function closeEdit(): void {
                   v-else-if="section.kind === 'events'"
                   :device-id="device.id"
                   :event-types="section.eventTypes"
+                  :capabilities="capabilities ?? []"
+                />
+                <BackupStatusPanel
+                  v-else-if="section.kind === 'backup-status'"
+                  :device-id="device.id"
+                  :device-name="device.name"
                   :capabilities="capabilities ?? []"
                 />
                 <CollectionRunsPanel

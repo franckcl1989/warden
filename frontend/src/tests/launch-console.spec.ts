@@ -3,11 +3,16 @@ import { mount } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import LaunchConsoleDialog from '@/features/devices/LaunchConsoleDialog.vue';
+import OperationsPanel from '@/features/devices/panels/OperationsPanel.vue';
+import { useAuthStore } from '@/stores/auth';
 
 /**
- * KVM 控制台启动流程测试（M3T4 / PLT-09 launch 部分，UI 流程）：
- * - 点击"打开控制台"先同步占位新标签页（避免弹窗拦截），再 POST
+ * 远程连接启动流程测试（M3T4 / PLT-09 launch + M4T4 console.dsm.open，
+ * UI 流程）：
+ * - 点击"打开"先同步占位新标签页（避免弹窗拦截），再 POST
  *   /devices/{id}/launches，成功后把新标签页导航到返回的一次性消费 URL；
+ * - console.dsm.open 与 console.kvm.open 共用该流程，POST 携带各自能力键，
+ *   DSM 走后端 protocol=web 描述符（新标签页打开受控管理地址，不注入密码）；
  * - POST 失败时关闭占位标签页并渲染错误态；
  * - 错误状态按错误码渲染：not_configured / unsupported_operation /
  *   rate_limited 各有中文提示，其他错误走 ErrorDetail；
@@ -50,7 +55,13 @@ function stubWindowOpen(impl: () => unknown): ReturnType<typeof vi.fn> {
   return open;
 }
 
-async function mountDialog(fetchMock: (url: string, init?: RequestInit) => Promise<Response>) {
+async function mountDialog(
+  fetchMock: (url: string, init?: RequestInit) => Promise<Response>,
+  capability: { key: string; requirementId: string } = {
+    key: 'console.kvm.open',
+    requirementId: 'SRV-ACT-03',
+  },
+) {
   const pinia = createPinia();
   setActivePinia(pinia);
   vi.stubGlobal('fetch', fetchMock);
@@ -58,8 +69,8 @@ async function mountDialog(fetchMock: (url: string, init?: RequestInit) => Promi
     props: {
       modelValue: true,
       deviceId: 'd-1',
-      capabilityKey: 'console.kvm.open',
-      requirementId: 'SRV-ACT-03',
+      capabilityKey: capability.key,
+      requirementId: capability.requirementId,
     },
     global: { plugins: [pinia] },
   });
@@ -204,6 +215,120 @@ describe('KVM 控制台启动流程（M3T4）', () => {
     await flushAll();
 
     expect(wrapper.text()).toContain('弹出窗口被浏览器拦截');
+  });
+
+  it('console.dsm.open：POST 携带 dsm 能力键并打开 DSM 管理界面（M4T4）', async () => {
+    const tab = fakeTab();
+    stubWindowOpen(() => tab);
+    const seen: Array<{ url: string; init?: RequestInit }> = [];
+    const wrapper = await mountDialog(
+      async (url, init) => {
+        seen.push({ url: String(url), init });
+        if (String(url).endsWith('/devices/d-1/launches')) {
+          return jsonResponse(CREATED, 201);
+        }
+        return jsonResponse({}, 404);
+      },
+      { key: 'console.dsm.open', requirementId: 'NAS-ACT-02' },
+    );
+
+    // 确认阶段文案说明 DSM 管理界面与"不注入密码"语义
+    expect(wrapper.text()).toContain('DSM 管理界面');
+    expect(wrapper.text()).toContain('不注入密码');
+
+    await wrapper.get('[data-testid="launch-open"]').trigger('click');
+    await flushAll();
+
+    expect(seen).toHaveLength(1);
+    expect(String(seen[0]!.url)).toContain('/devices/d-1/launches');
+    expect(JSON.parse(String(seen[0]!.init?.body))).toEqual({
+      capability_key: 'console.dsm.open',
+    });
+    // 后端按 console.dsm.open 签发 protocol=web 描述符（DSM origin，无凭据），
+    // 前端只把新标签页导航到一次性消费 URL，不接触厂商地址
+    expect(tab.location.href).toBe(CREATED.url);
+    expect(wrapper.text()).toContain('已在新标签页打开 DSM 管理界面');
+    expect(tab.close).not.toHaveBeenCalled();
+  });
+
+  it('console.dsm.open 的 not_configured 提示指向 DSM 管理界面', async () => {
+    stubWindowOpen(() => fakeTab());
+    const wrapper = await mountDialog(
+      async (url) => {
+        if (String(url).endsWith('/devices/d-1/launches')) {
+          return jsonResponse(
+            errorBody('not_configured', '该能力当前缺少必要配置，无法执行', {
+              capability_key: 'console.dsm.open',
+              missing: 'no_dsm_origin：DSM System 读取未返回可用身份数据',
+            }),
+            422,
+          );
+        }
+        return jsonResponse({}, 404);
+      },
+      { key: 'console.dsm.open', requirementId: 'NAS-ACT-02' },
+    );
+
+    await wrapper.get('[data-testid="launch-open"]').trigger('click');
+    await flushAll();
+
+    expect(wrapper.text()).toContain('设备当前未提供可用的 DSM 管理界面');
+  });
+
+  it('操作页签点击 console.dsm.open 能力进入 launch 流程（console.* 路由）', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const auth = useAuthStore();
+    auth.permissions = [
+      'device.read',
+      'operation.read',
+      'operation.execute.low',
+      'operation.execute.medium',
+      'operation.execute.high',
+    ];
+    const tab = fakeTab();
+    stubWindowOpen(() => tab);
+    const seen: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), init });
+      if (String(url).endsWith('/devices/d-1/launches')) {
+        return jsonResponse(CREATED, 201);
+      }
+      return jsonResponse({}, 404);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const wrapper = mount(OperationsPanel, {
+      props: {
+        deviceId: 'd-1',
+        deviceName: 'nas-01',
+        capabilities: [
+          {
+            capability_key: 'console.dsm.open',
+            requirement_id: 'NAS-ACT-02',
+            requirement_title: 'DSM Web 远程连接',
+            support_state: 'supported',
+            reason_code: null,
+            detail: null,
+            discovery_method: 'nas.synology_dsm',
+            adapter_version: 'simulator-verified',
+            last_checked_at: '2026-09-01T08:00:00Z',
+          },
+        ],
+      },
+      global: { plugins: [pinia] },
+    });
+
+    await wrapper.get('[data-testid="capability-console.dsm.open"]').trigger('click');
+    await wrapper.get('[data-testid="launch-open"]').trigger('click');
+    await flushAll();
+
+    expect(wrapper.text()).toContain('需求编号：NAS-ACT-02');
+    expect(seen).toHaveLength(1);
+    expect(String(seen[0]!.url)).toContain('/devices/d-1/launches');
+    expect(JSON.parse(String(seen[0]!.init?.body))).toEqual({
+      capability_key: 'console.dsm.open',
+    });
+    expect(tab.location.href).toBe(CREATED.url);
   });
 });
 
