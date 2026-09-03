@@ -222,6 +222,51 @@ class TestPlanContract:
         assert getattr(exc_info.value, "code", "") == "validation_failed"
 
 
+# -- error boundary (DEVICE_ADAPTERS.md §7) -----------------------------------
+
+
+class TestErrorBoundary:
+    """Every RedfishError escaping a preflight/execute read must surface as an
+    AdapterError with the SAME stable code — raw protocol errors leaking out
+    would turn into executor pool lease churn (and eventually a mislabeled
+    timeout) instead of a clean terminal failure."""
+
+    def test_preflight_login_401_raises_adapter_error_authentication_failed(self, sim: SimAccess) -> None:
+        sim.set(failures={"login_401": True})
+        session = _session(sim)
+        plan = _plan("power.off")
+        with pytest.raises(AdapterError) as exc_info:
+            ADAPTER.preflight_operation(session, plan)
+        assert exc_info.value.code == "authentication_failed"
+
+    def test_preflight_read_403_raises_adapter_error_permission_denied(self, sim: SimAccess) -> None:
+        sim.set(failures={"reads_403": True})
+        session = _session(sim)
+        plan = _plan("power.cycle")
+        with pytest.raises(AdapterError) as exc_info:
+            ADAPTER.preflight_operation(session, plan)
+        assert exc_info.value.code == "permission_denied_by_device"
+
+    def test_execute_read_500_raises_adapter_error_operation_failed(self, sim: SimAccess) -> None:
+        # A non-POST read that fails mid-execute (500) maps through the same
+        # boundary: the executor sees AdapterError(operation_failed), never a
+        # raw protocol error.
+        sim.set(failures={"reads_500": True})
+        session = _session(sim)
+        plan = _plan("power.cycle")
+        with pytest.raises(AdapterError) as exc_info:
+            ADAPTER.execute_operation(session, _short_deadline(plan), lambda *_: None)
+        assert exc_info.value.code == "operation_failed"
+
+    def test_action_post_403_raises_adapter_error_permission_denied(self, sim: SimAccess) -> None:
+        sim.set(failures={"reset_forbidden_403": True})
+        session = _session(sim)
+        plan = _plan("power.cycle")
+        with pytest.raises(AdapterError) as exc_info:
+            ADAPTER.execute_operation(session, _short_deadline(plan), lambda *_: None)
+        assert exc_info.value.code == "permission_denied_by_device"
+
+
 # -- power (SRV-ACT-02) -------------------------------------------------------
 
 
@@ -366,6 +411,52 @@ class TestManagerReset:
         assert verdict.ambiguous is True
         assert verdict.error_code == "ambiguous_result"
 
+    def test_reset_with_both_identity_values_none_is_ambiguous_never_success(
+        self, sim: SimAccess
+    ) -> None:
+        # The pre-reset evidence holds NO usable identity value (both
+        # manager_uuid and system_serial are None — e.g. a device that never
+        # reported them): identity equality must never pass trivially.
+        sim.set(manager_blip_seconds=0.4)
+        session = _session(sim)
+        plan = _plan("manager.reset")
+        result = ADAPTER.execute_operation(session, _short_deadline(plan, seconds=10.0), lambda *_: None)
+        assert result.ok is True
+        stripped = dataclasses.replace(
+            result,
+            evidence={
+                "http_status": 202,
+                "command": {"ResetType": "GracefulRestart"},
+                "identity_before": {
+                    "manager_uuid": None,
+                    "system_serial": None,
+                    "model": "Warden SimServer 1U (simulated)",
+                },
+            },
+        )
+        verdict = _poll_verify(session, plan, _job_result(stripped), timeout=30.0)
+        assert verdict.succeeded is False
+        assert verdict.ambiguous is True
+        assert verdict.error_code == "ambiguous_result"
+        assert verdict.evidence["reason"] == "no_pre_reset_identity_evidence"
+
+    def test_reset_without_observed_offline_window_is_ambiguous(self, sim: SimAccess) -> None:
+        # The manager never actually goes down (blip 0: the reset is accepted,
+        # the task vanishes, identity is unchanged) — without an observed
+        # offline window the restart cannot be PROVEN and success would be
+        # fabricated.
+        sim.set(manager_blip_seconds=0.0)
+        session = _session(sim)
+        plan = _plan("manager.reset")
+        result = ADAPTER.execute_operation(session, _short_deadline(plan, seconds=4.0), lambda *_: None)
+        assert result.ok is True
+        assert (result.evidence["identity_before"]["manager_uuid"]) is not None
+        verdict = _poll_verify(session, plan, _job_result(result), timeout=15.0)
+        assert verdict.succeeded is False
+        assert verdict.ambiguous is True
+        assert verdict.error_code == "ambiguous_result"
+        assert "no offline window observed" in str(verdict.evidence.get("reason"))
+
 
 # -- logs.support_bundle.collect (SRV-ACT-04) ---------------------------------
 
@@ -435,16 +526,22 @@ class TestVirtualMedia:
     def test_mount_readback_and_unmount(self, sim: SimAccess) -> None:
         session = _session(sim)
         ticket_url = "http://127.0.0.1:9/isos/debian.iso"
+        mount_ctx = _ticket_context(ticket_url)
         mount = _plan(
             "virtual_media.mount",
             {"file_id": str(uuid.uuid4()), "media_kind": "iso"},
-            runtime_context=_ticket_context(ticket_url),
+            runtime_context=mount_ctx,
         )
         preflight = ADAPTER.preflight_operation(session, mount)
         assert preflight.ok is True
         result = ADAPTER.execute_operation(session, _short_deadline(mount), lambda *_: None)
         assert result.ok is True
         slot_id = result.evidence["slot_id"]
+        # The ticket URL never enters evidence: the command is redacted and a
+        # ticket_id reference stays (file-layer invariant, SECURITY.md §7).
+        assert result.evidence["ticket_id"] == mount_ctx["ticket"]["id"]
+        assert ticket_url not in json.dumps(result.evidence, ensure_ascii=False)
+        assert result.evidence["command"]["Image"] != ticket_url
         verdict = ADAPTER.verify_operation(session, mount, result)
         assert verdict.succeeded is True
         assert verdict.evidence["inserted"] is True
@@ -467,6 +564,28 @@ class TestVirtualMedia:
         assert verdict.succeeded is True
         assert verdict.evidence["inserted"] is False
         assert verdict.evidence["ticket_revoked"] is True
+
+    def test_mount_verify_repolls_until_a_delayed_insert_applies(self, sim: SimAccess) -> None:
+        # A real manager may stage the insert after the 204 acceptance: the
+        # single-shot read-back would wrongly declare ambiguity. The bounded
+        # re-poll must observe the applied insert and succeed.
+        sim.set(media_insert_delayed=True)
+        session = _session(sim)
+        ticket_url = "http://127.0.0.1:9/isos/debian.iso"
+        plan = _plan(
+            "virtual_media.mount",
+            {"file_id": str(uuid.uuid4()), "media_kind": "iso"},
+            runtime_context=_ticket_context(ticket_url),
+        )
+        preflight = ADAPTER.preflight_operation(session, plan)
+        assert preflight.ok is True
+        result = ADAPTER.execute_operation(session, _short_deadline(plan), lambda *_: None)
+        assert result.ok is True
+        verdict = ADAPTER.verify_operation(session, plan, result)
+        assert verdict.succeeded is True, verdict
+        assert verdict.ambiguous is False
+        assert verdict.evidence["inserted"] is True
+        assert verdict.evidence["polls"] >= 2
 
     def test_unmount_precondition_drift_when_slot_empty(self, sim: SimAccess) -> None:
         session = _session(sim)
@@ -544,20 +663,48 @@ class TestFirmware:
     def test_firmware_update_job_version_readback(self, sim: SimAccess) -> None:
         sim.set(task_duration_seconds=0.05, firmware_update_version="SIM-BMC-1.1.0")
         session = _session(sim)
+        update_ctx = _ticket_context("http://127.0.0.1:9/fw.iso", expected_version="SIM-BMC-1.1.0")
         plan = _plan(
             "firmware.update",
             {"file_id": str(uuid.uuid4()), "target_id": "BMC"},
-            runtime_context=_ticket_context("http://127.0.0.1:9/fw.iso", expected_version="SIM-BMC-1.1.0"),
+            runtime_context=update_ctx,
         )
         preflight = ADAPTER.preflight_operation(session, plan)
         assert preflight.ok is True
         result = ADAPTER.execute_operation(session, _short_deadline(plan, seconds=10.0), lambda *_: None)
         assert result.ok is True
         assert result.evidence["target_id"] == "BMC"
+        # The ticket URL never enters evidence: the ImageURI command field is
+        # redacted and the ticket is referenced by id only.
+        assert result.evidence["ticket_id"] == update_ctx["ticket"]["id"]
+        assert "http://127.0.0.1:9/fw.iso" not in json.dumps(result.evidence, ensure_ascii=False)
+        assert result.evidence["command"]["ImageURI"] != "http://127.0.0.1:9/fw.iso"
         verdict = _poll_verify(session, plan, _job_result(result), timeout=30.0)
         assert verdict.succeeded is True
         assert verdict.evidence["readback_version"] == "SIM-BMC-1.1.0"
         assert verdict.evidence["expected_version"] == "SIM-BMC-1.1.0"
+
+    def test_firmware_update_completed_job_with_wrong_version_is_failed(self, sim: SimAccess) -> None:
+        # The device reports job success but bumps the target to a version
+        # DIFFERENT from the package target: a provably-wrong final version is
+        # an explicit device-side failure (operation_failed), never success
+        # without proof and never an ambiguity.
+        sim.set(task_duration_seconds=0.05, firmware_update_version="SIM-BMC-1.1.0")
+        session = _session(sim)
+        plan = _plan(
+            "firmware.update",
+            {"file_id": str(uuid.uuid4()), "target_id": "BMC"},
+            runtime_context=_ticket_context("http://127.0.0.1:9/fw.iso", expected_version="SIM-BMC-9.9.9"),
+        )
+        result = ADAPTER.execute_operation(session, _short_deadline(plan, seconds=3.0), lambda *_: None)
+        assert result.ok is True
+        verdict = _poll_verify(session, plan, _job_result(result), timeout=15.0)
+        assert verdict.succeeded is False
+        assert verdict.ambiguous is False
+        assert verdict.error_code == "operation_failed"
+        assert verdict.evidence["reason"] == "version_mismatch_after_completed_job"
+        assert verdict.evidence["readback_version"] == "SIM-BMC-1.1.0"
+        assert verdict.evidence["expected_version"] == "SIM-BMC-9.9.9"
 
     def test_firmware_update_task_failure_is_operation_failed(self, sim: SimAccess) -> None:
         sim.set(task_duration_seconds=0.05, failures={"update_task_fails": True})
@@ -587,7 +734,13 @@ class TestFirmware:
         verdict = ADAPTER.verify_operation(session, plan, _job_result(result))
         assert verdict.pending is True
 
-    def test_firmware_update_reboot_loop_is_ambiguous(self, sim: SimAccess) -> None:
+    def test_firmware_update_reboot_loop_completed_job_never_bumps_is_failed(
+        self, sim: SimAccess
+    ) -> None:
+        # The update job completes but the version never reaches the package
+        # target (reboot loop, version stays readable): terminal job success
+        # + a provably-wrong final read-back version = operation_failed —
+        # polling to the budget may never masquerade as ambiguity.
         sim.set(task_duration_seconds=0.05, update_reboot_loop=True)
         session = _session(sim)
         plan = _plan(
@@ -599,7 +752,10 @@ class TestFirmware:
         assert result.ok is True
         verdict = _poll_verify(session, plan, _job_result(result), timeout=15.0)
         assert verdict.succeeded is False
-        assert verdict.ambiguous is True
+        assert verdict.ambiguous is False
+        assert verdict.error_code == "operation_failed"
+        assert verdict.evidence["reason"] == "version_mismatch_after_completed_job"
+        assert verdict.evidence["readback_version"] == "SIM-BMC-1.0.0"
 
     def test_firmware_update_unknown_target_fails_preflight(self, sim: SimAccess) -> None:
         session = _session(sim)

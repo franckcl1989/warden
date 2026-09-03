@@ -409,6 +409,19 @@ class TestTasksAndActions:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_read_failure_injection_403(self, http: httpx.AsyncClient) -> None:
+        await http.post("/warden-sim/control", json={"failures": {"reads_403": True}})
+        token, _ = await login(http)
+        response = await authed_get(http, token, f"{BASE}/Systems/1")
+        assert response.status_code == 403
+        info = response.json()["error"]["@Message.ExtendedInfo"]
+        assert any(member["MessageId"] == "Base.1.13.InsufficientPrivilege" for member in info)
+        # The control endpoint itself stays reachable so tests can reset.
+        control = await http.get("/warden-sim/control")
+        assert control.status_code == 200
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_unknown_action_target_is_404(self, http: httpx.AsyncClient) -> None:
         token, _ = await login(http)
         response = await http.post(
@@ -836,3 +849,29 @@ class TestM3T3OperationSurface:
         assert eject.status_code == 204
         slot = (await authed_get(http, token, f"{BASE}/Managers/1/VirtualMedia/1")).json()
         assert slot["Inserted"] is False
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_media_insert_delayed_applies_after_the_staging_delay(
+        self, http: httpx.AsyncClient
+    ) -> None:
+        await http.post("/warden-sim/control", json={"media_insert_delayed": True})
+        token, _ = await login(http)
+        insert = await http.post(
+            f"{BASE}/Managers/1/VirtualMedia/1/Actions/VirtualMedia.InsertMedia",
+            json={"Image": "http://127.0.0.1:1/iso.iso", "Inserted": True, "WriteProtected": True},
+            headers={"X-Auth-Token": token},
+        )
+        assert insert.status_code == 204
+        # Acceptance is immediate but the slot state applies asynchronously.
+        slot = (await authed_get(http, token, f"{BASE}/Managers/1/VirtualMedia/1")).json()
+        assert slot["Inserted"] is False
+        assert slot["Image"] is None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            slot = (await authed_get(http, token, f"{BASE}/Managers/1/VirtualMedia/1")).json()
+            if slot["Inserted"] is True:
+                break
+            await asyncio.sleep(0.05)
+        assert slot["Inserted"] is True
+        assert slot["Image"] == "http://127.0.0.1:1/iso.iso"

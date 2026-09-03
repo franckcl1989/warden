@@ -24,7 +24,10 @@ operations.json):
   when advertised (cold-reset semantics are vendor-specific; common adapter
   refuses unadvertised types). expected_disconnect=true: verification polls
   reachability and then compares Manager UUID/System serial over a FRESH
-  session (disconnect_reconnect_identity).
+  session (disconnect_reconnect_identity). Success requires BOTH the offline
+  window to be observed AND at least one non-None identity to compare equal;
+  missing pre-reset identity values or an unobserved disconnect -> ambiguous,
+  never a trivial success.
 - logs.support_bundle.collect (SRV-ACT-04): bounded SEL + manager LogService
   export + a system snapshot JSON, returned as one zip artifact descriptor.
   The adapter yields BYTES ONLY; the worker stores/encrypts/links the file
@@ -36,7 +39,10 @@ operations.json):
   URL is ALWAYS the platform-issued device-pull ticket URL carried in the
   plan runtime context — the adapter never accepts a user-supplied URL and
   the simulator rejects foreign URLs. Verify reads the slot back
-  (mounted_media_readback).
+  (mounted_media_readback), re-polling a mount whose insert has not applied
+  yet for a bounded window before declaring it ambiguous. The ticket URL
+  never lands in evidence: the recorded command carries the redacted
+  placeholder and a ``ticket_id`` reference.
 - firmware.query (SRV-ACT-06): walk UpdateService FirmwareInventory (+ the
   manager firmware version) into normalized items; the worker persists the
   device row + firmware components (inventory_persisted).
@@ -45,28 +51,47 @@ operations.json):
   a 202 task is polled by the worker via the persisted device_job_id;
   verification is job_and_version_readback: terminal job success AND the
   target inventory version equals the platform-declared package version
-  (runtime context; image parsing is the worker's, never the adapter's).
+  (runtime context; image parsing is the worker's, never the adapter's). A
+  COMPLETED job whose final read-back version provably differs from the
+  package target is a device-side failure (operation_failed), never success
+  without proof and never a timeout ambiguity.
 - asset.refresh (SRV-ACT-07): walk System/Chassis/Manager FRU fields into an
   InventorySnapshot (serial/model/firmware + fru components); the worker
   persists device identity + components (inventory_persisted).
 
 Error mapping (DEVICE_ADAPTERS.md §7): device HTTP errors map through the
-Redfish error layer to stable codes; execute/preflight raise ``AdapterError``
-with the same code (400 ActionNotSupported -> unsupported_capability, 401 ->
-authentication_failed via the client re-login, ...). Read-back verification
-reports explicit results: explicit device failures -> failed (never retried),
-unprovable outcomes (job vanished, state never reached, identity unreadable)
--> VerificationResult(ambiguous=True) so the executor parks the task in
-verification_required (AGENTS.md: 不得把不确定的结果伪装成成功).
+Redfish error layer to stable codes. Every boundary method (preflight /
+execute / verify) translates any escaped ``RedfishError`` into an
+``AdapterError`` carrying the SAME stable code (400 ActionNotSupported ->
+unsupported_capability, 401 -> authentication_failed, 403 ->
+permission_denied_by_device, transport -> network_unreachable, ...) so the
+worker executor only ever sees adapter-level errors and never leaks raw
+protocol errors into pool lease churn (a persistent preflight auth failure
+fails the task with authentication_failed — it is never mislabeled as a
+timeout). Evidence never carries device-pull ticket URLs: the POST command
+recorded in evidence has the ticket Image/ImageURI redacted and a
+``ticket_id`` reference instead (SECURITY/ARCHITECTURE file-layer invariant:
+ticket URLs never enter logs/evidence).
+
+Verification reports explicit results: explicit device failures -> failed
+(never retried) — including a firmware update whose COMPLETED job is followed
+by a provably wrong target version (job terminal success + readback !=
+expected version = device-side failure, operation_failed) — while unprovable
+outcomes (job vanished, state never reached, identity unreadable, no offline
+window observed for a manager reset) -> VerificationResult(ambiguous=True) so
+the executor parks the task in verification_required (AGENTS.md: 不得把不确
+定的结果伪装成成功).
 
 Budgets (documented caps; overlays re-certify per-vendor timings in M3T5):
 a single verify call may poll the PowerState for at most
-POWER_READBACK_CAP_SECONDS (90 s), reconnect after a job-less manager reset
-for RECONNECT_CAP_SECONDS (120 s) and read back a job-less firmware version
-for VERSION_READBACK_CAP_SECONDS (60 s). When the worker put the task
-``timeout_at`` into the runtime context the budget shrinks to the remaining
-task time. 202-task flows poll per worker poll interval (no internal long
-loops): each verify call performs ONE job read.
+POWER_READBACK_CAP_SECONDS (90 s), reconnect after a manager reset for
+RECONNECT_CAP_SECONDS (120 s), read back a job-less firmware version for
+VERSION_READBACK_CAP_SECONDS (60 s), and re-poll a virtual-media insert for
+at most MOUNT_READBACK_MAX_POLLS reads over ~MOUNT_READBACK_RETRY_INTERVAL
+(6 s; the device may apply the insert asynchronously). When the worker put
+the task ``timeout_at`` into the runtime context the budget shrinks to the
+remaining task time. 202-task flows poll per worker poll interval (no
+internal long loops): each verify call performs ONE job read.
 """
 
 from __future__ import annotations
@@ -76,11 +101,12 @@ import io
 import json
 import time
 import zipfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from functools import wraps
+from typing import Any, TypeVar
 
 from app.domain.adapter import (
     AdapterError,
@@ -115,15 +141,26 @@ from app.infrastructure.protocols.redfish.parse import (
 POWER_READBACK_CAP_SECONDS = 90.0
 RECONNECT_CAP_SECONDS = 120.0
 VERSION_READBACK_CAP_SECONDS = 60.0
+MOUNT_READBACK_MAX_POLLS = 3
+MOUNT_READBACK_RETRY_INTERVAL_SECONDS = 3.0
 JOBLESS_RETRY_INTERVAL = 0.25
 SEL_EXPORT_PAGE_BUDGET = 200
 FIRMWARE_MEMBER_BUDGET = 50
 BUNDLE_MESSAGE_MAX_CHARS = 2000
 
+# Body fields that carry the platform device-pull TICKET URL to the device.
+# Their values are redacted from evidence (the URL must never be logged or
+# checkpointed; only the ticket id stays in evidence — SECURITY.md §7).
+_TICKET_URL_FIELDS = frozenset({"Image", "ImageURI"})
+_TICKET_REDACTION_PLACEHOLDER = "<platform-device-pull-ticket-url-redacted>"
+_IDENTITY_FIELDS = ("manager_uuid", "system_serial")
+
 
 # -- runtime-context contract (worker fills; adapter consumes) ---------------
 # Keys (all optional, JSON-safe):
 #   "ticket":      {"url": ..., "id": ...}            (mount / firmware.update)
+#                  The URL goes to the DEVICE call ONLY: it is redacted from
+#                  every evidence payload (a ticket_id reference stays).
 #   "file":        {"file_id", "file_type", "sha256", "expected_model",
 #                   "expected_target", "expected_version"}  (mount/update/query)
 #   "task_timeout_at": ISO-8601 task deadline          (budget shrinking)
@@ -194,6 +231,9 @@ class _EndpointPath:
     chassis_url: str | None
     managers_url: str | None
     update_url: str | None
+
+
+T = TypeVar("T")
 
 
 def _service_links(client: RedfishClient) -> _EndpointPath:
@@ -274,6 +314,50 @@ def _action_target(action: Mapping[str, object] | None) -> str | None:
 
 def _redfish_exception_to_adapter(exc: RedfishError, stage: str) -> AdapterError:
     return AdapterError(exc.code, exc.message, stage=exc.stage if exc.stage is not None else stage)
+
+
+def _adapter_boundary(stage: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Translate ANY escaped ``RedfishError`` into the matching ``AdapterError``.
+
+    One boundary per protocol method (preflight/execute/verify): the worker
+    executor only maps ``AdapterError``/``AdapterTimeoutError``, so a raw
+    protocol error escaping here would become pool lease-release churn instead
+    of a clean terminal outcome with the stable §7 code. The code and the
+    error's own stage survive unchanged.
+    """
+
+    def decorate(fn: Callable[..., T]) -> Callable[..., T]:
+        @wraps(fn)
+        def wrapped(*args: object, **kwargs: object) -> T:
+            try:
+                return fn(*args, **kwargs)
+            except RedfishError as exc:
+                raise _redfish_exception_to_adapter(exc, stage) from exc
+
+        return wrapped
+
+    return decorate
+
+
+def _redact_ticket_material(
+    body: Mapping[str, object], plan: OperationPlan
+) -> tuple[dict[str, object], str | None]:
+    """(evidence-safe command, ticket_id) for an action POST body.
+
+    The Image/ImageURI fields carry the platform device-pull ticket URL to
+    the device; evidence must reference the ticket by id ONLY (the URL never
+    enters logs/evidence — the file-layer invariant in application/files.py).
+    """
+    ticket = _ctx_dict(plan, "ticket")
+    ticket_url = ticket.get("url")
+    ticket_id = ticket.get("id")
+    command: dict[str, object] = {}
+    for key, value in body.items():
+        if key in _TICKET_URL_FIELDS and isinstance(value, str) and value == ticket_url:
+            command[key] = _TICKET_REDACTION_PLACEHOLDER
+        else:
+            command[key] = value
+    return command, ticket_id if isinstance(ticket_id, str) else None
 
 
 @contextmanager
@@ -387,6 +471,7 @@ def _power_preflight(system: RedfishResource, plan: OperationPlan) -> PreflightR
     return PreflightResult(ok=True)
 
 
+@_adapter_boundary("preflight")
 def preflight_operation_method(session: DeviceSession, plan: OperationPlan) -> PreflightResult:
     """Real-time read-only preflight per profile preconditions (no side effects)."""
     key = plan.capability_key
@@ -503,14 +588,7 @@ def preflight_operation_method(session: DeviceSession, plan: OperationPlan) -> P
                         detail="UpdateService 未提供固件清单",
                     )
             else:
-                try:
-                    _system(client)
-                except RedfishError as exc:
-                    return PreflightResult(
-                        ok=False,
-                        error_code=exc.code,
-                        detail="无法读取资产资源（ComputerSystem 缺失）",
-                    )
+                _system(client)
             return PreflightResult(ok=True)
     return PreflightResult(
         ok=False,
@@ -555,7 +633,10 @@ def _post_action(
     except RedfishError as exc:
         raise _redfish_exception_to_adapter(exc, stage) from exc
     progress(60, "动作已被设备接受")
-    evidence: dict[str, object] = {"command": body, "http_status": reply.status_code}
+    command, ticket_id = _redact_ticket_material(body, plan)
+    evidence: dict[str, object] = {"command": command, "http_status": reply.status_code}
+    if ticket_id is not None:
+        evidence["ticket_id"] = ticket_id
     location = reply.headers.get("location")
     if reply.status_code == 202 and location:
         job_uri = location.strip()
@@ -1239,6 +1320,7 @@ def _asset_refresh_execute(
         return OperationResult(ok=True, evidence=evidence, inventory=inventory)
 
 
+@_adapter_boundary("execute")
 def execute_operation_method(
     session: DeviceSession,
     plan: OperationPlan,
@@ -1454,17 +1536,32 @@ def _manager_reset_verify(
     evidence: Mapping[str, object],
     result: OperationResult | None,
 ) -> VerificationResult:
-    """disconnect_reconnect_identity: reachability poll, then identity check.
+    """disconnect_reconnect_identity: offline window + fresh-session identity.
 
-    With a persisted job (202 reset) each call is ONE cheap poll: a device
-    still down/booting or a job still running returns ``pending`` and the
-    worker re-polls with lease renewals. A job-less reset (204) runs the
-    bounded reconnect loop inside the call.
+    Success requires BOTH proofs (never a trivial pass):
+    - at least one non-None identity value (Manager UUID / System serial)
+      read BEFORE the reset equals the same value over a FRESH post-reset
+      session (if neither identity value exists in the pre-reset evidence,
+      the outcome is ambiguous — success is never invented); AND
+    - the manager's offline window was OBSERVED during this verification
+      (``disconnect_observed``) — a device that never went down cannot be
+      proven to have restarted. Certified vendor overlays (M3T5) may record
+      the restart through their own path; the common adapter only counts an
+      observed offline/unreadable window.
+
+    A still-RUNNING reset job returns ``pending`` (the worker keeps polling
+    with lease renewals); the offline window itself is polled INSIDE the
+    deadline-bounded reconnect loop (RECONNECT_CAP_SECONDS), exactly like the
+    job-less reset path, so the succeeding call carries the observation.
     """
     identity_before = _evidence_get(evidence, "identity_before")
     before = identity_before if isinstance(identity_before, Mapping) else {}
+    before_identity_values = {
+        key: before.get(key) for key in _IDENTITY_FIELDS if before.get(key) is not None
+    }
     job = result.device_job_id if result is not None else None
     deadline = time.monotonic() + _budget_remaining(plan, RECONNECT_CAP_SECONDS)
+    saw_offline = False
     while time.monotonic() < deadline:
         try:
             with _open_session(session) as client:
@@ -1473,11 +1570,12 @@ def _manager_reset_verify(
                         job_read = _read_job(client, job)
                     except RedfishError as exc:
                         if _is_offline_code(exc.code) and plan.expected_disconnect:
-                            # The manager is still restarting: known
-                            # in-progress, never ambiguous (expected_disconnect).
-                            return VerificationResult(
-                                succeeded=False, pending=True, evidence={"job_state": "device_offline"}
-                            )
+                            # The manager is mid-restart: keep polling inside
+                            # the bounded reconnect loop and remember the
+                            # offline window (never a fabricated reconnect).
+                            saw_offline = True
+                            time.sleep(JOBLESS_RETRY_INTERVAL)
+                            continue
                         return VerificationResult(
                             succeeded=False,
                             ambiguous=True,
@@ -1505,32 +1603,12 @@ def _manager_reset_verify(
                     # identity check decides below.
                 current = _identity_readable(client)
                 if current is None:
-                    if job is not None and plan.expected_disconnect:
-                        return VerificationResult(
-                            succeeded=False, pending=True, evidence={"job_state": "device_offline"}
-                        )
                     time.sleep(JOBLESS_RETRY_INTERVAL)
                     continue
-                same_identity = (
-                    before.get("manager_uuid") is None
-                    or before.get("manager_uuid") == current.get("manager_uuid")
-                ) and (
-                    before.get("system_serial") is None
-                    or before.get("system_serial") == current.get("system_serial")
-                )
-                if not same_identity:
-                    return VerificationResult(
-                        succeeded=False,
-                        error_code="operation_failed",
-                        evidence={
-                            "reason": "identity_changed_after_reset",
-                            "identity_before": before,
-                            "identity_after": current,
-                        },
-                    )
-                if not before:
-                    # No pre-reset identity evidence (crash recovery): the
-                    # manager is back but identity cannot be PROVEN unchanged.
+                if not before_identity_values:
+                    # No pre-reset identity to compare (crash recovery or a
+                    # device that never reported one): the manager is back but
+                    # identity cannot be PROVEN unchanged.
                     return VerificationResult(
                         succeeded=False,
                         ambiguous=True,
@@ -1540,6 +1618,32 @@ def _manager_reset_verify(
                             "identity_after": current,
                         },
                     )
+                comparable = {
+                    key: value
+                    for key, value in before_identity_values.items()
+                    if current.get(key) is not None
+                }
+                if not comparable:
+                    # The device is still booting (identity not fully
+                    # reported): keep polling until the deadline.
+                    time.sleep(JOBLESS_RETRY_INTERVAL)
+                    continue
+                if any(current.get(key) != value for key, value in comparable.items()):
+                    return VerificationResult(
+                        succeeded=False,
+                        error_code="operation_failed",
+                        evidence={
+                            "reason": "identity_changed_after_reset",
+                            "identity_before": before,
+                            "identity_after": current,
+                        },
+                    )
+                if not saw_offline:
+                    # Identity matches but no offline window was observed:
+                    # the restart itself is unproven — keep polling for the
+                    # window until the deadline, then report ambiguous.
+                    time.sleep(JOBLESS_RETRY_INTERVAL)
+                    continue
                 return VerificationResult(
                     succeeded=True,
                     evidence={
@@ -1550,10 +1654,7 @@ def _manager_reset_verify(
                 )
         except RedfishError as exc:
             if _is_offline_code(exc.code) and plan.expected_disconnect:
-                if job is not None:
-                    return VerificationResult(
-                        succeeded=False, pending=True, evidence={"job_state": "device_offline"}
-                    )
+                saw_offline = True
                 time.sleep(JOBLESS_RETRY_INTERVAL)
                 continue
             return VerificationResult(
@@ -1562,11 +1663,17 @@ def _manager_reset_verify(
                 error_code="ambiguous_result",
                 evidence={"reason": f"reconnect failed ({exc.code})"},
             )
+    if saw_offline and not before_identity_values:
+        reason = "no pre-reset identity values — identity cannot be proven unchanged"
+    elif not saw_offline and before_identity_values:
+        reason = "no offline window observed — the manager restart cannot be proven"
+    else:
+        reason = "reconnect deadline reached without the manager returning"
     return VerificationResult(
         succeeded=False,
         ambiguous=True,
         error_code="ambiguous_result",
-        evidence={"reason": "reconnect deadline reached without the manager returning"},
+        evidence={"reason": reason},
     )
 
 
@@ -1672,7 +1779,15 @@ def _mounted_media_verify(
     evidence: Mapping[str, object],
     result: OperationResult | None,
 ) -> VerificationResult:
-    """mounted_media_readback: the slot reports the expected inserted state."""
+    """mounted_media_readback: the slot reports the expected inserted state.
+
+    A mount may legitimately apply asynchronously after the 204 acceptance
+    (real managers stage the insert), so a not-yet-inserted slot is re-polled
+    a bounded number of times (MOUNT_READBACK_MAX_POLLS reads over
+    ~MOUNT_READBACK_RETRY_INTERVAL_SECONDS) before the outcome is declared
+    ambiguous — never a single-shot verdict. Unmount (eject is synchronous)
+    stays single-shot.
+    """
     del result
     slot_id: object | None = None
     if plan.capability_key == "virtual_media.unmount":
@@ -1686,70 +1801,90 @@ def _mounted_media_verify(
             error_code="ambiguous_result",
             evidence={"reason": "no_slot_id_for_verification"},
         )
-    with _open_session(session) as client:
-        try:
-            slot = _virtual_media_slot(client, slot_id)
-        except RedfishError:
-            return VerificationResult(
-                succeeded=False,
-                ambiguous=True,
-                error_code="ambiguous_result",
-                evidence={"reason": "slot_unreadable_during_verify"},
-            )
-        if slot is None:
-            return VerificationResult(
-                succeeded=False,
-                ambiguous=True,
-                error_code="ambiguous_result",
-                evidence={"reason": "slot_missing_during_verify"},
-            )
-        if plan.capability_key == "virtual_media.mount":
-            expected_image = _ctx_text(plan, "ticket")
-            inserted = slot.get("inserted") is True
-            image = slot.get("image")
-            if not inserted:
+    is_mount = plan.capability_key == "virtual_media.mount"
+    expected_image = _ctx_text(plan, "ticket") if is_mount else None
+    for poll in range(MOUNT_READBACK_MAX_POLLS):
+        with _open_session(session) as client:
+            try:
+                slot = _virtual_media_slot(client, slot_id)
+            except RedfishError:
+                if is_mount and poll < MOUNT_READBACK_MAX_POLLS - 1:
+                    time.sleep(MOUNT_READBACK_RETRY_INTERVAL_SECONDS)
+                    continue
                 return VerificationResult(
                     succeeded=False,
                     ambiguous=True,
                     error_code="ambiguous_result",
-                    evidence={"slot_id": slot_id, "reason": "media_not_inserted"},
+                    evidence={"slot_id": slot_id, "reason": "slot_unreadable_during_verify"},
                 )
-            if expected_image is not None and image != expected_image:
+            if slot is None:
                 return VerificationResult(
                     succeeded=False,
-                    error_code="operation_failed",
+                    ambiguous=True,
+                    error_code="ambiguous_result",
+                    evidence={"slot_id": slot_id, "reason": "slot_missing_during_verify"},
+                )
+            if is_mount:
+                inserted = slot.get("inserted") is True
+                image = slot.get("image")
+                if not inserted:
+                    if poll < MOUNT_READBACK_MAX_POLLS - 1:
+                        time.sleep(MOUNT_READBACK_RETRY_INTERVAL_SECONDS)
+                        continue
+                    return VerificationResult(
+                        succeeded=False,
+                        ambiguous=True,
+                        error_code="ambiguous_result",
+                        evidence={
+                            "slot_id": slot_id,
+                            "polls": poll + 1,
+                            "reason": "media_not_inserted",
+                        },
+                    )
+                if expected_image is not None and image != expected_image:
+                    return VerificationResult(
+                        succeeded=False,
+                        error_code="operation_failed",
+                        evidence={
+                            "slot_id": slot_id,
+                            "reason": "inserted_image_does_not_match_ticket",
+                        },
+                    )
+                return VerificationResult(
+                    succeeded=True,
                     evidence={
                         "slot_id": slot_id,
-                        "reason": "inserted_image_does_not_match_ticket",
+                        "inserted": True,
+                        "image_matches_ticket": image == expected_image,
+                        "polls": poll + 1,
+                        "strategy": plan.verification_strategy,
                     },
                 )
+            # unmount
+            if slot.get("inserted") is True:
+                return VerificationResult(
+                    succeeded=False,
+                    ambiguous=True,
+                    error_code="ambiguous_result",
+                    evidence={"slot_id": slot_id, "reason": "media_still_inserted"},
+                )
+            revoked = _evidence_get(evidence, "ticket_revoked")
             return VerificationResult(
                 succeeded=True,
                 evidence={
                     "slot_id": slot_id,
-                    "inserted": True,
-                    "image_matches_ticket": image == expected_image,
+                    "inserted": False,
+                    "ticket_revoked": isinstance(revoked, str),
                     "strategy": plan.verification_strategy,
                 },
             )
-        # unmount
-        if slot.get("inserted") is True:
-            return VerificationResult(
-                succeeded=False,
-                ambiguous=True,
-                error_code="ambiguous_result",
-                evidence={"slot_id": slot_id, "reason": "media_still_inserted"},
-            )
-        revoked = _evidence_get(evidence, "ticket_revoked")
-        return VerificationResult(
-            succeeded=True,
-            evidence={
-                "slot_id": slot_id,
-                "inserted": False,
-                "ticket_revoked": isinstance(revoked, str),
-                "strategy": plan.verification_strategy,
-            },
-        )
+    # Unreachable: the loop above returns on every iteration.
+    return VerificationResult(
+        succeeded=False,
+        ambiguous=True,
+        error_code="ambiguous_result",
+        evidence={"slot_id": slot_id, "reason": "media_readback_budget_exhausted"},
+    )
 
 
 def _inventory_verify(
@@ -1820,10 +1955,24 @@ def _firmware_update_verify(
 ) -> VerificationResult:
     """job_and_version_readback: job terminal + target version == expected.
 
-    With a persisted job each call is ONE cheap poll: running/offline ->
-    ``pending`` (worker re-polls with lease renewals). After the job is
+    With a persisted job each call is ONE cheap poll: a still-RUNNING job or
+    a device that is offline mid-update (expected_disconnect) returns
+    ``pending`` (the worker re-polls with lease renewals). After the job is
     terminal (or for a job-less update) the target inventory version is read
-    back and compared against the platform-declared package version.
+    back and compared against the platform-declared package version:
+
+    - readback == expected -> succeeded;
+    - job terminal success + a provably WRONG final readback version -> failed
+      (operation_failed; the device claimed success but the version proves the
+      update did not reach the expected target — never success without proof,
+      and a mismatch is a device-side failure, not an ambiguity);
+    - unprovable outcomes (job unreadable, disconnect without a readable
+      verdict, no concrete version to compare) -> ambiguous.
+
+    The mismatch decision is only made at the (budget-bounded) deadline so a
+    version that legitimately lags the job completion (device rebooting to
+    apply) is still given its chance; an offline/unreadable spell at the end
+    of the window keeps the outcome ambiguous.
     """
     file_ctx = _ctx_dict(plan, "file")
     expected_version = file_ctx.get("expected_version")
@@ -1841,6 +1990,10 @@ def _firmware_update_verify(
     job = result.device_job_id if result is not None else None
     deadline = time.monotonic() + _budget_remaining(plan, VERSION_READBACK_CAP_SECONDS)
     job_state_seen: str | None = None
+    # A job-less update (204, nothing to poll) counts as terminal acceptance;
+    # a job only counts once it reads terminal ``Completed``.
+    terminal_success_seen = job is None
+    last_concrete_version: str | None = None
     while time.monotonic() < deadline:
         try:
             with _open_session(session) as client:
@@ -1878,8 +2031,32 @@ def _firmware_update_verify(
                             error_code="ambiguous_result",
                             evidence={"job_state": "interrupted"},
                         )
+                    if job_read.state == "completed":
+                        terminal_success_seen = True
                     # completed / vanished -> version read-back decides.
-                items = _firmware_inventory_items(client)
+                try:
+                    items = _firmware_inventory_items(client)
+                except RedfishError as exc:
+                    if plan.expected_disconnect and _is_offline_code(exc.code):
+                        if job is not None:
+                            return VerificationResult(
+                                succeeded=False,
+                                pending=True,
+                                evidence={"job_state": "device_offline"},
+                            )
+                        # Job-less update whose device is mid-reboot: the
+                        # mismatch memory dies with the unreadable spell, so
+                        # the deadline verdict stays honest (ambiguous when
+                        # the final state is unreadable).
+                        last_concrete_version = None
+                        time.sleep(JOBLESS_RETRY_INTERVAL)
+                        continue
+                    return VerificationResult(
+                        succeeded=False,
+                        ambiguous=True,
+                        error_code="ambiguous_result",
+                        evidence={"reason": f"version read-back failed ({exc.code})"},
+                    )
                 match = next((item for item in items if item.target == target_id), None)
                 if match is not None and match.version == expected_version:
                     return VerificationResult(
@@ -1892,6 +2069,8 @@ def _firmware_update_verify(
                             "job_state": job_state_seen,
                         },
                     )
+                if match is not None and match.version is not None:
+                    last_concrete_version = match.version
                 time.sleep(JOBLESS_RETRY_INTERVAL)
         except RedfishError as exc:
             if plan.expected_disconnect and _is_offline_code(exc.code):
@@ -1899,6 +2078,7 @@ def _firmware_update_verify(
                     return VerificationResult(
                         succeeded=False, pending=True, evidence={"job_state": "device_offline"}
                     )
+                last_concrete_version = None
                 time.sleep(JOBLESS_RETRY_INTERVAL)
                 continue
             return VerificationResult(
@@ -1907,6 +2087,21 @@ def _firmware_update_verify(
                 error_code="ambiguous_result",
                 evidence={"reason": f"version read-back failed ({exc.code})"},
             )
+    if terminal_success_seen and last_concrete_version is not None:
+        # The device reported job success AND a concrete final version that
+        # is provably not the package target: an explicit device-side
+        # failure, never a fabricated success or an ambiguity.
+        return VerificationResult(
+            succeeded=False,
+            error_code="operation_failed",
+            evidence={
+                "reason": "version_mismatch_after_completed_job",
+                "target_id": target_id,
+                "expected_version": expected_version,
+                "readback_version": last_concrete_version,
+                "job_state": job_state_seen,
+            },
+        )
     return VerificationResult(
         succeeded=False,
         ambiguous=True,
@@ -1919,6 +2114,7 @@ def _firmware_update_verify(
     )
 
 
+@_adapter_boundary("verify")
 def verify_operation_method(
     session: DeviceSession,
     plan: OperationPlan,

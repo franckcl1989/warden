@@ -34,11 +34,12 @@ URIs built from the request's own origin — a spec-legal style real managers
 use, which the client must accept.
 
 Failure injection (``POST /warden-sim/control {"failures": {...}}``):
-``login_401``, ``reads_500``, ``reads_429``, ``reset_rejected_400``,
-``reset_forbidden_403``, ``reset_task_fails``. Control also switches
-``profile``/``vendor``/``pagination``/``task_duration_seconds``, the SRV-MON
-surface knobs (``SimulatorConfig`` booleans + integer ``sel_append``), and
-reports the live state on ``GET /warden-sim/control``.
+``login_401``, ``reads_500``, ``reads_403``, ``reads_429``,
+``reset_rejected_400``, ``reset_forbidden_403``, ``reset_task_fails``.
+Control also switches ``profile``/``vendor``/``pagination``/
+``task_duration_seconds``, the SRV-MON surface knobs (``SimulatorConfig``
+booleans + integer ``sel_append``), and reports the live state on
+``GET /warden-sim/control``.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ FAILURE_KEYS = frozenset(
     {
         "login_401",
         "reads_500",
+        "reads_403",
         "reads_429",
         "reset_rejected_400",
         "reset_forbidden_403",
@@ -88,6 +90,7 @@ SURFACE_KNOB_KEYS = frozenset(
         "power_readback_stale",
         "media_insert_rejects_foreign_url",
         "media_fetch_required",
+        "media_insert_delayed",
         "update_fetch_required",
         "update_reboot_loop",
         "reset_never_completes",
@@ -108,6 +111,12 @@ _NEVER_COMPLETES_DURATION = 1e9
 
 _IMAGE_HEADER_MARKER = b"WARDEN-SIM-FW "
 _IMAGE_HEADER_MAX = 4096
+
+# How long a delayed InsertMedia takes to apply to the slot state
+# (media_insert_delayed knob): long enough that the FIRST verify read-back
+# still observes an empty slot, short enough that the second bounded re-poll
+# proves the insert.
+MEDIA_INSERT_DELAY_SECONDS = 2.0
 
 _FAIL_ACTION_MESSAGE = "Simulated reset failure (test device simulator)"
 
@@ -165,6 +174,7 @@ class _SimulatorState:
         self.sessions: dict[str, str] = {}  # token -> session id
         self.session_counter = 0
         self.media = payloads.media_records()
+        self.pending_media: dict[str, dict[str, object]] = {}
         self.tasks: dict[str, TaskRecord] = {}
         self.task_counter = 0
         self.task_fail_counter = 0
@@ -185,6 +195,7 @@ class _SimulatorState:
         self.sessions.clear()
         self.session_counter = 0
         self.media = payloads.media_records()
+        self.pending_media = {}
         self.tasks.clear()
         self.task_counter = 0
         self.power_target = "On"
@@ -193,6 +204,26 @@ class _SimulatorState:
         self.versions = {"BMC": "SIM-BMC-1.0.0", "BIOS": "SIM-BIOS-2.0"}
         self.device_fetches = []
         self.device_fetch_attempts = []
+
+    def media_slot_state(self, media_id: str) -> dict[str, Any]:
+        """The live slot record, applying a due delayed InsertMedia first."""
+        pending = self.pending_media.get(media_id)
+        if pending is not None and time.monotonic() >= float(pending["until"]):
+            record = self.media.get(media_id)
+            if record is not None:
+                record["inserted"] = True
+                record["image"] = pending["image"]
+                record["image_name"] = pending["image_name"]
+            self.pending_media.pop(media_id, None)
+        return self.media[media_id]
+
+    def schedule_media_insert(self, media_id: str, image: str) -> None:
+        """Apply an InsertMedia after the asynchronous staging delay."""
+        self.pending_media[media_id] = {
+            "image": image,
+            "image_name": image.rsplit("/", 1)[-1],
+            "until": time.monotonic() + MEDIA_INSERT_DELAY_SECONDS,
+        }
 
     def power_state_now(self) -> str:
         """The PowerState a GET observes right now (Off during a reboot blip)."""
@@ -251,6 +282,7 @@ class _SimulatorState:
             "power_readback_stale": self.cfg.power_readback_stale,
             "media_insert_rejects_foreign_url": self.cfg.media_insert_rejects_foreign_url,
             "media_fetch_required": self.cfg.media_fetch_required,
+            "media_insert_delayed": self.cfg.media_insert_delayed,
             "update_fetch_required": self.cfg.update_fetch_required,
             "update_reboot_loop": self.cfg.update_reboot_loop,
         "reset_never_completes": self.cfg.reset_never_completes,
@@ -517,6 +549,8 @@ class _Dispatcher:
                 return 429, _error_body("Base.1.13.GeneralError", "Simulated rate limit."), {"Retry-After": "1"}
             if state.failures["reads_500"]:
                 return _base_error_response(500)
+            if state.failures["reads_403"]:
+                return _base_error_response(403)
             return self._get(path, request)
         if request.method == "POST":
             return self._post(path, request)
@@ -654,7 +688,8 @@ class _Dispatcher:
         # Virtual media
         media = self._match(f"{payloads.BASE}/Managers/1/VirtualMedia/", path)
         if media is not None and media in state.media:
-            return 200, payloads.virtual_media(media, state.media[media]), {}
+            record = state.media_slot_state(media)
+            return 200, payloads.virtual_media(media, record), {}
 
         # Tasks + monitors
         task_path = f"{payloads.BASE}/TaskService/Tasks/"
@@ -806,7 +841,7 @@ class _Dispatcher:
         if media is not None:
             media_id, separator, action_path = media.partition("/")
             if separator and media_id in state.media:
-                record = state.media[media_id]
+                record = state.media_slot_state(media_id)
                 if action_path == "Actions/VirtualMedia.InsertMedia":
                     image = body.get("Image")
                     if not isinstance(image, str):
@@ -868,9 +903,15 @@ class _Dispatcher:
                             ),
                             {},
                         )
-                    record["inserted"] = True
-                    record["image"] = image
-                    record["image_name"] = image.rsplit("/", 1)[-1]
+                    if state.cfg.media_insert_delayed:
+                        # A real manager may stage the insert asynchronously
+                        # after the 204 acceptance: the slot keeps reporting
+                        # Inserted=false until the delay elapses.
+                        state.schedule_media_insert(media_id, image)
+                    else:
+                        record["inserted"] = True
+                        record["image"] = image
+                        record["image_name"] = image.rsplit("/", 1)[-1]
                     return 204, None, {}
                 if action_path == "Actions/VirtualMedia.EjectMedia":
                     if not record["inserted"]:

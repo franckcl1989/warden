@@ -96,6 +96,9 @@ class SimulatorConfig:
     # - media_fetch_required / update_fetch_required: InsertMedia/SimpleUpdate
     #   emulate the device actually fetching the Image URL (the platform
     #   ticket route must be live); a failed fetch rejects the action;
+    # - media_insert_delayed: InsertMedia accepts (204) but applies the slot
+    #   state only after a short asynchronous delay (real managers stage the
+    #   insert) — exercises the adapter's bounded insert read-back re-poll;
     # - update_reboot_loop: the update task completes but the inventory
     #   version never bumps and the system reboots (read-back can never match
     #   the expected version);
@@ -110,6 +113,7 @@ class SimulatorConfig:
     power_readback_stale: bool = False
     media_insert_rejects_foreign_url: bool = False
     media_fetch_required: bool = False
+    media_insert_delayed: bool = False
     update_fetch_required: bool = False
     update_reboot_loop: bool = False
     reset_never_completes: bool = False

@@ -47,6 +47,7 @@ from app.infrastructure.db import create_session_factory, dsn_with_psycopg_diale
 from app.infrastructure.network_policy import DeviceEndpointPolicy
 from app.infrastructure.time import utcnow
 from app.main import create_app
+from app.models.operation import OperationTask
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -389,11 +390,137 @@ class TestPowerCycleSlice:
             rig.close()
 
 
+class TestExecutorErrorBoundary:
+    """Executor-level regressions for the redfish error boundary (M3T3 review).
+
+    A raw RedfishError escaping preflight/execute used to leak past the
+    executor's AdapterError handling into pool lease churn (persistent
+    preflight auth errors eventually mislabeled as timed_out). Every failure
+    below must terminate the task CLEANLY with the mapped stable code and
+    never churn the lease or land in timed_out.
+    """
+
+    def _run_failure_task(
+        self,
+        sim_url: str,
+        fresh_test_db_dsn: str,
+        tmp_path,
+        monkeypatch,
+        *,
+        name: str,
+        failure_knobs: dict[str, object],
+        capability_key: str = "power.cycle",
+        user_index: int,
+    ) -> OperationTask:
+        rig = PlatformRig(fresh_test_db_dsn, tmp_path, monkeypatch, sim_url, owner="m3t3-failure-worker")
+        try:
+            with rig.serving() as base_url, httpx.Client(base_url=base_url, timeout=20.0) as client:
+                csrf = _login(client, ADMIN_USERNAME, ADMIN_PASSWORD)
+                onboarded = _onboard(client, csrf, sim_url, name)
+                device_id = uuid.UUID(onboarded["id"])
+                # Failure injection starts AFTER onboarding: the probe/save
+                # chain must see a healthy device; only the task execution
+                # faces the failing device surface.
+                _control(sim_url, **failure_knobs)
+                with rig.factory() as session:
+                    user = make_user(session, index=user_index)
+                    task_id = _seed_task(
+                        session,
+                        device_id=device_id,
+                        requested_by=user.id,
+                        capability_key=capability_key,
+                        parameters={},
+                    )
+            rig.rig.start_pool()
+            try:
+                row = rig.rig.wait_terminal(task_id, states=("succeeded", "failed", "timed_out"))
+            finally:
+                rig.rig.stop_pool()
+            assert isinstance(row, OperationTask)
+            return row
+        finally:
+            rig.close()
+
+    def test_preflight_auth_401_fails_task_with_authentication_failed(
+        self, sim_url: str, fresh_test_db_dsn: str, tmp_path, monkeypatch
+    ) -> None:
+        row = self._run_failure_task(
+            sim_url,
+            fresh_test_db_dsn,
+            tmp_path,
+            monkeypatch,
+            name="failure-auth-srv",
+            failure_knobs={"failures": {"login_401": True}},
+            user_index=5,
+        )
+        assert row.state == "failed", (row.state, row.error_code, row.error_detail)
+        assert row.error_code == "authentication_failed"
+        # Failed during preflight: never fenced, never replayed, never churned
+        # into a lease-recovery timed_out.
+        assert row.dispatch_started_at is None
+        assert row.attempt_count == 0
+
+    def test_preflight_read_403_fails_task_with_permission_denied_by_device(
+        self, sim_url: str, fresh_test_db_dsn: str, tmp_path, monkeypatch
+    ) -> None:
+        row = self._run_failure_task(
+            sim_url,
+            fresh_test_db_dsn,
+            tmp_path,
+            monkeypatch,
+            name="failure-forbidden-srv",
+            failure_knobs={"failures": {"reads_403": True}},
+            user_index=6,
+        )
+        assert row.state == "failed", (row.state, row.error_code, row.error_detail)
+        assert row.error_code == "permission_denied_by_device"
+        assert row.dispatch_started_at is None
+
+    def test_read_500_fails_task_with_mapped_operation_failed(
+        self, sim_url: str, fresh_test_db_dsn: str, tmp_path, monkeypatch
+    ) -> None:
+        row = self._run_failure_task(
+            sim_url,
+            fresh_test_db_dsn,
+            tmp_path,
+            monkeypatch,
+            name="failure-read500-srv",
+            failure_knobs={"failures": {"reads_500": True}},
+            user_index=7,
+        )
+        assert row.state == "failed", (row.state, row.error_code, row.error_detail)
+        assert row.error_code == "operation_failed"
+        assert row.dispatch_started_at is None
+        assert row.attempt_count == 0
+
+    def test_execute_action_403_fails_task_with_permission_denied_by_device(
+        self, sim_url: str, fresh_test_db_dsn: str, tmp_path, monkeypatch
+    ) -> None:
+        row = self._run_failure_task(
+            sim_url,
+            fresh_test_db_dsn,
+            tmp_path,
+            monkeypatch,
+            name="failure-action403-srv",
+            failure_knobs={"failures": {"reset_forbidden_403": True}},
+            user_index=8,
+        )
+        assert row.state == "failed", (row.state, row.error_code, row.error_detail)
+        assert row.error_code == "permission_denied_by_device"
+        # The action rejection happens AFTER the dispatch fence (execute), so
+        # the fence is committed — but the terminal outcome is still a clean
+        # failed, never a lease-churn retry.
+        assert row.dispatch_started_at is not None
+
+
 class TestVirtualMediaSlice:
     def test_iso_upload_mount_verify_unmount_and_ticket_revoked(
         self, sim_url: str, fresh_test_db_dsn: str, tmp_path, monkeypatch
     ) -> None:
-        _control(sim_url, media_fetch_required=True)
+        # media_insert_delayed: the simulator stages the insert after the 204
+        # (as real managers may) — the executor's bounded verify re-poll must
+        # still prove the mount.
+        _control(sim_url, media_fetch_required=True, media_insert_delayed=True)
         rig = PlatformRig(fresh_test_db_dsn, tmp_path, monkeypatch, sim_url)
         try:
             iso = b"\x00" * 4096 + b"WARDEN-BOOT-ISO-PAYLOAD"  # plain ISO-ish content
@@ -428,6 +555,11 @@ class TestVirtualMediaSlice:
                 mount_evidence = mount_row.evidence or {}
                 slot_id = str((mount_evidence.get("execution") or {}).get("slot_id"))
                 assert slot_id in ("1", "2")
+                # The delayed insert was proven by the bounded re-poll, never
+                # declared ambiguous by a single-shot read-back.
+                verification = mount_evidence.get("verification") or {}
+                assert verification.get("succeeded") is True
+                assert verification.get("polls", 1) >= 2
 
                 with rig.factory() as session:
                     link = session.execute(
@@ -445,6 +577,14 @@ class TestVirtualMediaSlice:
                     assert ticket[1] == "virtual_media"
                     assert ticket[2] is None
                     ticket_id = ticket[0]
+                # The device-pull TICKET URL never lands in the plaintext task
+                # evidence — the command is redacted and only the ticket id is
+                # referenced (file-layer invariant, SECURITY.md §7).
+                execution = mount_evidence.get("execution") or {}
+                assert execution.get("ticket_id") == str(ticket_id)
+                serialized = json.dumps(mount_evidence, ensure_ascii=False)
+                assert "device-file-access" not in serialized
+                assert "ticket_id" in serialized
                 fetched = rig.sim_control(sim_url).get("device_fetches") or []
                 assert any(str(ticket_id) in str(url) for url in fetched), "simulator never fetched the ticket URL"
 
@@ -578,6 +718,14 @@ class TestFirmwareAndAssetSlices:
                 )
                 verification = (update_row.evidence or {}).get("verification") or {}
                 assert verification.get("readback_version") == "SIM-BMC-1.1.0"
+                # The firmware ticket URL never lands in the plaintext task
+                # evidence (file-layer invariant): the ImageURI command field
+                # is redacted, the ticket is referenced by id only.
+                update_evidence = update_row.evidence or {}
+                execution = update_evidence.get("execution") or {}
+                assert isinstance(execution.get("ticket_id"), str)
+                serialized = json.dumps(update_evidence, ensure_ascii=False)
+                assert "device-file-access" not in serialized
                 snapshot = rig.sim_control(sim_url)
                 assert snapshot["versions"]["BMC"] == "SIM-BMC-1.1.0"
                 with rig.factory() as session:
