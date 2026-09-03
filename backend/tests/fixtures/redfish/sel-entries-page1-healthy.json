@@ -1,0 +1,51 @@
+{
+  "Members@odata.count": 4,
+  "Members": [
+    {
+      "Id": "SEL000001",
+      "Name": "SEL Entry 1",
+      "EntryType": "SEL",
+      "Severity": "Critical",
+      "Created": "2026-09-01T00:00:00+00:00",
+      "Message": "Simulated uncorrectable memory error detected",
+      "SensorType": "Memory",
+      "@odata.id": "/redfish/v1/Managers/1/LogServices/SEL/Entries/1",
+      "@odata.type": "#LogEntry.v1_8_0.LogEntry"
+    },
+    {
+      "Id": "SEL000002",
+      "Name": "SEL Entry 2",
+      "EntryType": "SEL",
+      "Severity": "Warning",
+      "Created": "2026-09-01T00:13:00+00:00",
+      "Message": "Simulated fan below lower critical threshold",
+      "SensorType": "Other",
+      "@odata.id": "/redfish/v1/Managers/1/LogServices/SEL/Entries/2",
+      "@odata.type": "#LogEntry.v1_8_0.LogEntry"
+    },
+    {
+      "Id": "SEL000003",
+      "Name": "SEL Entry 3",
+      "EntryType": "SEL",
+      "Severity": "OK",
+      "Created": "2026-09-01T00:26:00+00:00",
+      "Message": "Simulated system boot completed",
+      "SensorType": "Other",
+      "@odata.id": "/redfish/v1/Managers/1/LogServices/SEL/Entries/3",
+      "@odata.type": "#LogEntry.v1_8_0.LogEntry"
+    },
+    {
+      "Id": "SEL000004",
+      "Name": "SEL Entry 4",
+      "EntryType": "SEL",
+      "Severity": "OK",
+      "Created": "2026-09-01T00:39:00+00:00",
+      "Message": "Simulated user login succeeded",
+      "SensorType": "Other",
+      "@odata.id": "/redfish/v1/Managers/1/LogServices/SEL/Entries/4",
+      "@odata.type": "#LogEntry.v1_8_0.LogEntry"
+    }
+  ],
+  "@odata.id": "/redfish/v1/Managers/1/LogServices/SEL/Entries",
+  "@odata.type": "#LogEntryCollection.LogEntryCollection"
+}
