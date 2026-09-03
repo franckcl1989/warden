@@ -241,7 +241,7 @@
 
 - 状态：`accepted`
 - 日期：2026-09-03
-- 决策：DSM 客户端错误映射以 Synology 官方 DSM Login Web API Guide 为准：`106` = 会话超时（sid 失效）→ 有界重登一次后仍失败则 `authentication_failed`；`105` = 权限不足 → `permission_denied_by_device`；`401/406` = 认证失败 → `authentication_failed`；登录返回 `(Auth,403)` 表示 OTP 需求 → `not_configured missing=otp`（自动化账号应使用专用非 2FA 账号，SECURITY §5）。映射表的每一行都带 `[guide]`/`[sim]` 依据标注；登录类 4xx 的精确真机行为仍属 simulator-DSL，待 M4 目标型号（DS224+/DS225+）真机认证按 ADR-018 修正。
+- 决策：DSM 客户端错误映射以 Synology 官方 DSM Login Web API Guide 为准：`106` = 会话超时（sid 失效）→ 有界重登一次后仍失败则 `authentication_failed`；`105` = 权限不足 → `permission_denied_by_device`；`401/406` = 认证失败 → `authentication_failed`；登录返回 `(Auth,403)` 表示 OTP 需求 → `not_configured missing=otp`（自动化账号应使用专用非 2FA 账号，SECURITY §5）。映射表的每一行都带 `[guide]`/`[sim]` 依据标注；登录类 4xx 的精确真机行为仍属 simulator-DSL，待 M4 目标型号（DS224+/DS225+）真机认证按私有厂商接口精确版本证据决策（编号 018）修正。
 - 原因：任务简报中"105/106 → permission"的压缩表述与官方指南（106 为会话超时）及简报自身的测试要求（会话超时→重登一次→authentication_failed）矛盾；实现与测试按指南执行，需要正式决策记录。
 - 结果：客户端、模拟器与映射测试统一按本决策执行；未知错误码保留为 `protocol_error` 并在 detail 携带原码，不做猜测映射。
 
