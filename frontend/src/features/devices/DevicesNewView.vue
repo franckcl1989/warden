@@ -31,6 +31,17 @@ const router = useRouter();
 
 const ADAPTER_KEY = 'fake.simple';
 const DEV_ADAPTER_TYPES = new Set(['server']);
+// 服务器可用的适配器（M3T5）：开发用 fake.simple + 五个厂商管理卡 overlay。
+// 厂商适配器的标签统一标注“真机认证待完成”——能力状态与认证矩阵是正式支持
+// 依据，标签不得声称真机支持（HARDWARE_CERTIFICATION.md）。
+const SERVER_ADAPTER_KEYS = [
+  ADAPTER_KEY,
+  'server.dell_idrac',
+  'server.inspur_ibmc',
+  'server.xfusion_ibmc',
+  'server.lenovo_xcc',
+  'server.huawei_ibmc',
+];
 
 const step = ref(0);
 const deviceType = ref<string | null>(null);
@@ -182,9 +193,18 @@ async function saveDevice(): Promise<void> {
               :disabled="!currentTypeSupported"
               data-testid="adapter-key"
             >
-              <el-option :value="ADAPTER_KEY" :label="ADAPTER_LABELS[ADAPTER_KEY]" />
+              <el-option
+                v-for="key in deviceType === 'server' ? SERVER_ADAPTER_KEYS : [ADAPTER_KEY]"
+                :key="key"
+                :value="key"
+                :label="ADAPTER_LABELS[key] ?? key"
+              />
             </el-select>
           </el-form-item>
+          <p v-if="deviceType === 'server'" class="devices-new__notice">
+            厂商适配器为注册驱动（服务器管理卡 Redfish）；真机支持需完成逐能力认证，
+            标签仅代表驱动可用，不代表真机已认证
+          </p>
           <p v-if="deviceType !== null && !currentTypeSupported" class="devices-new__notice">
             该类别暂无可用适配器，真实适配器随 M3/M4/M5 真机交付加入
           </p>

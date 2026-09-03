@@ -57,9 +57,19 @@ export const PROBE_STAGE_LABELS: Record<string, string> = {
   capabilities: '能力发现',
 };
 
-/** 适配器展示名；fake.simple 明确标注开发用，绝不冒充真实硬件支持。 */
+/**
+ * 适配器展示名；fake.simple 明确标注开发用，绝不冒充真实硬件支持。
+ * 五个厂商管理卡适配器（server.*，M3T5）统一标注“真机认证待完成”：
+ * 平台能力状态与认证矩阵（hardware-targets.json / HARDWARE_CERTIFICATION.md）
+ * 才是正式支持依据，界面文案不得声称已通过真机认证。
+ */
 export const ADAPTER_LABELS: Record<string, string> = {
   'fake.simple': '测试适配器（开发用）',
+  'server.dell_idrac': 'Dell iDRAC（真机认证待完成）',
+  'server.inspur_ibmc': 'Inspur iBMC（真机认证待完成）',
+  'server.xfusion_ibmc': 'xFusion iBMC（真机认证待完成）',
+  'server.lenovo_xcc': 'Lenovo XCC（真机认证待完成）',
+  'server.huawei_ibmc': 'Huawei iBMC（真机认证待完成）',
 };
 
 /** 事件严重级别（GLOSSARY/contracts：unknown/info/warning/critical）。 */

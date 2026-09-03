@@ -134,6 +134,58 @@ describe('添加设备向导（PLT-02）', () => {
     expect(wrapper.get('[data-testid="next-step"]').attributes('disabled')).toBeDefined();
   });
 
+  it('服务器类别提供五个厂商管理卡适配器（真机认证待完成标签）', async () => {
+    const { wrapper } = await mountWizard();
+    await wrapper
+      .get('[data-testid="device-type"]')
+      .findComponent({ name: 'ElSelect' })
+      .vm.$emit('update:modelValue', 'server');
+    await wrapper.vm.$nextTick();
+    // 打开适配器下拉：选项渲染在 teleport 的下拉面板中。
+    await wrapper.get('[data-testid="adapter-key"] .el-select__wrapper').trigger('click');
+    await flushAll();
+    const bodyText = document.body.textContent ?? '';
+    for (const label of [
+      '测试适配器（开发用）',
+      'Dell iDRAC（真机认证待完成）',
+      'Inspur iBMC（真机认证待完成）',
+      'xFusion iBMC（真机认证待完成）',
+      'Lenovo XCC（真机认证待完成）',
+      'Huawei iBMC（真机认证待完成）',
+    ]) {
+      expect(bodyText).toContain(label);
+    }
+    expect(bodyText).not.toContain('已认证');
+  });
+
+  it('选择厂商适配器后探测请求携带对应 adapter_key', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(allOkProbe()));
+    vi.stubGlobal('fetch', fetchMock);
+    const { wrapper } = await mountWizard();
+    await wrapper
+      .get('[data-testid="device-type"]')
+      .findComponent({ name: 'ElSelect' })
+      .vm.$emit('update:modelValue', 'server');
+    await wrapper
+      .get('[data-testid="adapter-key"]')
+      .findComponent({ name: 'ElSelect' })
+      .vm.$emit('update:modelValue', 'server.dell_idrac');
+    await wrapper.vm.$nextTick();
+    await wrapper.get('[data-testid="next-step"]').trigger('click');
+    await wrapper.get('input[data-testid="device-name"]').setValue('server-01');
+    await wrapper.get('input[data-testid="management-endpoint"]').setValue('10.0.0.5');
+    await wrapper.get('[data-testid="next-step"]').trigger('click');
+    await wrapper.get('input[data-testid="credential-username"]').setValue('admin');
+    await wrapper.get('input[data-testid="credential-password"]').setValue('secret-123');
+    await wrapper.get('[data-testid="next-step"]').trigger('click');
+    await wrapper.get('[data-testid="run-probe"]').trigger('click');
+    await flushAll();
+    const probeCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    expect(probeCall).toBeDefined();
+    const body = JSON.parse(String(probeCall?.[1]?.body)) as Record<string, unknown>;
+    expect(body['adapter_key']).toBe('server.dell_idrac');
+  });
+
   it('连接测试全部通过时展示五阶段通过', async () => {
     const fetchMock = vi.fn(async () => jsonResponse(allOkProbe()));
     vi.stubGlobal('fetch', fetchMock);

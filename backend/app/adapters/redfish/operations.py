@@ -106,7 +106,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import wraps
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from app.domain.adapter import (
     AdapterError,
@@ -155,6 +155,40 @@ BUNDLE_MESSAGE_MAX_CHARS = 2000
 _TICKET_URL_FIELDS = frozenset({"Image", "ImageURI"})
 _TICKET_REDACTION_PLACEHOLDER = "<platform-device-pull-ticket-url-redacted>"
 _IDENTITY_FIELDS = ("manager_uuid", "system_serial")
+
+
+@runtime_checkable
+class _OperationHooks(Protocol):
+    """The M3T5 vendor-overlay hook surface operation paths consult.
+
+    Provided by ``RedfishCommonAdapter`` (and its vendor subclasses) with
+    defaults equal to the common behavior; operations module functions accept
+    the adapter instance through the mixin (``hooks=self``) so overlay code
+    never lands in this module (DEVICE_ADAPTERS.md §4: vendor code only in
+    overlay modules). ``None`` keeps the module-level common rules.
+    """
+
+    def _reset_type_for_cycle(self, allowable: frozenset[str] | None) -> tuple[str, str]: ...
+    def _manager_reset_type(self, allowable: frozenset[str] | None) -> tuple[str, str]: ...
+    def _kvm_descriptor(
+        self, client: RedfishClient, session: DeviceSession, capability: str
+    ) -> LaunchDescriptor | None: ...
+    def _support_bundle_collect(
+        self, client: RedfishClient, plan: OperationPlan, progress: OperationProgress
+    ) -> OperationResult | None: ...
+    def _firmware_update_path(
+        self, client: RedfishClient, plan: OperationPlan, progress: OperationProgress
+    ) -> OperationResult | None: ...
+
+
+def _as_hooks(adapter: object) -> _OperationHooks | None:
+    """The adapter's M3T5 hook surface when it provides one.
+
+    Every registered Redfish adapter inherits ``RedfishCommonAdapter`` (the
+    hook defaults), so the runtime check is structural, not a lie — a
+    standalone caller without the hooks keeps the module-level common rules.
+    """
+    return adapter if isinstance(adapter, _OperationHooks) else None
 
 
 # -- runtime-context contract (worker fills; adapter consumes) ---------------
@@ -450,8 +484,13 @@ def _console_origin_url(session: DeviceSession) -> str:
 
 
 @_adapter_boundary("launch")
-def create_launch_method(session: DeviceSession, capability: str) -> LaunchDescriptor:
-    """console.kvm.open launch descriptor for the generic Redfish surface.
+def create_launch_method(
+    session: DeviceSession,
+    capability: str,
+    *,
+    hooks: _OperationHooks | None = None,
+) -> LaunchDescriptor:
+    """console.kvm.open launch descriptor for the Redfish surface.
 
     The generic adapter can only launch what the standard surface proves: a
     Manager GraphicalConsole advertisement with ServiceEnabled + KVM among
@@ -460,8 +499,10 @@ def create_launch_method(session: DeviceSession, capability: str) -> LaunchDescr
     console plugin/HTML5 KVM. No advertisement -> ``not_configured``
     (reason ``no_graphical_console``), never a fabricated or generic
     homepage-only success (contracts/operations.json
-    verification.launch_target_validation). Vendor HTML5 session-creation
-    APIs (Dell/iDRAC etc.) are M3T5 overlay territory.
+    verification.launch_target_validation). A vendor overlay's certified
+    HTML5 session-creation API is consulted first (``_kvm_descriptor``);
+    None keeps this common descriptor. Vendor HTML5 session-creation
+    endpoints stay experimental until a documented vendor API is certified.
     """
     if capability != "console.kvm.open":
         raise AdapterError(
@@ -470,6 +511,10 @@ def create_launch_method(session: DeviceSession, capability: str) -> LaunchDescr
             stage="launch",
         )
     with _open_session(session) as client:
+        if hooks is not None:
+            vendor_descriptor = hooks._kvm_descriptor(client, session, capability)
+            if vendor_descriptor is not None:
+                return vendor_descriptor
         console = _graphical_console_target(_manager(client))
         if console is None:
             raise AdapterError(
@@ -496,7 +541,11 @@ def plan_operation_method(snapshot: DeviceSnapshot, request: OperationRequest) -
 # -- preflight ---------------------------------------------------------------
 
 
-def _power_preflight(system: RedfishResource, plan: OperationPlan) -> PreflightResult:
+def _power_preflight(
+    system: RedfishResource,
+    plan: OperationPlan,
+    hooks: _OperationHooks | None = None,
+) -> PreflightResult:
     action = _reset_action(system, "#ComputerSystem.Reset")
     if action is None:
         return PreflightResult(
@@ -549,22 +598,34 @@ def _power_preflight(system: RedfishResource, plan: OperationPlan) -> PreflightR
             error_code="validation_failed",
             detail=f"系统电源状态为 {power_state}，重启前置要求为开机（状态漂移）",
         )
-    if allowable is not None and not allowable.intersection({"ForceRestart", "PowerCycle"}):
-        return PreflightResult(
-            ok=False,
-            error_code="unsupported_capability",
-            detail="设备未通告 ForceRestart 或 PowerCycle 重启类型",
-        )
+    try:
+        # The certified mapping (common rule or the vendor overlay's pin)
+        # decides whether the plan may reach the device: a mapping the device
+        # does not advertise is refused here — never a silent substitution
+        # (contracts/operations.json precondition: "ForceRestart or PowerCycle
+        # is explicitly advertised and mapped in the certified overlay").
+        resolver = hooks._reset_type_for_cycle if hooks is not None else _common_cycle_mapping
+        resolver(allowable)
+    except AdapterError as exc:
+        return PreflightResult(ok=False, error_code=exc.code, detail=exc.message)
     return PreflightResult(ok=True)
 
 
 @_adapter_boundary("preflight")
-def preflight_operation_method(session: DeviceSession, plan: OperationPlan) -> PreflightResult:
-    """Real-time read-only preflight per profile preconditions (no side effects)."""
+def preflight_operation_method(
+    session: DeviceSession,
+    plan: OperationPlan,
+    *,
+    hooks: _OperationHooks | None = None,
+) -> PreflightResult:
+    """Real-time read-only preflight per profile preconditions (no side effects).
+
+    ``hooks`` carries the M3T5 vendor overlay's certified-mapping resolvers
+    (None -> the common adapter rules, unchanged)."""
     key = plan.capability_key
     if key in ("power.on", "power.off", "power.cycle"):
         with _open_session(session) as client:
-            return _power_preflight(_system(client), plan)
+            return _power_preflight(_system(client), plan, hooks=hooks)
     if key == "manager.reset":
         with _open_session(session) as client:
             manager = _manager(client)
@@ -576,12 +637,11 @@ def preflight_operation_method(session: DeviceSession, plan: OperationPlan) -> P
                     detail="管理卡未提供 Manager Reset 动作",
                 )
             allowable = _allowable_values(action)
-            if allowable is not None and "GracefulRestart" not in allowable:
-                return PreflightResult(
-                    ok=False,
-                    error_code="unsupported_capability",
-                    detail="管理卡未通告 GracefulRestart（冷复位类型由厂商 overlay 定义）",
-                )
+            try:
+                resolver = hooks._manager_reset_type if hooks is not None else _common_manager_mapping
+                resolver(allowable)
+            except AdapterError as exc:
+                return PreflightResult(ok=False, error_code=exc.code, detail=exc.message)
             return PreflightResult(ok=True)
     if key == "logs.support_bundle.collect":
         with _open_session(session) as client:
@@ -687,12 +747,18 @@ def preflight_operation_method(session: DeviceSession, plan: OperationPlan) -> P
 # -- execute ----------------------------------------------------------------
 
 
-def _reset_type_for(system: RedfishResource, plan: OperationPlan) -> tuple[str, str]:
+def _reset_type_for(
+    system: RedfishResource,
+    plan: OperationPlan,
+    hooks: _OperationHooks | None = None,
+) -> tuple[str, str]:
     """(reset_type, mapping note) for a power plan.
 
     power.on -> On; power.off -> GracefulShutdown (NEVER ForceOff); power.cycle
-    -> ForceRestart when advertised else PowerCycle (common mapping rule; the
-    certified per-model overlay lands in M3T5).
+    -> the certified mapping: the vendor overlay's ``_reset_type_for_cycle``
+    when this adapter carries hooks, else the common rule (ForceRestart when
+    advertised else PowerCycle — documented generic mapping; the certified
+    per-model overlay pins arrive with the vendor registrations, M3T5).
     """
     action = _reset_action(system, "#ComputerSystem.Reset")
     allowable = _allowable_values(action)
@@ -701,9 +767,35 @@ def _reset_type_for(system: RedfishResource, plan: OperationPlan) -> tuple[str, 
         return "On", "On（开机）"
     if key == "power.off":
         return "GracefulShutdown", "GracefulShutdown（优雅关机，禁止 ForceOff 回退）"
+    resolver = hooks._reset_type_for_cycle if hooks is not None else _common_cycle_mapping
+    return resolver(allowable)
+
+
+def _common_cycle_mapping(allowable: frozenset[str] | None) -> tuple[str, str]:
+    """Common power.cycle mapping rule (byte-compatible with the pre-M3T5
+    ``_reset_type_for`` cycle branch): ForceRestart when the device
+    advertises it, else PowerCycle; neither advertised is refused."""
+    if allowable is not None and not allowable.intersection({"ForceRestart", "PowerCycle"}):
+        raise AdapterError(
+            "unsupported_capability",
+            "设备未通告 ForceRestart 或 PowerCycle 重启类型",
+            stage="execute",
+        )
     if allowable is not None and "ForceRestart" in allowable:
         return "ForceRestart", "ForceRestart（设备通告，通用映射规则）"
     return "PowerCycle", "PowerCycle（设备未通告 ForceRestart，通用映射规则）"
+
+
+def _common_manager_mapping(allowable: frozenset[str] | None) -> tuple[str, str]:
+    """Common manager.reset mapping rule (unchanged semantics): GracefulRestart
+    when advertised; a manager that does not advertise it is refused."""
+    if allowable is not None and "GracefulRestart" not in allowable:
+        raise AdapterError(
+            "unsupported_capability",
+            "管理卡未通告 GracefulRestart（冷复位类型由厂商 overlay 定义）",
+            stage="execute",
+        )
+    return "GracefulRestart", "GracefulRestart（管理卡冷复位，通用映射规则）"
 
 
 def _post_action(
@@ -735,6 +827,7 @@ def _power_execute(
     session: DeviceSession,
     plan: OperationPlan,
     progress: OperationProgress,
+    hooks: _OperationHooks | None = None,
 ) -> OperationResult:
     with _open_session(session) as client:
         system = _system(client)
@@ -744,7 +837,7 @@ def _power_execute(
             raise AdapterError(
                 "unsupported_capability", "服务器未提供 ComputerSystem Reset 动作", stage="execute"
             )
-        reset_type, mapping_note = _reset_type_for(system, plan)
+        reset_type, mapping_note = _reset_type_for(system, plan, hooks=hooks)
         progress(20, f"执行电源动作（{mapping_note}）")
         result = _post_action(
             client,
@@ -770,6 +863,7 @@ def _manager_reset_execute(
     session: DeviceSession,
     plan: OperationPlan,
     progress: OperationProgress,
+    hooks: _OperationHooks | None = None,
 ) -> OperationResult:
     with _open_session(session) as client:
         manager = _manager(client)
@@ -779,27 +873,23 @@ def _manager_reset_execute(
             raise AdapterError(
                 "unsupported_capability", "管理卡未提供 Manager Reset 动作", stage="execute"
             )
-        allowable = _allowable_values(action)
-        if allowable is not None and "GracefulRestart" not in allowable:
-            raise AdapterError(
-                "unsupported_capability",
-                "管理卡未通告 GracefulRestart（冷复位类型由厂商 overlay 定义）",
-                stage="execute",
-            )
+        resolver = hooks._manager_reset_type if hooks is not None else _common_manager_mapping
+        reset_type, mapping_note = resolver(_allowable_values(action))
         # Identity BEFORE the reset (read over the pre-reset session) — the
         # verification compares it over a fresh post-reset session.
         identity = _system_identity(client)
-        progress(20, "执行管理卡复位（GracefulRestart）")
+        progress(20, f"执行管理卡复位（{reset_type}）")
         result = _post_action(
             client,
             plan,
             progress,
             action_target=action_target,
-            body={"ResetType": "GracefulRestart"},
+            body={"ResetType": reset_type},
             stage="execute",
         )
         evidence = dict(result.evidence)
-        evidence["reset_type"] = "GracefulRestart"
+        evidence["reset_type"] = reset_type
+        evidence["mapping"] = mapping_note
         evidence["identity_before"] = identity
         return OperationResult(
             ok=result.ok,
@@ -956,9 +1046,17 @@ def _support_bundle_execute(
     session: DeviceSession,
     plan: OperationPlan,
     progress: OperationProgress,
+    hooks: _OperationHooks | None = None,
 ) -> OperationResult:
     with _open_session(session) as client:
         progress(10, "导出 SEL/系统日志")
+        if hooks is not None:
+            # M3T5 vendor TSR/support-dump override: a certified vendor OEM
+            # path (documented job) returns its own OperationResult here; None
+            # keeps the common bounded SEL + LogService export below.
+            vendor_result = hooks._support_bundle_collect(client, plan, progress)
+            if vendor_result is not None:
+                return vendor_result
         services = _log_services(client)
         sel_service = next((s for s in services if _text_of(s, "LogEntryType") == "SEL"), None)
         export_sources: list[dict[str, object]] = []
@@ -1259,6 +1357,7 @@ def _firmware_update_execute(
     session: DeviceSession,
     plan: OperationPlan,
     progress: OperationProgress,
+    hooks: _OperationHooks | None = None,
 ) -> OperationResult:
     ticket_url = _ctx_text(plan, "ticket")
     if ticket_url is None:
@@ -1273,6 +1372,13 @@ def _firmware_update_execute(
         update = _update_service(client)
         if update is None:
             raise AdapterError("unsupported_capability", "未提供 UpdateService", stage="execute")
+        if hooks is not None:
+            # M3T5 vendor OEM update-job override: a certified vendor path
+            # returns its own OperationResult; None keeps the common
+            # UpdateService.SimpleUpdate flow below.
+            vendor_result = hooks._firmware_update_path(client, plan, progress)
+            if vendor_result is not None:
+                return vendor_result
         action = _reset_action(update, "#UpdateService.SimpleUpdate")
         if action is None and _link_of(update, "HttpPushUri") is None:
             raise AdapterError(
@@ -1412,15 +1518,20 @@ def execute_operation_method(
     session: DeviceSession,
     plan: OperationPlan,
     progress: OperationProgress,
+    *,
+    hooks: _OperationHooks | None = None,
 ) -> OperationResult:
-    """Execute a device-side operation (called only AFTER the dispatch fence)."""
+    """Execute a device-side operation (called only AFTER the dispatch fence).
+
+    ``hooks`` carries the M3T5 vendor overlay's certified operation-path
+    overrides (None -> the common adapter paths, unchanged)."""
     key = plan.capability_key
     if key in ("power.on", "power.off", "power.cycle"):
-        return _power_execute(session, plan, progress)
+        return _power_execute(session, plan, progress, hooks=hooks)
     if key == "manager.reset":
-        return _manager_reset_execute(session, plan, progress)
+        return _manager_reset_execute(session, plan, progress, hooks=hooks)
     if key == "logs.support_bundle.collect":
-        return _support_bundle_execute(session, plan, progress)
+        return _support_bundle_execute(session, plan, progress, hooks=hooks)
     if key == "virtual_media.mount":
         return _virtual_media_mount_execute(session, plan, progress)
     if key == "virtual_media.unmount":
@@ -1428,7 +1539,7 @@ def execute_operation_method(
     if key == "firmware.query":
         return _firmware_query_execute(session, plan, progress)
     if key == "firmware.update":
-        return _firmware_update_execute(session, plan, progress)
+        return _firmware_update_execute(session, plan, progress, hooks=hooks)
     if key == "asset.refresh":
         return _asset_refresh_execute(session, plan, progress)
     raise AdapterError(
@@ -2236,7 +2347,7 @@ class RedfishOperationsMixin:
         return plan_operation_method(snapshot, request)
 
     def preflight_operation(self, session: DeviceSession, plan: OperationPlan) -> PreflightResult:
-        return preflight_operation_method(session, plan)
+        return preflight_operation_method(session, plan, hooks=_as_hooks(self))
 
     def execute_operation(
         self,
@@ -2244,7 +2355,7 @@ class RedfishOperationsMixin:
         plan: OperationPlan,
         progress: OperationProgress,
     ) -> OperationResult:
-        return execute_operation_method(session, plan, progress)
+        return execute_operation_method(session, plan, progress, hooks=_as_hooks(self))
 
     def verify_operation(
         self,
@@ -2255,4 +2366,4 @@ class RedfishOperationsMixin:
         return verify_operation_method(session, plan, result)
 
     def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor:
-        return create_launch_method(session, capability)
+        return create_launch_method(session, capability, hooks=_as_hooks(self))

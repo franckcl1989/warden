@@ -2,10 +2,11 @@
 
 M1T3 registers the fake CI adapter; M3T2 adds the common Redfish base
 (``server.redfish``, a real registered adapter for server-type devices —
-dev/testing flows against the Redfish simulator; NOT a certification target).
-The vendor adapters (server.dell_idrac, nas.synology_dsm,
-switch.huawei_vrp_*) land with M3/M3T5 as subclasses/overlays. The device API
-rejects any adapter_key not present here (422 validation_failed
+dev/testing flows against the Redfish simulator; NOT a certification target);
+M3T5 registers the five certification-target vendor overlays
+(server.dell_idrac, server.inspur_ibmc, server.xfusion_ibmc,
+server.lenovo_xcc, server.huawei_ibmc) subclassing the common base. The
+device API rejects any adapter_key not present here (422 validation_failed
 field=adapter_key) — unknown drivers are never accepted for onboarding.
 """
 
@@ -13,6 +14,11 @@ from __future__ import annotations
 
 from app.adapters.fake import FakeSimpleAdapter
 from app.adapters.redfish.common import RedfishCommonAdapter
+from app.adapters.redfish.dell import DellIdracAdapter
+from app.adapters.redfish.huawei import HuaweiIbmcAdapter
+from app.adapters.redfish.inspur import InspurIbmcAdapter
+from app.adapters.redfish.lenovo import LenovoXccAdapter
+from app.adapters.redfish.xfusion import XfusionIbmcAdapter
 from app.domain.adapter import DeviceAdapter
 
 
@@ -54,3 +60,8 @@ def adapter_for_device_type(device_type: str) -> DeviceAdapter:
 
 register(FakeSimpleAdapter())
 register(RedfishCommonAdapter())
+register(DellIdracAdapter())
+register(InspurIbmcAdapter())
+register(XfusionIbmcAdapter())
+register(LenovoXccAdapter())
+register(HuaweiIbmcAdapter())

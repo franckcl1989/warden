@@ -1,0 +1,57 @@
+{
+  "Id": "1",
+  "Name": "Warden Simulated Server",
+  "SystemType": "Physical",
+  "Manufacturer": "Inspur",
+  "Model": "NF5280M6",
+  "SerialNumber": "WARDEN-SIM-0001",
+  "SKU": "SIM-1U",
+  "BiosVersion": "SIM-BIOS-2.0",
+  "PowerState": "On",
+  "Status": {
+    "State": "Enabled",
+    "Health": "OK"
+  },
+  "ProcessorSummary": {
+    "Count": 2,
+    "Model": "Simulated Xeon 8C",
+    "Status": {
+      "State": "Enabled",
+      "Health": "OK"
+    }
+  },
+  "MemorySummary": {
+    "TotalSystemMemoryGiB": 128,
+    "Status": {
+      "State": "Enabled",
+      "Health": "OK"
+    }
+  },
+  "Boot": {
+    "BootSourceOverrideTarget": "None",
+    "BootSourceOverrideEnabled": "Disabled"
+  },
+  "Actions": {
+    "#ComputerSystem.Reset": {
+      "target": "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset",
+      "ResetType@Redfish.AllowableValues": [
+        "On",
+        "ForceOff",
+        "GracefulShutdown",
+        "GracefulRestart",
+        "ForceRestart",
+        "PowerCycle",
+        "Nmi",
+        "PushPowerButton"
+      ]
+    }
+  },
+  "Memory": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory"
+  },
+  "Storage": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage"
+  },
+  "@odata.id": "/redfish/v1/Systems/1",
+  "@odata.type": "#ComputerSystem.v1_16_0.ComputerSystem"
+}

@@ -144,8 +144,20 @@ def test_registry_lookup_and_type_lookup() -> None:
     assert "server" in get_adapter("server.redfish").supported_device_types
     with pytest.raises(UnknownAdapterError):
         adapter_for_device_type("server")
+    # M3T5: the five certification-target vendor overlays are registered too.
+    for key in (
+        "server.dell_idrac",
+        "server.inspur_ibmc",
+        "server.xfusion_ibmc",
+        "server.lenovo_xcc",
+        "server.huawei_ibmc",
+    ):
+        adapter = get_adapter(key)
+        assert adapter.adapter_key == key
+        assert "server" in adapter.supported_device_types
+    # Adapters that are not registered yet stay unknown (e.g. NAS/switch keys).
     with pytest.raises(UnknownAdapterError):
-        get_adapter("server.dell_idrac")
+        get_adapter("nas.synology_dsm")
     with pytest.raises(UnknownAdapterError):
         adapter_for_device_type("synology_nas")
 

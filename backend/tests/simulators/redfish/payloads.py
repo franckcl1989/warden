@@ -4,8 +4,11 @@ This is a TEST DEVICE SIMULATOR used only for repeatable automated tests. It
 is NOT evidence of hardware support: fixtures captured from it must state
 their 模拟器 origin, and the hardware certification matrix stays
 ``not_started`` until real-device runs exist (HARDWARE_CERTIFICATION.md §3,
-TEST_STRATEGY.md §2.2). Vendor OEM blocks are intentionally generic stubs;
-vendor overlays (M3T5) define real shapes per vendor certification fixtures.
+TEST_STRATEGY.md §2.2). Vendor OEM blocks are intentionally generic stubs
+under vendor-flavored namespaces; the M3T5 vendor overlays parse the
+FIXTURE-verified generic members (ECCErrorCount/SMARTStatus/PredictiveFailure/
+RAIDStatus) and mark every real per-vendor OEM member name experimental until
+a sanitized 真机 fixture exists (overlay module ledgers).
 """
 
 from __future__ import annotations
@@ -27,6 +30,31 @@ _VENDOR_TITLES = {
     "xfusion": "XFusion",
     "lenovo": "Lenovo",
     "huawei": "Huawei",
+}
+
+# Simulator-authored, vendor-flavored self-identity per vendor profile
+# (Manufacturer, Model). The values are NOT real-device evidence — they make
+# the vendor probe identity gates and discovery/asset surfaces exercisable;
+# the real per-device strings are recorded at certification time
+# (hardware-targets.json exact_model_must_be_recorded). The fixture README
+# states the 模拟器 origin of every snapshot.
+_VENDOR_IDENTITY: dict[str, tuple[str, str]] = {
+    "generic": ("Warden Simulator", "Warden SimServer 1U (simulated)"),
+    "dell": ("Dell Inc.", "PowerEdge R760"),
+    "inspur": ("Inspur", "NF5280M6"),
+    "xfusion": ("XFusion", "5288 V6"),
+    "lenovo": ("Lenovo", "ThinkSystem SR650 V3"),
+    "huawei": ("Huawei", "FusionServer 2288H V5"),
+}
+
+# Vendor-flavored Manager Model self-report (public product names, simulator-
+# authored values — never real-device evidence).
+_MANAGER_MODEL: dict[str, str] = {
+    "dell": "iDRAC9",
+    "inspur": "iBMC",
+    "xfusion": "iBMC",
+    "lenovo": "XCC",
+    "huawei": "iBMC",
 }
 
 SEL_EPOCH = datetime(2026, 9, 1, 0, 0, 0, tzinfo=UTC)
@@ -65,6 +93,11 @@ class SimulatorConfig:
     # - no_graphical_console (M3T4): the Manager resource has no
     #   GraphicalConsole block (console.kvm.open must fail honestly as
     #   not_configured at launch time; discovery reports it unsupported).
+    # - reset_types_override: replaces the ComputerSystem Reset
+    #   AllowableValues (and the accepted set) with the given standard
+    #   ResetType list — lets vendor tests prove mapping refusal when the
+    #   certified type is not advertised. Empty/None = the full default list.
+    reset_types_override: tuple[str, ...] | None = None
     missing_memory_metrics: bool = False
     no_raid_volume: bool = False
     empty_sel: bool = False
@@ -129,6 +162,24 @@ class SimulatorConfig:
             raise ValueError(f"unknown vendor {self.vendor!r}")
         if self.pagination not in ("skip", "next_link"):
             raise ValueError(f"unknown pagination {self.pagination!r}")
+        if self.reset_types_override is not None and not set(self.reset_types_override) <= _SYSTEM_RESET_TYPES:
+            raise ValueError(f"unknown ResetType in reset_types_override: {self.reset_types_override!r}")
+
+
+# Full standard ComputerSystem.Reset AllowableValues the simulator serves by
+# default (the no_graceful_shutdown knob strips GracefulShutdown).
+_SYSTEM_RESET_TYPES = frozenset(
+    {
+        "On",
+        "ForceOff",
+        "GracefulShutdown",
+        "GracefulRestart",
+        "ForceRestart",
+        "PowerCycle",
+        "Nmi",
+        "PushPowerButton",
+    }
+)
 
 
 class _View:
@@ -222,12 +273,30 @@ def systems_collection() -> dict[str, Any]:
 
 
 def system(view: _View, *, power_state: str = "On", bios_version: str = "SIM-BIOS-2.0") -> dict[str, Any]:
+    manufacturer, model = _VENDOR_IDENTITY[view.vendor]
+    if view.cfg.reset_types_override is not None:
+        allowable_reset_types = list(view.cfg.reset_types_override)
+    elif view.cfg.no_graceful_shutdown:
+        allowable_reset_types = [
+            "On", "ForceOff", "GracefulRestart", "ForceRestart", "PowerCycle", "Nmi", "PushPowerButton",
+        ]
+    else:
+        allowable_reset_types = [
+            "On",
+            "ForceOff",
+            "GracefulShutdown",
+            "GracefulRestart",
+            "ForceRestart",
+            "PowerCycle",
+            "Nmi",
+            "PushPowerButton",
+        ]
     payload: dict[str, Any] = {
         "Id": "1",
         "Name": "Warden Simulated Server",
         "SystemType": "Physical",
-        "Manufacturer": "Warden Simulator",
-        "Model": "Warden SimServer 1U (simulated)",
+        "Manufacturer": manufacturer,
+        "Model": model,
         "SerialNumber": "WARDEN-SIM-0001",
         "SKU": "SIM-1U",
         "BiosVersion": bios_version,
@@ -246,28 +315,7 @@ def system(view: _View, *, power_state: str = "On", bios_version: str = "SIM-BIO
         "Actions": {
             "#ComputerSystem.Reset": {
                 "target": f"{BASE}/Systems/1/Actions/ComputerSystem.Reset",
-                "ResetType@Redfish.AllowableValues": (
-                    [
-                        "On",
-                        "ForceOff",
-                        "GracefulRestart",
-                        "ForceRestart",
-                        "PowerCycle",
-                        "Nmi",
-                        "PushPowerButton",
-                    ]
-                    if view.cfg.no_graceful_shutdown
-                    else [
-                        "On",
-                        "ForceOff",
-                        "GracefulShutdown",
-                        "GracefulRestart",
-                        "ForceRestart",
-                        "PowerCycle",
-                        "Nmi",
-                        "PushPowerButton",
-                    ]
-                ),
+                "ResetType@Redfish.AllowableValues": allowable_reset_types,
             }
         },
         "Memory": {"@odata.id": f"{BASE}/Systems/1/Memory"},
@@ -463,12 +511,13 @@ def chassis_collection() -> dict[str, Any]:
 
 def chassis(view: _View) -> dict[str, Any]:
     intrusion = "HardwareIntrusionDetected" if view.profile == "critical" else "Normal"
+    manufacturer, model = _VENDOR_IDENTITY[view.vendor]
     payload: dict[str, Any] = {
         "Id": "1",
         "Name": "Warden Simulated Chassis",
         "ChassisType": "RackMount",
-        "Manufacturer": "Warden Simulator",
-        "Model": "SIM-1U-CHASSIS",
+        "Manufacturer": manufacturer,
+        "Model": model if view.vendor != "generic" else "SIM-1U-CHASSIS",
         "SerialNumber": "WARDEN-SIM-CH-1",
         "PartNumber": "SIM-CH-1U-A",
         "PowerState": "On",
@@ -607,12 +656,14 @@ def managers_collection() -> dict[str, Any]:
 def manager(
     view: _View, *, date_time: datetime, firmware_version: str = "SIM-BMC-1.0.0"
 ) -> dict[str, Any]:
+    manufacturer, _model = _VENDOR_IDENTITY[view.vendor]
+    manager_model = "SIM-BMC" if view.vendor == "generic" else _MANAGER_MODEL[view.vendor]
     payload: dict[str, Any] = {
         "Id": "1",
         "Name": "Simulated BMC",
         "ManagerType": "BMC",
-        "Manufacturer": "Warden Simulator",
-        "Model": "SIM-BMC",
+        "Manufacturer": manufacturer,
+        "Model": manager_model,
         "SerialNumber": "WARDEN-SIM-BMC-SN-1",
         "PartNumber": "SIM-BMC-CARD-A1",
         "FirmwareVersion": firmware_version,

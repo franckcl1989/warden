@@ -20,12 +20,18 @@ from tests.simulators.redfish.payloads import (
     drive,
     memory_dimm,
     power,
+    system,
     thermal,
     volume,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "redfish"
 DEFAULT_VIEW = _View(SimulatorConfig())
+
+VENDOR_VIEWS = {
+    vendor: _View(SimulatorConfig(vendor=vendor))
+    for vendor in ("dell", "inspur", "xfusion", "lenovo", "huawei")
+}
 
 
 def _load(name: str) -> dict[str, object]:
@@ -49,3 +55,14 @@ def _load(name: str) -> dict[str, object]:
 )
 def test_m3t2_fixture_matches_simulator_payload(filename: str, expected: dict[str, object]) -> None:
     assert _load(filename) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("vendor", ("dell", "inspur", "xfusion", "lenovo", "huawei"))
+def test_m3t5_vendor_fixtures_match_simulator_payloads(vendor: str) -> None:
+    """The vendor-profile snapshots (frozen contract, 模拟器来源 — never 真机)
+    must equal what the simulator emits today; drift requires a re-take AND a
+    README provenance update (fixtures/redfish/README.md rules)."""
+    view = VENDOR_VIEWS[vendor]
+    assert _load(f"system-{vendor}-healthy.json") == system(view)
+    assert _load(f"memory-dimm0-{vendor}-healthy.json") == memory_dimm(view, "DIMM0")

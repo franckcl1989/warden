@@ -135,9 +135,12 @@ def test_probe_loopback_is_rejected_by_policy(device_client: TestClient, db_sess
 def test_probe_unknown_adapter_rejected(device_client: TestClient, db_session: Session) -> None:
     create_admin(db_session)
     csrf = admin_csrf(device_client)
+    # server.dell_idrac has been a registered adapter since M3T5 — use a key
+    # that is still unregistered (NAS/switch adapters land in later
+    # milestones) for the unknown-adapter 422.
     response = device_client.post(
         PROBE_PATH,
-        json=base_probe(adapter_key="server.dell_idrac"),
+        json=base_probe(adapter_key="nas.synology_dsm"),
         headers={"X-CSRF-Token": csrf},
     )
     assert response.status_code == 422

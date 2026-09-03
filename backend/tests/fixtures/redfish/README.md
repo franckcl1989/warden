@@ -22,13 +22,33 @@ stays `not_started` until real-device runs exist.
 | `drive-sda-healthy.json` | `GET /redfish/v1/Systems/1/Storage/SATA1/Drives/sda` (generic OEM SMART/predictive members) | simulator profile `healthy` | 2026-09-03 |
 | `volume-raid6-healthy.json` | `GET /redfish/v1/Systems/1/Storage/SATA1/Volumes/RAID6_1` (OEM RAIDStatus member) | simulator profile `healthy` | 2026-09-03 |
 
+M3T5 vendor-profile snapshots (`vendor` control switch; SIMULATOR-authored
+vendor-flavored self-identity — Manufacturer/Model values are NOT real-device
+evidence; the OEM members inside the vendor namespaces are the same generic
+members the common adapter parses):
+
+| File | Represents | Origin | Captured |
+| --- | --- | --- | --- |
+| `system-dell-healthy.json` | `GET /redfish/v1/Systems/1` (Manufacturer "Dell Inc.", Model "PowerEdge R760") | simulator vendor profile `dell` | 2026-09-03 |
+| `memory-dimm0-dell-healthy.json` | `GET /redfish/v1/Systems/1/Memory/DIMM0` (Oem.Dell generic ECC aggregate counter) | simulator vendor profile `dell` | 2026-09-03 |
+| `system-inspur-healthy.json` | `GET /redfish/v1/Systems/1` (Manufacturer "Inspur", Model "NF5280M6") | simulator vendor profile `inspur` | 2026-09-03 |
+| `memory-dimm0-inspur-healthy.json` | `GET /redfish/v1/Systems/1/Memory/DIMM0` (Oem.Inspur generic ECC aggregate counter) | simulator vendor profile `inspur` | 2026-09-03 |
+| `system-xfusion-healthy.json` | `GET /redfish/v1/Systems/1` (Manufacturer "XFusion", Model "5288 V6") | simulator vendor profile `xfusion` | 2026-09-03 |
+| `memory-dimm0-xfusion-healthy.json` | `GET /redfish/v1/Systems/1/Memory/DIMM0` (Oem.XFusion generic ECC aggregate counter) | simulator vendor profile `xfusion` | 2026-09-03 |
+| `system-lenovo-healthy.json` | `GET /redfish/v1/Systems/1` (Manufacturer "Lenovo", Model "ThinkSystem SR650 V3") | simulator vendor profile `lenovo` | 2026-09-03 |
+| `memory-dimm0-lenovo-healthy.json` | `GET /redfish/v1/Systems/1/Memory/DIMM0` (Oem.Lenovo generic ECC aggregate counter) | simulator vendor profile `lenovo` | 2026-09-03 |
+| `system-huawei-healthy.json` | `GET /redfish/v1/Systems/1` (Manufacturer "Huawei", Model "FusionServer 2288H V5") | simulator vendor profile `huawei` | 2026-09-03 |
+| `memory-dimm0-huawei-healthy.json` | `GET /redfish/v1/Systems/1/Memory/DIMM0` (Oem.Huawei generic ECC aggregate counter) | simulator vendor profile `huawei` | 2026-09-03 |
+
 Capture provenance: the healthy files were captured over real HTTP
 (uvicorn on 127.0.0.1, HTTP Basic) via `tests/simulators/redfish/serving.py`;
 the critical file was captured from the same simulator over an ASGI
-transport. All come from `SimulatorConfig()` defaults except
-`computer-system-critical.json` (`profile="critical"`). Synthetic data needs
-no sanitization; it contains no credentials, tokens, serials or real device
-identity.
+transport; the M3T5 vendor files were captured over real HTTP with the
+`vendor` control switch, using the same simulator defaults otherwise. All
+come from `SimulatorConfig()` defaults except `computer-system-critical.json`
+(`profile="critical"`) and the vendor files (`vendor="dell|inspur|xfusion|
+lenovo|huawei"`). Synthetic data needs no sanitization; it contains no
+credentials, tokens, serials or real device identity.
 
 ## Rules for future fixtures (binding)
 

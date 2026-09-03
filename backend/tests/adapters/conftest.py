@@ -49,10 +49,11 @@ class SimAccess:
         return parsed.port
 
     def reset(self) -> None:
-        """Back to the pristine healthy profile with every knob off."""
-        body: dict[str, object] = {"profile": "healthy", "reset_state": True}
+        """Back to the pristine healthy generic-profile with every knob off."""
+        body: dict[str, object] = {"profile": "healthy", "vendor": "generic", "reset_state": True}
         body.update(dict.fromkeys(SURFACE_KNOB_KEYS, False))
         body.update(dict.fromkeys(INT_KNOB_KEYS, 0))
+        body["reset_types_override"] = []
         body.update(FLOAT_KNOB_DEFAULTS)
         body.update(STRING_KNOB_DEFAULTS)
         body["failures"] = dict.fromkeys(FAILURE_KEYS, False)

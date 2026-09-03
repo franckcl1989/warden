@@ -4,9 +4,12 @@ THIS IS A TEST DEVICE SIMULATOR — a fake BMC for repeatable automated tests.
 It is NOT evidence of hardware support: fixtures captured from it must state
 their 模拟器来源 (module README + fixtures README), and the hardware
 certification matrix (hardware-targets.json / HARDWARE_CERTIFICATION.md §3)
-stays ``not_started`` until real-device runs exist. Vendor OEM blocks here are
-neutral stubs; vendor overlays (M3T5) define the real per-vendor shapes from
-certification fixtures.
+stays ``not_started`` until real-device runs exist. Vendor profiles
+(M3T5) emit vendor-flavored self-identity (Manufacturer/Model) and the
+generic OEM members under vendor namespaces (Oem.Dell/Inspur/XFusion/Lenovo/
+Huawei) — every real per-vendor OEM shape stays overlay-certified territory
+(overlay module ledgers mark it experimental until sanitized 真机 fixtures
+exist).
 
 Served Redfish surface (DSP2046 shape, driven by the M3 needs of
 DEVICE_ADAPTERS.md §4): ServiceRoot, Systems/1 (ComputerSystem + Reset,
@@ -101,6 +104,8 @@ SURFACE_KNOB_KEYS = frozenset(
 )
 # Integer-valued surface knobs (per-test reset mirrors booleans with 0).
 INT_KNOB_KEYS = frozenset({"sel_append"})
+# List-valued surface knobs (per-test reset clears them to []).
+LIST_KNOB_KEYS = frozenset({"reset_types_override"})
 # Float-valued operation knobs + their pristine defaults (conftest reset).
 FLOAT_KNOB_KEYS = frozenset({"power_blip_seconds", "manager_blip_seconds"})
 FLOAT_KNOB_DEFAULTS: dict[str, float] = {"power_blip_seconds": 0.5, "manager_blip_seconds": 1.2}
@@ -186,6 +191,9 @@ class _SimulatorState:
         self.versions = {"BMC": "SIM-BMC-1.0.0", "BIOS": "SIM-BIOS-2.0"}
         self.device_fetches: list[str] = []  # image URLs the "device" fetched
         self.device_fetch_attempts: list[dict[str, object]] = []
+        # M3T5: ResetTypes the simulator ACCEPTED (in order) — the vendor
+        # overlay tests use this to prove which certified mapping ran.
+        self.last_system_resets: list[str] = []
 
     @property
     def view(self) -> _View:
@@ -205,6 +213,7 @@ class _SimulatorState:
         self.versions = {"BMC": "SIM-BMC-1.0.0", "BIOS": "SIM-BIOS-2.0"}
         self.device_fetches = []
         self.device_fetch_attempts = []
+        self.last_system_resets = []
 
     def media_slot_state(self, media_id: str) -> dict[str, Any]:
         """The live slot record, applying a due delayed InsertMedia first."""
@@ -272,6 +281,7 @@ class _SimulatorState:
             "missing_fan_reading": self.cfg.missing_fan_reading,
             "drives_without_oem": self.cfg.drives_without_oem,
             "sel_append": self.cfg.sel_append,
+            "reset_types_override": list(self.cfg.reset_types_override or ()),
             "failures": dict(self.failures),
             "media_hosts_required": self.cfg.media_hosts_required,
             "media_hosts": list(self.cfg.media_hosts),
@@ -294,6 +304,7 @@ class _SimulatorState:
             "versions": dict(self.versions),
             "device_fetches": list(self.device_fetches),
             "device_fetch_attempts": [dict(attempt) for attempt in self.device_fetch_attempts],
+            "last_system_resets": list(self.last_system_resets),
         }
 
     def apply_control(self, body: object) -> dict[str, object]:
@@ -344,6 +355,11 @@ class _SimulatorState:
                     msg = f"{key} must be a non-negative integer"
                     raise ValueError(msg)
                 self.cfg = _replace(self.cfg, **{key: int(value)})  # type: ignore[arg-type]
+            elif key in LIST_KNOB_KEYS:
+                if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                    msg = f"{key} must be a list of strings"
+                    raise ValueError(msg)
+                self.cfg = _replace(self.cfg, **{key: tuple(value) if value else None})  # type: ignore[arg-type]
             elif key in SURFACE_KNOB_KEYS:
                 self.cfg = _replace(self.cfg, **{key: bool(value)})  # type: ignore[arg-type]
             elif key == "media_hosts_required":
@@ -942,19 +958,26 @@ class _Dispatcher:
         The task carries the deferred power effect; the effect is applied
         exactly once when the task is first observed ``Completed`` (system
         power On/Off immediately, restart/cycle through a brief Off blip).
+        The accepted ResetType set mirrors the advertised AllowableValues
+        (``reset_types_override`` or the full standard list), and every
+        accepted reset is recorded in ``last_system_resets`` — the vendor
+        overlay tests read it back as the device-side mapping evidence.
         """
         state = self.state
         reset_type = body.get("ResetType")
-        allowed = (
-            "On",
-            "ForceOff",
-            "GracefulShutdown",
-            "GracefulRestart",
-            "ForceRestart",
-            "PowerCycle",
-            "Nmi",
-            "PushPowerButton",
-        )
+        if state.cfg.reset_types_override is not None:
+            allowed: tuple[str, ...] = tuple(state.cfg.reset_types_override)
+        else:
+            allowed = (
+                "On",
+                "ForceOff",
+                "GracefulShutdown",
+                "GracefulRestart",
+                "ForceRestart",
+                "PowerCycle",
+                "Nmi",
+                "PushPowerButton",
+            )
         if reset_type not in allowed:
             return (
                 400,
@@ -1004,6 +1027,7 @@ class _Dispatcher:
             effect = "power_reboot"
         else:  # Nmi
             effect = None
+        state.last_system_resets.append(reset_type)
         fails = state.failures["reset_task_fails"]
         return self._create_task(
             "Reset System", fails=fails, effect=effect, never_completes=state.cfg.reset_never_completes

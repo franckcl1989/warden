@@ -83,12 +83,12 @@ from __future__ import annotations
 import re
 import socket
 import ssl
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from ipaddress import IPv4Address, IPv6Address, ip_address
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
@@ -127,6 +127,10 @@ from app.infrastructure.protocols.redfish.parse import (
 )
 from app.infrastructure.protocols.redfish.session import RedfishCredentials
 from app.infrastructure.tls import build_ssl_context
+
+if TYPE_CHECKING:
+    from app.domain.adapter import LaunchDescriptor, OperationProgress, OperationResult
+    from app.domain.operation_plan import OperationPlan
 
 OBSERVATION_SOURCE = "redfish"
 SEL_EVENT_SOURCE = "redfish_sel"
@@ -1411,11 +1415,22 @@ def _add_power(bundle: _Bundle, read: _DiscoveryRead, *, now: datetime) -> None:
             _obs(bundle, "psu.voltage_v", voltage, now=now, unit="V", kind="psu", native=native)
 
 
-def _add_memory(bundle: _Bundle, read: _DiscoveryRead, *, now: datetime) -> None:
+def _add_memory(
+    bundle: _Bundle,
+    read: _DiscoveryRead,
+    *,
+    now: datetime,
+    oem: Callable[[str, RedfishResource, datetime], Observation | None] | None = None,
+) -> None:
     """SRV-MON-03 per DIMM: memory.status from the Status block; an empty
     slot (State Absent) is an absent component with no points at all;
     memory.ecc_errors ONLY from an explicit OEM ECC counter member — an
-    absent counter is an ObservationError, never an inferred 0."""
+    absent counter is an ObservationError, never an inferred 0.
+
+    ``oem`` is the M3T5 vendor ``_collect_oem`` hook (None on the common
+    path): when it returns a vendor-certified Observation the generic parse
+    is skipped; None keeps the generic member parse (missing member stays an
+    ObservationError)."""
     for dimm in read.memory_members:
         native = _native_id(dimm)
         status = _component_status(dimm.get("Status"))
@@ -1425,6 +1440,11 @@ def _add_memory(bundle: _Bundle, read: _DiscoveryRead, *, now: datetime) -> None
             _err(bundle, "memory.status", detail="内存条缺少可解析的 Status", kind="memory", native=native)
         else:
             _obs(bundle, "memory.status", status, now=now, kind="memory", native=native)
+        if oem is not None:
+            vendor_obs = oem("memory.ecc_errors", dimm, now)
+            if vendor_obs is not None:
+                bundle.observations.append(vendor_obs)
+                continue
         blocks = _oem_blocks(dimm)
         ecc_member = _member_value(blocks, _ECC_AGGREGATE_NAMES)
         if ecc_member is None:
@@ -1452,11 +1472,21 @@ def _add_memory(bundle: _Bundle, read: _DiscoveryRead, *, now: datetime) -> None
         _obs(bundle, "memory.ecc_errors", counter, now=now, unit="1", kind="memory", native=native)
 
 
-def _add_storage(bundle: _Bundle, read: _DiscoveryRead, *, now: datetime) -> None:
+def _add_storage(
+    bundle: _Bundle,
+    read: _DiscoveryRead,
+    *,
+    now: datetime,
+    oem: Callable[[str, RedfishResource, datetime], Observation | None] | None = None,
+) -> None:
     """SRV-MON-04: per-drive status/SMART/predictive-failure + per-volume
     raid.status. raid.status is emitted ONLY when a RAID volume (or OEM RAID
     block) exists — a drive-only server is a valid state with no raid data.
-    A drive without a SMART member is an ObservationError, never passed."""
+    A drive without a SMART member is an ObservationError, never passed.
+
+    ``oem`` is the M3T5 vendor ``_collect_oem`` hook (None on the common
+    path): a vendor-certified Observation wins over the generic parse for
+    the same key; None keeps the generic member parse."""
     if read.storage is None:
         for key in ("drive.status", "drive.smart", "drive.predictive_failure"):
             _err(bundle, key, error_code="unsupported_capability", detail="设备未提供 Storage 资源")
@@ -1468,37 +1498,49 @@ def _add_storage(bundle: _Bundle, read: _DiscoveryRead, *, now: datetime) -> Non
             _err(bundle, "drive.status", detail="硬盘缺少可解析的 Status", kind="drive", native=native)
         else:
             _obs(bundle, "drive.status", status, now=now, kind="drive", native=native)
-        blocks = _oem_blocks(drive)
-        smart_member = _member_value(blocks, _SMART_MEMBER_NAMES)
-        if smart_member is None:
-            _err(bundle, "drive.smart", detail="硬盘未提供 SMART 状态成员", kind="drive", native=native)
+        vendor_obs = oem("drive.smart", drive, now) if oem is not None else None
+        if vendor_obs is not None:
+            bundle.observations.append(vendor_obs)
         else:
-            smart_value = smart_member[1]
-            if not isinstance(smart_value, str):
-                _err(bundle, "drive.smart", detail="SMART 状态值无法解析", kind="drive", native=native)
+            blocks = _oem_blocks(drive)
+            smart_member = _member_value(blocks, _SMART_MEMBER_NAMES)
+            if smart_member is None:
+                _err(bundle, "drive.smart", detail="硬盘未提供 SMART 状态成员", kind="drive", native=native)
             else:
-                mapped = _SMART_MAP.get(smart_value)
-                if mapped is None:
-                    _err(
-                        bundle,
-                        "drive.smart",
-                        detail=f"SMART 状态值 {smart_value!r} 无认证映射",
-                        kind="drive",
-                        native=native,
-                    )
+                smart_value = smart_member[1]
+                if not isinstance(smart_value, str):
+                    _err(bundle, "drive.smart", detail="SMART 状态值无法解析", kind="drive", native=native)
                 else:
-                    _obs(bundle, "drive.smart", mapped, now=now, kind="drive", native=native)
-        predictive_member = _member_value(blocks, _PREDICTIVE_MEMBER_NAMES)
-        if predictive_member is None:
-            _err(bundle, "drive.predictive_failure", detail="硬盘未提供预测故障成员", kind="drive", native=native)
+                    mapped = _SMART_MAP.get(smart_value)
+                    if mapped is None:
+                        _err(
+                            bundle,
+                            "drive.smart",
+                            detail=f"SMART 状态值 {smart_value!r} 无认证映射",
+                            kind="drive",
+                            native=native,
+                        )
+                    else:
+                        _obs(bundle, "drive.smart", mapped, now=now, kind="drive", native=native)
+        vendor_predictive = oem("drive.predictive_failure", drive, now) if oem is not None else None
+        if vendor_predictive is not None:
+            bundle.observations.append(vendor_predictive)
         else:
-            predictive = bool_field({predictive_member[0]: predictive_member[1]}, predictive_member[0])
-            if isinstance(predictive, FieldSentinel):
-                _err(bundle, "drive.predictive_failure", detail="预测故障值无法解析", kind="drive", native=native)
+            predictive_member = _member_value(_oem_blocks(drive), _PREDICTIVE_MEMBER_NAMES)
+            if predictive_member is None:
+                _err(bundle, "drive.predictive_failure", detail="硬盘未提供预测故障成员", kind="drive", native=native)
             else:
-                _obs(bundle, "drive.predictive_failure", predictive, now=now, kind="drive", native=native)
+                predictive = bool_field({predictive_member[0]: predictive_member[1]}, predictive_member[0])
+                if isinstance(predictive, FieldSentinel):
+                    _err(bundle, "drive.predictive_failure", detail="预测故障值无法解析", kind="drive", native=native)
+                else:
+                    _obs(bundle, "drive.predictive_failure", predictive, now=now, kind="drive", native=native)
     for volume in read.volumes:
         native = _native_id(volume)
+        vendor_raid = oem("raid.status", volume, now) if oem is not None else None
+        if vendor_raid is not None:
+            bundle.observations.append(vendor_raid)
+            continue
         oem_raid = _member_value(_oem_blocks(volume), _RAID_MEMBER_NAMES)
         if oem_raid is not None and isinstance(oem_raid[1], str):
             mapped = _OEM_RAID_MAP.get(oem_raid[1])
@@ -1731,6 +1773,115 @@ class RedfishCommonAdapter(RedfishOperationsMixin):
         },
     }
 
+    # -- M3T5 protected hooks (vendor overlays subclass these; defaults = the
+    # common behavior below, byte-compatible for ``server.redfish``). Every
+    # override in an overlay module MUST carry a
+    # ``# basis: <doc-url-or-fixture> (experimental|simulator-verified)``
+    # comment — no vendor member/type choice may exist without one
+    # (docs/DEVICE_ADAPTERS.md §4/§10, M3T5 brief).
+
+    def _probe_identity_checks(self, system: RedfishResource) -> tuple[str, ...]:
+        """Vendor probe identity gate: display-safe failure details, empty =
+        the device self-identifies acceptably for this adapter. The common
+        adapter accepts any Redfish server (no certification claim); the five
+        vendor overlays require the device to self-identify as their vendor
+        (Manufacturer self-report) — a foreign device fails the probe
+        ``identity`` stage instead of silently cross-registering
+        (DEVICE_ADAPTERS.md §3: 最终保存的 adapter_key 必须通过该适配器的身份校验)."""
+        del system
+        return ()
+
+    def _discovery_capability_overrides(
+        self,
+        evidence: Mapping[str, object],
+        capabilities: tuple[CapabilitySupport, ...],
+    ) -> tuple[CapabilitySupport, ...]:
+        """Discovery row adjustments a vendor overlay may need (e.g. refuse a
+        ``supported`` claim whose only path is an experimental vendor OEM
+        shape). Default: rows exactly as the common evidence mapping built
+        them (ADR-014)."""
+        del evidence
+        return capabilities
+
+    def _collect_oem(self, metric_key: str, resource: RedfishResource, now: datetime) -> Observation | None:
+        """Vendor OEM collect hook: an Observation ONLY when this overlay
+        found its certified vendor member on ``resource`` (DIMM/drive/volume
+        for memory.ecc_errors / drive.smart / drive.predictive_failure /
+        raid.status); None = the common generic parse owns the resource
+        (missing member stays an ObservationError, never 0/normal — ADR-014).
+        Default returns None; overlays wire vendor member names here with a
+        cited basis."""
+        del metric_key, resource, now
+        return None
+
+    def _reset_type_for_cycle(self, allowable: frozenset[str] | None) -> tuple[str, str]:
+        """(ResetType, mapping note) for power.cycle (SRV-ACT-02, the
+        certified per-model mapping of DEVICE_ADAPTERS.md §4.2). Common rule
+        (unchanged): ForceRestart when the device advertises it, else
+        PowerCycle; a device advertising neither is refused (raises
+        ``AdapterError`` unsupported_capability — preflight never lets such a
+        plan reach the device). Vendor overlays pin their certified mapping
+        with a basis comment."""
+        if allowable is not None and not allowable.intersection({"ForceRestart", "PowerCycle"}):
+            raise AdapterError(
+                "unsupported_capability",
+                "设备未通告 ForceRestart 或 PowerCycle 重启类型",
+                stage="execute",
+            )
+        if allowable is not None and "ForceRestart" in allowable:
+            return "ForceRestart", "ForceRestart（设备通告，通用映射规则）"
+        return "PowerCycle", "PowerCycle（设备未通告 ForceRestart，通用映射规则）"
+
+    def _manager_reset_type(self, allowable: frozenset[str] | None) -> tuple[str, str]:
+        """(ResetType, mapping note) for manager.reset (SRV-ACT-01 cold
+        reset). Common rule (unchanged): GracefulRestart when advertised; a
+        cold-reset type not advertised is refused (the vendor cold-reset OEM
+        semantics are overlay territory — DEVICE_ADAPTERS.md §4.2)."""
+        if allowable is not None and "GracefulRestart" not in allowable:
+            raise AdapterError(
+                "unsupported_capability",
+                "管理卡未通告 GracefulRestart（冷复位类型由厂商 overlay 定义）",
+                stage="execute",
+            )
+        return "GracefulRestart", "GracefulRestart（管理卡冷复位，通用映射规则）"
+
+    def _kvm_descriptor(
+        self, client: RedfishClient, session: DeviceSession, capability: str
+    ) -> LaunchDescriptor | None:
+        """Vendor HTML5 KVM session-creation override (SRV-ACT-03): a
+        LaunchDescriptor when the overlay provably created a vendor KVM
+        session; None = the common Manager GraphicalConsole URL descriptor
+        (the ONLY standard advertisement — M3T4). Vendor session-creation
+        endpoints are experimental until a documented vendor API is certified
+        (fixture/doc basis)."""
+        del client, session, capability
+        return None
+
+    def _support_bundle_collect(
+        self,
+        client: RedfishClient,
+        plan: OperationPlan,
+        progress: OperationProgress,
+    ) -> OperationResult | None:
+        """Vendor TSR/support-dump override (SRV-ACT-04): an OperationResult
+        with the vendor OEM bundle artifact when the overlay has a certified
+        vendor job path; None = the common bounded SEL + LogService export
+        (manifest with every included/unavailable source — M3T3)."""
+        del client, plan, progress
+        return None
+
+    def _firmware_update_path(
+        self,
+        client: RedfishClient,
+        plan: OperationPlan,
+        progress: OperationProgress,
+    ) -> OperationResult | None:
+        """Vendor firmware update job override (SRV-ACT-06): an
+        OperationResult when the overlay used a certified vendor OEM update
+        path; None = the common UpdateService.SimpleUpdate flow."""
+        del client, plan, progress
+        return None
+
     def _endpoint_and_client(self, session: DeviceSession) -> tuple[_Endpoint, httpx.Client]:
         config = dict(session.connection_config)
         endpoint = _endpoint_for(
@@ -1802,6 +1953,22 @@ class RedfishCommonAdapter(RedfishOperationsMixin):
                         stages=(network, tls, auth, identity)
                         + (ProbeStage(stage="capabilities", ok=False, detail_safe="前置阶段失败，未执行"),)
                     )
+                identity_failures = self._probe_identity_checks(system)
+                if identity_failures:
+                    # Vendor identity gate (M3T5): the device does not
+                    # self-identify as the vendor this adapter certifies —
+                    # honest probe failure, never a silent cross-registration
+                    # (DEVICE_ADAPTERS.md §3).
+                    identity = ProbeStage(
+                        stage="identity",
+                        ok=False,
+                        error_code="validation_failed",
+                        detail_safe="；".join(identity_failures),
+                    )
+                    return ProbeResult(
+                        stages=(network, tls, auth, identity)
+                        + (ProbeStage(stage="capabilities", ok=False, detail_safe="前置阶段失败，未执行"),)
+                    )
                 hint = _identity_hint(system)
                 identity = ProbeStage(
                     stage="identity",
@@ -1841,6 +2008,7 @@ class RedfishCommonAdapter(RedfishOperationsMixin):
                 read = _collect_discovery_read(client)
                 evidence = _evidence_of(client, read)
                 capabilities = _capability_rows(evidence, self.adapter_key)
+                capabilities = self._discovery_capability_overrides(evidence, capabilities)
                 vendor = self._identity_text(read.system, "Manufacturer")
                 model = self._identity_text(read.system, "Model")
                 serial = self._identity_text(read.system, "SerialNumber")
@@ -1915,8 +2083,8 @@ class RedfishCommonAdapter(RedfishOperationsMixin):
         _add_temperatures(bundle, read, now=now)
         _add_fans(bundle, read, now=now)
         _add_power(bundle, read, now=now)
-        _add_memory(bundle, read, now=now)
-        _add_storage(bundle, read, now=now)
+        _add_memory(bundle, read, now=now, oem=self._collect_oem)
+        _add_storage(bundle, read, now=now, oem=self._collect_oem)
         _add_missing_memory_collection(bundle, read)
         _add_missing_drives(bundle, read)
 
