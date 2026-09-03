@@ -237,4 +237,13 @@
 - 原因：DATA_MODEL §10 的保留期与"三类角色与普通只追加审计"决策（编号 028）的只追加约束在自动清理路径上冲突；数据库触发器拒绝任何 UPDATE/DELETE（含 owner），应用层自动清理必须绕过触发器才能执行，与只追加安全目标相悖。
 - 结果：DATA_MODEL §10 中 audit/operation-task 两行的"自动保留"语义在 0.1.0 解释为"记录清理跳过原因与计数，由部署方按需执行带外清理"；其余保留项（指标分区、滚动聚合、事件、告警、会话）由 warden_app 按 0008/0009 授予的所有权/权限自动清理。
 
+## ADR-031：DSM 错误码映射按官方登录指南语义
+
+- 状态：`accepted`
+- 日期：2026-09-03
+- 决策：DSM 客户端错误映射以 Synology 官方 DSM Login Web API Guide 为准：`106` = 会话超时（sid 失效）→ 有界重登一次后仍失败则 `authentication_failed`；`105` = 权限不足 → `permission_denied_by_device`；`401/406` = 认证失败 → `authentication_failed`；登录返回 `(Auth,403)` 表示 OTP 需求 → `not_configured missing=otp`（自动化账号应使用专用非 2FA 账号，SECURITY §5）。映射表的每一行都带 `[guide]`/`[sim]` 依据标注；登录类 4xx 的精确真机行为仍属 simulator-DSL，待 M4 目标型号（DS224+/DS225+）真机认证按 ADR-018 修正。
+- 原因：任务简报中"105/106 → permission"的压缩表述与官方指南（106 为会话超时）及简报自身的测试要求（会话超时→重登一次→authentication_failed）矛盾；实现与测试按指南执行，需要正式决策记录。
+- 结果：客户端、模拟器与映射测试统一按本决策执行；未知错误码保留为 `protocol_error` 并在 detail 携带原码，不做猜测映射。
+
+
 
