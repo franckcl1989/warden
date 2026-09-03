@@ -38,6 +38,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar, cast
 
+import structlog
 from pysnmp.hlapi.asyncio import (
     CommunityData,
     ContextData,
@@ -75,7 +76,10 @@ _PRIVACY_PROTOCOLS = {
     "aes128": usmAesCfb128Protocol,
 }
 
-# errind classes whose meaning is "the USM refused the message".
+# USM refusal classes whose meaning is "the USM refused the message". This
+# set intentionally contains NO community semantics: v2c authenticates
+# nothing, so a v2c wrong-community request surfaces as silence (timeout ->
+# network_unreachable), never as a fake v3-style authentication failure.
 _AUTH_FAILURE_CODES: frozenset[str] = frozenset(
     {
         "WrongDigest",
@@ -84,9 +88,10 @@ _AUTH_FAILURE_CODES: frozenset[str] = frozenset(
         "AuthenticationFailure",
         "UnsupportedSecurityLevel",
         "DecryptionError",
-        "UnknownCommunityName",
     }
 )
+
+_LOG = structlog.get_logger("warden.protocols.snmp")
 
 T = TypeVar("T")
 Runner = Callable[[Awaitable[T]], T]
@@ -327,9 +332,23 @@ class SnmpClient:
             return []
         return self._run(self._get_many(oids))
 
-    def walk(self, prefix: str) -> Sequence[SnmpValue]:
-        """Bulk-walk ``prefix`` and return every value under it."""
-        return self._run(self._walk(prefix))
+    def walk(self, prefix: str) -> tuple[list[SnmpValue], bool]:
+        """Bulk-walk ``prefix``; returns ``(rows, truncated)``.
+
+        Mirrors the redfish ``walk_collection`` contract: ``truncated=True``
+        means the walk hit the ``WALK_MAX_ROWS`` page guard while the agent
+        still had rows under the prefix — never a fabricated full result.
+        Callers (adapters) must treat truncated walks as partial.
+        """
+        rows, truncated = self._run(self._walk(prefix))
+        if truncated:
+            _LOG.warning(
+                "snmp.walk.truncated",
+                prefix=prefix,
+                rows=len(rows),
+                page_limit=WALK_MAX_ROWS,
+            )
+        return rows, truncated
 
     # -- internals ----------------------------------------------------------
 
@@ -394,7 +413,7 @@ class SnmpClient:
         raise_for_error_status(error_status, stage="request")
         return map_varbinds(varbinds)
 
-    async def _walk(self, prefix: str) -> Sequence[SnmpValue]:
+    async def _walk(self, prefix: str) -> tuple[list[SnmpValue], bool]:
         connection = self._connection
         collected: list[SnmpValue] = []
         cursor = prefix
@@ -418,7 +437,7 @@ class SnmpClient:
             raise_for_error_indication(error_indication, stage="request")
             raise_for_error_status(error_status, stage="request")
             if not varbinds:
-                break
+                return collected, False
             progressed = False
             reached_end = False
             for var_bind in varbinds:
@@ -445,8 +464,10 @@ class SnmpClient:
                     progressed = True
                     cursor = name
             if reached_end or not progressed:
-                break
-        return collected
+                return collected, False
+        # The page guard fired while the subtree still had rows: the walk is
+        # truncated, never silently partial.
+        return collected, True
 
 
 def _asyncio_run[T](coro: Awaitable[T]) -> T:

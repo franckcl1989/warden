@@ -20,6 +20,7 @@ import json
 import time
 
 import pytest
+from app.application.event_ingest import DeviceSnmpExpectation
 from app.config import WardenSettings
 from app.infrastructure.crypto import CredentialCipher, CredentialKeyring, credential_aad
 from app.infrastructure.db import create_db_engine, create_session_factory
@@ -42,7 +43,7 @@ from pysnmp.hlapi.asyncio import (
     usmHMACSHAAuthProtocol,
 )
 from pysnmp.proto import rfc1902
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from tests.simulators.switch.emitters import (
@@ -169,6 +170,22 @@ async def _send_v2c_trap(port: int, community: str, trap_oid: str) -> None:
         result = await sendNotification(
             engine,
             CommunityData(community, mpModel=1),  # noqa: S508 - v2c ingest fixture
+            UdpTransportTarget(("127.0.0.1", port), timeout=2, retries=0),
+            ContextData(),
+            "trap",
+            NotificationType(ObjectIdentity(trap_oid)),
+        )
+    finally:
+        engine.transportDispatcher.closeDispatcher()
+    assert result[0] is None, result[0]
+
+
+async def _send_v1_trap(port: int, community: str, trap_oid: str) -> None:
+    engine = SnmpEngine()
+    try:
+        result = await sendNotification(
+            engine,
+            CommunityData(community, mpModel=0),  # noqa: S508 - v1 ingest fixture
             UdpTransportTarget(("127.0.0.1", port), timeout=2, retries=0),
             ContextData(),
             "trap",
@@ -383,3 +400,199 @@ class TestIngestServiceEndToEnd:
                 assert rows == []
         finally:
             await service.stop()
+
+    async def test_v1_traps_follow_the_community_policy(
+        self, ingest_env: dict[str, object]
+    ) -> None:
+        factory = ingest_env["session_factory"]
+        assert factory is not None
+        with factory() as db:
+            v2c_device = _device(
+                db,
+                name="access-s5735",
+                endpoint="127.0.0.1",
+                device_type="access_switch",
+                adapter_key="switch.huawei_vrp_access",
+                connection_config={"snmp_version": "v2c"},
+                credentials={"snmp": {"community": V2C_COMMUNITY}},
+            )
+            # A second v2c device (different endpoint, never sends) makes the
+            # receiver accept its community, so the platform policy layer —
+            # not the engine — must reject a v1 trap that carries it from the
+            # wrong device.
+            _device(
+                db,
+                name="other-v2c",
+                endpoint="127.0.0.9",
+                device_type="access_switch",
+                adapter_key="switch.huawei_vrp_access",
+                connection_config={"snmp_version": "v2c"},
+                credentials={"snmp": {"community": "lab-community"}},
+            )
+        service = await _start_service(ingest_env, factory)
+        try:
+            assert service.trap is not None
+            trap_port = service.trap.port or 0
+
+            # v1 coldStart with the attributed device's own community: stored.
+            await _send_v1_trap(trap_port, V2C_COMMUNITY, TRAP_COLD_START)
+
+            def _rows() -> int:
+                with factory() as db:
+                    return len(db.scalars(select(DeviceEvent)).all())
+
+            await _wait_for(lambda: _rows() >= 1)
+
+            # v1 coldStart with a registered-but-wrong community (source IP
+            # 127.0.0.1 attributes to the V2C_COMMUNITY device): dropped by
+            # the platform policy exactly like its v2c twin.
+            await _send_v1_trap(trap_port, "lab-community", TRAP_COLD_START)
+            await _wait_for(lambda: service.counters.dropped_community_mismatch >= 1)
+
+            assert service.counters.trap_messages == 2
+            assert service.counters.stored_events == 1
+            with factory() as db:
+                rows = db.scalars(select(DeviceEvent)).all()
+                assert len(rows) == 1
+                assert rows[0].device_id == v2c_device.id
+                assert rows[0].event_type == "event.device_restart"
+        finally:
+            await service.stop()
+
+    async def test_receiver_user_and_community_removal_paths(
+        self, ingest_env: dict[str, object]
+    ) -> None:
+        """Delta removal: set_users/set_communities empty actually unregisters."""
+        factory = ingest_env["session_factory"]
+        assert factory is not None
+        service = await _start_service(ingest_env, factory)
+        try:
+            assert service.trap is not None
+            trap_port = service.trap.port or 0
+
+            # v3 user registered at start (device below) decodes once...
+            with factory() as db:
+                _device(
+                    db,
+                    name="core-s5732",
+                    endpoint="127.0.0.1",
+                    device_type="core_switch",
+                    adapter_key="switch.huawei_vrp_core",
+                    connection_config={
+                        "snmp_version": "v3",
+                        "snmp_engine_id": V3_ENGINE_ID,
+                    },
+                    credentials={
+                        "snmp": {
+                            "username": V3_USERNAME,
+                            "auth_key": V3_AUTH_KEY,
+                            "privacy_key": V3_PRIV_KEY,
+                        }
+                    },
+                )
+            await service.refresh_now()
+            await _send_v3_trap(
+                trap_port,
+                engine_id_hex=V3_ENGINE_ID,
+                username=V3_USERNAME,
+                auth_key=V3_AUTH_KEY,
+                privacy_key=V3_PRIV_KEY,
+            )
+            await _wait_for(lambda: service.counters.trap_messages >= 1, timeout=15.0)
+
+            # ...but a refresh that removes the device unregisters its USM
+            # user: the same trap now never decodes (USM drop, engine-level).
+            with factory() as db:
+                device = db.scalar(select(Device).where(Device.name == "core-s5732"))
+                assert device is not None
+                db.execute(delete(DeviceCredential).where(DeviceCredential.device_id == device.id))
+                db.delete(device)
+                db.commit()
+            await service.refresh_now()
+            trap_messages_after_first = service.counters.trap_messages
+            await _send_v3_trap(
+                trap_port,
+                engine_id_hex=V3_ENGINE_ID,
+                username=V3_USERNAME,
+                auth_key=V3_AUTH_KEY,
+                privacy_key=V3_PRIV_KEY,
+            )
+            await asyncio.sleep(1.0)
+            assert service.counters.trap_messages == trap_messages_after_first
+        finally:
+            await service.stop()
+
+
+def test_snapshot_counts_only_real_credential_load_failures(
+    ingest_env: dict[str, object],
+) -> None:
+    """Non-SNMP devices (v3 default, no keys) are not credential failures."""
+    factory = ingest_env["session_factory"]
+    keyring = ingest_env["keyring"]
+    settings = ingest_env["settings"]
+    assert factory is not None
+    with factory() as db:
+        v2c_device = _device(
+            db,
+            name="v2c-ok",
+            endpoint="127.0.0.11",
+            device_type="access_switch",
+            adapter_key="switch.huawei_vrp_access",
+            connection_config={"snmp_version": "v2c"},
+            credentials={"snmp": {"community": "public"}},
+        )
+        nas_device = _device(
+            db,
+            name="nas-no-snmp",
+            endpoint="127.0.0.12",
+            device_type="synology_nas",
+            adapter_key="nas.synology_dsm",
+            connection_config={},
+            credentials={"dsm": {"username": "admin", "password": "x"}},
+        )
+        broken = Device(
+            name="broken-creds",
+            device_type="core_switch",
+            management_endpoint="127.0.0.13",
+            adapter_key="switch.huawei_vrp_core",
+            connection_config={"snmp_version": "v3"},
+            readiness="ready",
+        )
+        db.add(broken)
+        db.flush()
+        foreign_cipher = CredentialCipher(b"other-master-material-32-bytes!!")
+        aad = credential_aad(str(broken.id), broken.adapter_key, 1)
+        secret = foreign_cipher.encrypt_secret(
+            json.dumps({"snmp": {"username": "monitor"}}, sort_keys=True),
+            key_version=1,
+            aad=aad,
+        )
+        db.add(
+            DeviceCredential(
+                device_id=broken.id,
+                ciphertext=secret.ciphertext,
+                nonce=secret.nonce,
+                key_version=secret.key_version,
+                secret_schema_version=1,
+            )
+        )
+        db.commit()
+    service = IngestService(
+        settings=settings,
+        session_factory=factory,
+        keyring=keyring,
+        refresh_seconds=3600,
+    )
+    snapshot = service._load_snapshot()
+    assert snapshot.snmp_credential_load_failures == 1  # only the broken row
+    assert snapshot.communities == ("public",)
+    assert snapshot.users == ()
+    assert snapshot.expectations[v2c_device.id] == DeviceSnmpExpectation(
+        version="v2c", community="public"
+    )
+    # The NAS device defaults to snmp_version v3 with no keys: an expected
+    # configuration state (expectation present, no USM user), not a failure.
+    assert snapshot.expectations[nas_device.id] == DeviceSnmpExpectation(
+        version="v3", community=None
+    )
+    assert broken.id not in snapshot.expectations

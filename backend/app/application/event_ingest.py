@@ -50,6 +50,10 @@ _EVENT_SEVERITIES = frozenset({"unknown", "info", "warning", "critical"})
 
 EVENT_SOURCE_IPS_CONFIG_KEY = "event_source_ips"
 
+# Upper bound for the raw-text excerpt drop logs carry: keeps per-message
+# log volume bounded no matter how large a peer datagram is.
+_DROP_SOURCE_MAX_CHARS = 200
+
 
 class MatchKind(StrEnum):
     MATCHED = "matched"
@@ -310,6 +314,49 @@ def _count_drop(counters: IngestCounters, kind: str) -> None:
     setattr(counters, kind, getattr(counters, kind) + 1)
 
 
+def _escape_control(text: str) -> str:
+    """Replace C0 control chars + DEL so log lines can never be forged.
+
+    A syslog payload is attacker-controlled text: an embedded CR/LF would
+    otherwise let the peer inject log lines. Printable non-ASCII (device
+    descriptions) stays intact.
+    """
+    return "".join(char if char >= " " and char != "\x7f" else f"\\x{ord(char):02x}" for char in text)
+
+
+def _syslog_drop_source(raw: str) -> str:
+    """Bounded single-line source label for syslog drop logs.
+
+    The full raw text of an unattributed/ambiguous/disabled message is a
+    log-injection + volume surface; drop logs carry a sanitized excerpt of
+    at most ``_DROP_SOURCE_MAX_CHARS`` characters plus a length marker.
+    """
+    if len(raw) > _DROP_SOURCE_MAX_CHARS:
+        excerpt = _escape_control(raw[:_DROP_SOURCE_MAX_CHARS])
+        marker = f"...(+{len(raw) - _DROP_SOURCE_MAX_CHARS} chars)"
+    else:
+        excerpt = _escape_control(raw)
+        marker = ""
+    return f"syslog:{excerpt}{marker}"
+
+
+def _trap_drop_source(trap: ParsedTrap) -> str:
+    """Source label for trap drop logs — never the derived security name.
+
+    For community-based messages (v1/v2c) pysnmp derives securityName from
+    the community MIB, so the name textually embeds the community value
+    (SECURITY.md §10: community values are never logged); only the security
+    model is labelled. For v3 the security name IS the USM username — safe
+    to log for correlation.
+    """
+    if trap.security_model == 3:
+        return f"trap:v3:{trap.security_name}"
+    model_label = {1: "v1", 2: "v2c"}.get(trap.security_model)
+    if model_label is not None:
+        return f"trap:{model_label}"
+    return f"trap:model-{trap.security_model}"
+
+
 def route_syslog_message(
     db: Session,
     *,
@@ -330,7 +377,7 @@ def route_syslog_message(
         return
     mapping = attribution if attribution is not None else build_attribution_map(db)
     match = mapping.resolve(peer)
-    device_id = _matched_device(match, counters, source=parsed.raw)
+    device_id = _matched_device(match, counters, source=_syslog_drop_source(parsed.raw))
     if device_id is None:
         return
     classified = classify_syslog(parsed)
@@ -349,22 +396,22 @@ def route_trap(
     expectations: DeviceExpectations | None = None,
     attribution: AttributionMap | None = None,
 ) -> None:
-    """Full trap routing: count -> attribute -> v2c policy -> classify.
+    """Full trap routing: count -> attribute -> community policy -> classify.
 
-    For v2c traps the wire community is checked against the attributed
-    device's decrypted expectation (v2c authenticates nothing; SECURITY.md
-    §6 keeps v2c an explicit, audited choice): a v2c trap whose device is
-    not configured v2c with the same community is dropped and counted, never
-    stored. v3 traps are verified by the USM layer before they reach the
-    receiver (wrong keys never decode).
+    Community-based traps (v1 AND v2c — both authenticate nothing) are
+    checked against the attributed device's decrypted expectation
+    (SECURITY.md §6 keeps v1/v2c an explicit, audited choice): a community
+    trap whose device is not configured with the same community is dropped
+    and counted, never stored. v3 traps are verified by the USM layer before
+    they reach the receiver (wrong keys never decode).
     """
     counters.trap_messages += 1
     mapping = attribution if attribution is not None else build_attribution_map(db)
     match = mapping.resolve(peer)
-    device_id = _matched_device(match, counters, source=f"trap:{trap.security_name}")
+    device_id = _matched_device(match, counters, source=_trap_drop_source(trap))
     if device_id is None:
         return
-    if trap.security_model == 2:
+    if trap.security_model in (1, 2):
         expectation = (expectations or {}).get(device_id)
         if expectation is not None and expectation.version == "v2c":
             if expectation.community is None or trap.community != expectation.community:
@@ -374,7 +421,7 @@ def route_trap(
         else:
             counters.dropped_community_unverifiable += 1
             _LOGGER.info(
-                "event_ingest.drop reason=v2c_trap_for_unverifiable_device peer=%s",
+                "event_ingest.drop reason=community_trap_for_unverifiable_device peer=%s",
                 peer,
             )
             return

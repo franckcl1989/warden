@@ -25,7 +25,7 @@ from enum import StrEnum
 from typing import Any
 
 from pyasn1.type import univ
-from pysnmp.proto import rfc1902
+from pysnmp.proto import rfc1155, rfc1902
 from pysnmp.smi import exval
 
 from app.infrastructure.protocols.snmp.errors import SnmpError
@@ -87,13 +87,19 @@ def normalize_value(oid: str, raw: Any) -> SnmpValue | object:
         return NOT_PRESENT
     if isinstance(raw, (rfc1902.Counter64, rfc1902.Counter32)):
         return SnmpValue(oid=oid, kind=SnmpKind.COUNTER, value=int(raw))
-    if isinstance(raw, rfc1902.TimeTicks):
+    if isinstance(raw, (rfc1902.TimeTicks, rfc1155.TimeTicks)):
+        # rfc1155.TimeTicks is the SMIv1 twin of rfc1902.TimeTicks (identical
+        # tag): the trap receiver's RFC 2576 v1->v2 conversion synthesizes
+        # sysUpTime.0 with the v1 class (pysnmp keeps the rfc1155 value for
+        # the leaves it fabricates), so both normalize as TIMETICKS.
         return SnmpValue(oid=oid, kind=SnmpKind.TIMETICKS, value=int(raw))
     if isinstance(raw, (rfc1902.Integer32, rfc1902.Integer)):
         return SnmpValue(oid=oid, kind=SnmpKind.INTEGER, value=int(raw))
     if isinstance(raw, (rfc1902.Unsigned32, rfc1902.Gauge32)):
         return SnmpValue(oid=oid, kind=SnmpKind.UNSIGNED, value=int(raw))
-    if isinstance(raw, rfc1902.IpAddress):
+    if isinstance(raw, (rfc1902.IpAddress, rfc1155.IpAddress)):
+        # rfc1155.IpAddress likewise reaches the platform from the v1 trap
+        # path (RFC 2576 synthesizes snmpTrapAddress.0 with the v1 class).
         octets = raw.asOctets()
         if not isinstance(octets, bytes):  # pragma: no cover - py3 bytes path
             octets = octets.encode("latin-1")

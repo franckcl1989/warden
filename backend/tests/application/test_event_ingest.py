@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import uuid
 
+import pytest
 from app.application.event_ingest import (
     AttributionMap,
     DeviceExpectations,
@@ -293,12 +294,14 @@ class TestRouteSyslogMessage:
 
 
 class TestRouteTrap:
-    def _cold_start_trap(self, community: str) -> ParsedTrap:
+    def _cold_start_trap(
+        self, community: str, *, security_model: int = 2, security_name: str = "v2c-device"
+    ) -> ParsedTrap:
         return ParsedTrap(
             received_at=datetime.datetime(2026, 8, 4, 14, 30, 0, tzinfo=UTC),
-            message_processing_model=1,
-            security_model=2,
-            security_name="v2c-device",
+            message_processing_model=security_model - 1,
+            security_model=security_model,
+            security_name=security_name,
             security_level=1,
             community=community,
             varbinds=(
@@ -373,6 +376,80 @@ class TestRouteTrap:
         rows = db_session.scalars(select(DeviceEvent).where(DeviceEvent.device_id == device.id)).all()
         assert rows == []
 
+    def test_v1_trap_with_matching_community_is_stored(self, db_session: Session) -> None:
+        device = _device(
+            db_session,
+            endpoint="192.168.10.21",
+            connection_config={"snmp_version": "v2c"},
+        )
+        counters = IngestCounters()
+        expectations: DeviceExpectations = {
+            device.id: DeviceSnmpExpectation(version="v2c", community="public")
+        }
+        route_trap(
+            db_session,
+            trap=self._cold_start_trap(
+                "public",
+                security_model=1,
+                security_name="v2c-public",
+            ),
+            peer="192.168.10.21",
+            counters=counters,
+            expectations=expectations,
+        )
+        assert counters.stored_events == 1
+        row = db_session.scalar(select(DeviceEvent).where(DeviceEvent.device_id == device.id))
+        assert row is not None
+        assert row.event_type == "event.device_restart"
+
+    def test_v1_trap_with_wrong_community_is_dropped_with_counter(
+        self, db_session: Session
+    ) -> None:
+        device = _device(
+            db_session,
+            endpoint="192.168.10.21",
+            connection_config={"snmp_version": "v2c"},
+        )
+        counters = IngestCounters()
+        expectations: DeviceExpectations = {
+            device.id: DeviceSnmpExpectation(version="v2c", community="public")
+        }
+        route_trap(
+            db_session,
+            trap=self._cold_start_trap(
+                "other-community",
+                security_model=1,
+                security_name="v2c-other-community",
+            ),
+            peer="192.168.10.21",
+            counters=counters,
+            expectations=expectations,
+        )
+        assert counters.dropped_community_mismatch == 1
+        rows = db_session.scalars(select(DeviceEvent).where(DeviceEvent.device_id == device.id)).all()
+        assert rows == []
+
+    def test_v1_trap_for_v3_device_is_unverifiable(self, db_session: Session) -> None:
+        device = _device(
+            db_session,
+            endpoint="192.168.10.22",
+            connection_config={"snmp_version": "v3"},
+        )
+        counters = IngestCounters()
+        expectations: DeviceExpectations = {
+            device.id: DeviceSnmpExpectation(version="v3", community=None)
+        }
+        route_trap(
+            db_session,
+            trap=self._cold_start_trap("public", security_model=1),
+            peer="192.168.10.22",
+            counters=counters,
+            expectations=expectations,
+        )
+        assert counters.dropped_community_unverifiable == 1
+        rows = db_session.scalars(select(DeviceEvent).where(DeviceEvent.device_id == device.id)).all()
+        assert rows == []
+
     def test_v3_trap_is_not_community_checked(self, db_session: Session) -> None:
         device = _device(
             db_session,
@@ -403,6 +480,140 @@ class TestRouteTrap:
             expectations=expectations,
         )
         assert counters.stored_events == 1
+
+
+class TestDropLogHygiene:
+    """Drop-path logs stay bounded and never leak community values.
+
+    pysnmp derives securityName from the community MIB for community-based
+    messages (v1/v2c), so ``ParsedTrap.security_name`` textually embeds the
+    community (e.g. ``v2c-<community>``): the regression tests below send
+    traps whose security_name mimics that derivation and assert no drop-path
+    log line contains the configured community value (SECURITY.md §10).
+    """
+
+    def _community_trap(
+        self, community: str, *, security_model: int
+    ) -> ParsedTrap:
+        return ParsedTrap(
+            received_at=datetime.datetime(2026, 8, 4, 14, 30, 0, tzinfo=UTC),
+            message_processing_model=security_model - 1,
+            security_model=security_model,
+            security_name=f"v2c-{community}",
+            security_level=1,
+            community=community,
+            varbinds=(
+                TrapVarBind(name="1.3.6.1.2.1.1.3.0", value=10),
+                TrapVarBind(name="1.3.6.1.6.3.1.1.4.1.0", value="1.3.6.1.6.3.1.1.5.1"),
+            ),
+        )
+
+    def test_community_trap_drop_logs_never_contain_the_community(
+        self, db_session: Session, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.INFO, logger="warden.event_ingest")
+        community = "community-canary-91"
+        scenarios = [
+            (
+                AttributionMap(exact={"10.0.0.5": [(uuid.uuid4(), True), (uuid.uuid4(), True)]}, networks=[]),
+                "10.0.0.5",
+                "dropped_ambiguous",
+                "ambiguous_source_ip",
+            ),
+            (
+                AttributionMap(exact={"10.0.0.6": [(uuid.uuid4(), False)]}, networks=[]),
+                "10.0.0.6",
+                "dropped_device_disabled",
+                "device_disabled",
+            ),
+            (
+                AttributionMap(exact={}, networks=[]),
+                "10.99.99.99",
+                "dropped_unattributed",
+                "unattributed_source_ip",
+            ),
+        ]
+        for security_model, label in ((1, "trap:v1"), (2, "trap:v2c")):
+            for attribution, peer, counter_name, _reason in scenarios:
+                counters = IngestCounters()
+                caplog.clear()
+                route_trap(
+                    db_session,
+                    trap=self._community_trap(community, security_model=security_model),
+                    peer=peer,
+                    counters=counters,
+                    attribution=attribution,
+                )
+                assert getattr(counters, counter_name) == 1
+                text = caplog.text
+                assert community not in text
+                assert f"v2c-{community}" not in text
+                assert label in text
+
+    def test_v3_trap_drop_log_keeps_only_the_usm_username(
+        self, db_session: Session, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.INFO, logger="warden.event_ingest")
+        trap = ParsedTrap(
+            received_at=datetime.datetime(2026, 8, 4, 14, 30, 0, tzinfo=UTC),
+            message_processing_model=3,
+            security_model=3,
+            security_name="monitor-user-1",
+            security_level=3,
+            community=None,
+            varbinds=(
+                TrapVarBind(name="1.3.6.1.2.1.1.3.0", value=10),
+                TrapVarBind(name="1.3.6.1.6.3.1.1.4.1.0", value="1.3.6.1.6.3.1.1.5.1"),
+            ),
+        )
+        counters = IngestCounters()
+        route_trap(
+            db_session,
+            trap=trap,
+            peer="10.99.99.98",
+            counters=counters,
+            attribution=AttributionMap(exact={}, networks=[]),
+        )
+        assert counters.dropped_unattributed == 1
+        assert "trap:v3:monitor-user-1" in caplog.text
+
+    def test_syslog_drop_log_excerpt_is_bounded_and_single_line(
+        self, db_session: Session, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.INFO, logger="warden.event_ingest")
+        # The embedded newline sits inside the 200-char excerpt (escaping
+        # kills log injection); the canary sits far beyond it (the excerpt
+        # is bounded).
+        head = "<190>Aug  4 2026 14:22:01 s5732-1 tag: "
+        raw = (
+            head
+            + "x" * (199 - len(head))
+            + "\nEVIL-FORGED-LINE"
+            + "y" * 400
+            + "SYSLOG_CANARY_TAIL"
+        )
+        counters = IngestCounters()
+        route_syslog_message(
+            db_session,
+            parsed=_syslog(raw),
+            peer="10.99.99.97",
+            counters=counters,
+            attribution=AttributionMap(exact={}, networks=[]),
+        )
+        assert counters.dropped_unattributed == 1
+        drop_records = [record for record in caplog.records if "event_ingest.drop" in record.getMessage()]
+        assert len(drop_records) == 1
+        message = drop_records[0].getMessage()
+        assert "SYSLOG_CANARY_TAIL" not in caplog.text
+        assert "\n" not in message  # control chars are escaped, never literal
+        assert "\\x0a" in message
+        assert f"+{len(raw) - 200} chars" in message  # bounded excerpt + length marker
 
 
 class TestEventDedupeHashReuse:

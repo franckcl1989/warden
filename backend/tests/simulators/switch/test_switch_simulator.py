@@ -115,7 +115,8 @@ class TestSwitchAgentMechanics:
             assert isinstance(value, SnmpValue)
             assert value.kind is SnmpKind.STRING
             assert "S5732-H48XUM2CC" in str(value.value)
-            walked = await asyncio.to_thread(client.walk, "1.3.6.1.2.1.2.2.1.2")
+            walked, truncated = await asyncio.to_thread(client.walk, "1.3.6.1.2.1.2.2.1.2")
+            assert truncated is False
             assert len(walked) == 52  # 48 GE + 4 XGE ifDescr rows
             assert all(isinstance(item, SnmpValue) for item in walked)
             assert any(str(item.value) == "GigabitEthernet0/0/1" for item in walked)
@@ -202,13 +203,45 @@ class TestSwitchAgentMechanics:
                 )
             )
             missing = client.get("1.3.6.1.2.1.99.99.0")
-            walked = client.walk("1.3.6.1.2.1.99.99")
-            return missing is NOT_PRESENT, len(walked)
+            walked, truncated = client.walk("1.3.6.1.2.1.99.99")
+            return missing is NOT_PRESENT, len(walked), truncated
 
         try:
-            is_not_present, walked_count = await asyncio.to_thread(_read_missing)
+            is_not_present, walked_count, truncated = await asyncio.to_thread(_read_missing)
             assert is_not_present is True
             assert walked_count == 0
+            assert truncated is False
+        finally:
+            await agent.stop()
+
+    async def test_walk_truncation_is_marked_not_silent(
+        self, isolated_snmp_boots: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        del isolated_snmp_boots
+        import app.infrastructure.protocols.snmp.client as snmp_client_module
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+
+        monkeypatch.setattr(snmp_client_module, "WALK_MAX_ROWS", 2)
+        agent = await _started_agent()
+
+        def _walk_ifdescr() -> tuple[int, bool]:
+            client = SnmpClient(
+                SnmpConnection(
+                    host="127.0.0.1",
+                    port=agent.port or 0,
+                    community="public",
+                    version="v2c",
+                )
+            )
+            rows, truncated = client.walk("1.3.6.1.2.1.2.2.1.2")
+            return len(rows), truncated
+
+        try:
+            rows, truncated = await asyncio.to_thread(_walk_ifdescr)
+            # 2 pages x 20 rows of the 52-row ifDescr tree: the guard fired
+            # mid-subtree, so the result must SAY truncated (M5T2 asserts).
+            assert truncated is True
+            assert rows == 40
         finally:
             await agent.stop()
 

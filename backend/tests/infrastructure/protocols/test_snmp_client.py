@@ -41,7 +41,6 @@ class TestRaiseForErrorIndication:
             errind.AuthenticationFailure(),
             errind.UnsupportedSecurityLevel(),
             errind.DecryptionError(),
-            errind.UnknownCommunityName(),
         ],
     )
     def test_usm_failures_are_authentication_failed(self, failure: errind.ErrorIndication) -> None:
@@ -59,6 +58,10 @@ class TestRaiseForErrorIndication:
             errind.LoopTerminated(),
             errind.ReportPduReceived(),
             errind.NoSuchContext(),
+            # Not a USM code: the community security model carries no
+            # authentication; a v2c wrong community surfaces as silence
+            # (timeout -> network_unreachable), never authentication_failed.
+            errind.UnknownCommunityName(),
         ],
     )
     def test_other_indications_are_protocol_error(self, failure: errind.ErrorIndication) -> None:
@@ -76,7 +79,6 @@ def test_auth_failure_codes_are_only_usm_semantics() -> None:
             "AuthenticationFailure",
             "UnsupportedSecurityLevel",
             "DecryptionError",
-            "UnknownCommunityName",
         }
     ) == _AUTH_FAILURE_CODES
 

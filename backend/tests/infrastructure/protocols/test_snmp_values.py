@@ -15,7 +15,7 @@ from app.infrastructure.protocols.snmp.values import (
     SnmpValue,
     normalize_value,
 )
-from pysnmp.proto import rfc1902
+from pysnmp.proto import rfc1155, rfc1902
 from pysnmp.smi import exval
 
 MODULE = "app.infrastructure.protocols.snmp.values"
@@ -67,6 +67,24 @@ def test_ip_address_becomes_dotted_string() -> None:
     value = normalize_value("1.3.6.1.2.1.4.20.1.1.1", rfc1902.IpAddress("192.0.2.1"))
     assert value.kind is SnmpKind.IP
     assert value.value == "192.0.2.1"
+
+
+@pytest.mark.parametrize(
+    ("cls", "payload", "kind", "expected"),
+    [
+        (rfc1155.TimeTicks, 123456, SnmpKind.TIMETICKS, 123456),
+        (rfc1155.IpAddress, "192.0.2.9", SnmpKind.IP, "192.0.2.9"),
+    ],
+)
+def test_smi_v1_trap_artifacts_normalize_like_their_smi_v2_twins(
+    cls: type, payload: int | str, kind: SnmpKind, expected: int | str
+) -> None:
+    # RFC 2576 v1->v2 trap conversion keeps the rfc1155 value class for the
+    # leaves pysnmp synthesizes (sysUpTime.0, snmpTrapAddress.0): they must
+    # normalize to the same kinds as their rfc1902 twins, never raise.
+    value = normalize_value("1.3.6.1.2.1.1.3.0", cls(payload))
+    assert value.kind is kind
+    assert value.value == expected
 
 
 def test_oid_value_becomes_dotted_string() -> None:

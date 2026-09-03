@@ -83,7 +83,7 @@ class _Snapshot:
     users: tuple[TrapUser, ...]
     communities: tuple[str, ...]
     device_count: int
-    decryption_errors: int
+    snmp_credential_load_failures: int
 
 
 @dataclass
@@ -122,17 +122,21 @@ class IngestService:
             users=(),
             communities=(),
             device_count=0,
-            decryption_errors=0,
+            snmp_credential_load_failures=0,
         )
         self._consumer_stop = threading.Event()
         self._consumer_thread: threading.Thread | None = None
         self._refresh_task: asyncio.Task[None] | None = None
         self.syslog: SyslogReceiver | None = None
         self.trap: TrapReceiver | None = None
+        self._receivers_started = False
 
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
+        # Set FIRST so a cancelled/partial start still tears down through
+        # stop() (idempotent: every teardown step None/_started-guarded).
+        self._receivers_started = True
         engine_id = self._settings.snmp_trap_engine_id or DEFAULT_TRAP_ENGINE_ID_HEX
         handler_host = self._settings.ingest_bind_host
         self.syslog = SyslogReceiver(
@@ -172,6 +176,9 @@ class IngestService:
         )
 
     async def stop(self) -> None:
+        if not self._receivers_started:
+            return
+        self._receivers_started = False
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -185,7 +192,6 @@ class IngestService:
             await self.trap.stop()
         if self.syslog is not None:
             await self.syslog.stop()
-        self._receivers_started = False
         # Let the proactor transports finish closing before the loop ends.
         await asyncio.sleep(0.05)
         self._log.info("ingest.stopped")
@@ -260,7 +266,7 @@ class IngestService:
             devices=snapshot.device_count,
             users=len(snapshot.users),
             communities=len(snapshot.communities),
-            decryption_errors=snapshot.decryption_errors,
+            snmp_credential_load_failures=snapshot.snmp_credential_load_failures,
             counters=self.counters.snapshot(),
         )
 
@@ -285,9 +291,18 @@ class IngestService:
             users: list[TrapUser] = []
             communities: list[str] = []
             expectations: DeviceExpectations = {}
-            decryption_errors = 0
+            snmp_credential_load_failures = 0
             for device, credential in rows:
-                snmp = self._snmp_config(device, credential)
+                try:
+                    snmp = self._snmp_config(device, credential)
+                except (DecryptionError, ValueError):
+                    # A credential payload that cannot be decrypted/parsed is
+                    # a real load failure (counted). A device that simply has
+                    # no SNMP credentials is NOT a failure: non-SNMP adapters
+                    # default to snmp_version v3 and legitimately carry no
+                    # snmp section in their credentials.
+                    snmp_credential_load_failures += 1
+                    continue
                 if snmp is None:
                     continue
                 version, community, engine_id_hex, username, auth_key, privacy_key, auth_proto, priv_proto = snmp
@@ -297,7 +312,8 @@ class IngestService:
                         communities.append(community)
                     continue
                 if username is None or auth_key is None or privacy_key is None:
-                    decryption_errors += 1
+                    # v3-default device with no SNMP keys: no USM registration
+                    # (its traps cannot decode), but nothing failed to load.
                     continue
                 if engine_id_hex is None:
                     # v3 traps are stamped with the DEVICE engine id: without
@@ -322,7 +338,7 @@ class IngestService:
                 users=tuple(users),
                 communities=tuple(communities),
                 device_count=len(rows),
-                decryption_errors=decryption_errors,
+                snmp_credential_load_failures=snmp_credential_load_failures,
             )
 
     def _snmp_config(
@@ -361,11 +377,14 @@ class IngestService:
                 payload = json.loads(self._keyring.decrypt(secret, aad=aad))
             except (DecryptionError, ValueError) as exc:
                 _LOGGER.warning(
-                    "ingest.credential_decrypt_failed device_id=%s error=%s",
+                    "ingest.credential_load_failed device_id=%s error=%s",
                     device.id,
                     type(exc).__name__,
                 )
-                return None
+                # Signal the failure so the caller counts it; a device whose
+                # credentials cannot load gets NO expectation (traps for it
+                # become unverifiable drops, never stored).
+                raise
         snmp = payload if isinstance(payload, dict) else {}
         snmp_section = snmp.get("snmp")
         if not isinstance(snmp_section, dict):
