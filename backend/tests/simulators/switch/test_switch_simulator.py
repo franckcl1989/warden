@@ -1,4 +1,4 @@
-"""Switch simulator self-tests: agent + emitter mechanics over real UDP."""
+﻿"""Switch simulator self-tests: agent + emitter mechanics over real UDP."""
 
 from __future__ import annotations
 
@@ -6,8 +6,15 @@ import asyncio
 import datetime
 
 import pytest
+from app.adapters.huawei import oids as huawei_oids
+from app.infrastructure.protocols.snmp.oid import parse_oid
 
-from tests.simulators.switch.agent import AgentConfig, AgentCredential, SwitchAgent
+from tests.simulators.switch.agent import (
+    AgentConfig,
+    AgentCredential,
+    CounterState,
+    SwitchAgent,
+)
 from tests.simulators.switch.emitters import (
     TRAP_LINK_DOWN,
     TrapCredentials,
@@ -24,11 +31,21 @@ UTC = datetime.UTC
 AUTH_KEY = "sim-auth-key-1"
 PRIV_KEY = "sim-priv-key-1"
 
+# pysnmp asyncio transports on the Windows proactor emit ResourceWarnings
+# from __del__ at garbage collection (fd already closed); pytest turns them
+# into PytestUnraisableExceptionWarning failures. With the M5T2 suites
+# booting many agents in one process, the GC noise lands here — same
+# environment noise the ingest/worker suites already ignore (M5T1 report).
+pytestmark = [
+    pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning"),
+    pytest.mark.filterwarnings("ignore::ResourceWarning"),
+]
 
-async def _started_agent(**overrides: object) -> SwitchAgent:
+
+async def _started_agent(profile_key: str = "core_s5732", **overrides: object) -> SwitchAgent:
     agent = SwitchAgent(
         AgentConfig(
-            profile=profile_by_key("core_s5732"),
+            profile=profile_by_key(profile_key),
             v3_user=AgentCredential(
                 username="monitor",
                 auth_key=AUTH_KEY,
@@ -155,7 +172,10 @@ class TestSwitchAgentMechanics:
         try:
             code, elapsed = await asyncio.to_thread(_read_with_error)
             assert code == "authentication_failed"
-            assert elapsed < 3
+            # The USM refusal itself is fast; the bound is generous so GC /
+            # thread churn after many agent boots in one pytest process
+            # (M5T2 suites) cannot flake the assertion.
+            assert elapsed < 10
         finally:
             await agent.stop()
 
@@ -242,6 +262,250 @@ class TestSwitchAgentMechanics:
             # mid-subtree, so the result must SAY truncated (M5T2 asserts).
             assert truncated is True
             assert rows == 40
+        finally:
+            await agent.stop()
+
+
+class TestM5T2TreesAndKnobs:
+    """M5T2 tree mechanics over real UDP: per-region walks, deterministic
+    counter advances, HC rollover, per-profile entity/optics/PoE layouts and
+    the honest-state knobs."""
+
+    async def test_hc_counters_advance_once_per_walk(self, isolated_snmp_boots: None) -> None:
+        """A column walk must advance every leaf of ITS OWN column exactly
+        once (the GETBULK continuation is region-bounded — a foreign tail
+        read would silently advance another table's counter)."""
+        del isolated_snmp_boots
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+
+        agent = await _started_agent()
+        try:
+            target = parse_oid("1.3.6.1.2.1.31.1.1.1.6.1")
+            state = agent._tree[target]  # noqa: SLF001
+            assert isinstance(state, CounterState)
+
+            def _walk_and_count() -> tuple[int, int]:
+                client = SnmpClient(
+                    SnmpConnection(
+                        host="127.0.0.1",
+                        port=agent.port or 0,
+                        community="public",
+                        version="v2c",
+                    )
+                )
+                before = state.reads
+                # Walking a DIFFERENT column (ifName) must not advance .6.1.
+                client.walk("1.3.6.1.2.1.31.1.1.1.1")
+                foreign_reads = state.reads - before
+                before = state.reads
+                rows, truncated = client.walk("1.3.6.1.2.1.31.1.1.1.6")
+                own_reads = state.reads - before
+                return foreign_reads, own_reads, len(rows), truncated  # type: ignore[return-value]
+
+            foreign, own, rows, truncated = await asyncio.to_thread(_walk_and_count)  # type: ignore[misc]
+            assert foreign == 0
+            assert own == 1
+            assert rows == 52 and truncated is False
+        finally:
+            await agent.stop()
+
+    async def test_hc_counter_rollover_wraps_to_a_small_base(self, isolated_snmp_boots: None) -> None:
+        del isolated_snmp_boots
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+
+        step = 125_000
+        agent = await _started_agent(hc_wrap_at=3 * step)
+        try:
+            def _read_sequence() -> list[int]:
+                client = SnmpClient(
+                    SnmpConnection(
+                        host="127.0.0.1",
+                        port=agent.port or 0,
+                        community="public",
+                        version="v2c",
+                    )
+                )
+                values = []
+                for _ in range(5):
+                    raw = client.get("1.3.6.1.2.1.31.1.1.1.6.1")
+                    values.append(int(raw.value))  # type: ignore[union-attr]
+                return values
+
+            values = await asyncio.to_thread(_read_sequence)
+            # step, 2*step, 3*step, then the rollover to a small base, then
+            # ascending again — the adapter's counter_reset partial path.
+            assert values == [step, 2 * step, 3 * step, step, 2 * step]
+        finally:
+            await agent.stop()
+
+    async def test_entity_rows_and_absent_psu_slot(self, isolated_snmp_boots: None) -> None:
+        del isolated_snmp_boots
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+
+        agent = await _started_agent(profile_key="core_s5731s")
+        try:
+            def _read_entities() -> tuple[list[str], list[int]]:
+                client = SnmpClient(
+                    SnmpConnection(
+                        host="127.0.0.1",
+                        port=agent.port or 0,
+                        community="public",
+                        version="v2c",
+                    )
+                )
+                names = []
+                walked, _ = client.walk(huawei_oids.COL_ENTITY_NAME)
+                names = [str(item.value) for item in walked]  # type: ignore[union-attr]
+                present: dict[int, int] = {}
+                walked, _ = client.walk(huawei_oids.COL_ENTITY_PRESENT)
+                present = {int(item.oid.rsplit(".", 1)[1]): int(item.value) for item in walked}  # type: ignore[union-attr]
+                return names, [present[arc] for arc in sorted(present)]
+
+            names, present_values = await asyncio.to_thread(_read_entities)
+            assert names == ["PSU1", "PSU2", "FAN1", "FAN2", "SystemTemp"]
+            # PSU2 slot is installed-but-absent on the core_s5731s profile.
+            assert present_values == [1, 2, 1, 1, 1]
+        finally:
+            await agent.stop()
+
+    async def test_optics_rows_only_on_module_ports_and_knob_removal(
+        self, isolated_snmp_boots: None
+    ) -> None:
+        del isolated_snmp_boots
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+
+        agent = await _started_agent()
+
+        def _optics_rows(client: SnmpClient) -> list[int]:
+            walked, _truncated = client.walk(huawei_oids.COL_OPTICS_RX)
+            return sorted(int(item.oid.rsplit(".", 1)[1]) for item in walked)  # type: ignore[union-attr]
+
+        try:
+            client = SnmpClient(
+                SnmpConnection(
+                    host="127.0.0.1",
+                    port=agent.port or 0,
+                    community="public",
+                    version="v2c",
+                )
+            )
+            rows = await asyncio.to_thread(_optics_rows, client)
+            assert rows == [49, 50, 51, 52]
+            await asyncio.to_thread(agent.set_transceiver_present, 49, present=False)
+            rows = await asyncio.to_thread(_optics_rows, client)
+            assert rows == [50, 51, 52]
+        finally:
+            await agent.stop()
+
+    async def test_poe_layout_and_knobs(self, isolated_snmp_boots: None) -> None:
+        del isolated_snmp_boots
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+
+        agent = await _started_agent(profile_key="access_s5735")
+        try:
+            def _read() -> dict[str, object]:
+                client = SnmpClient(
+                    SnmpConnection(
+                        host="127.0.0.1",
+                        port=agent.port or 0,
+                        community="public",
+                        version="v2c",
+                    )
+                )
+                states = {}
+                walked, _ = client.walk(huawei_oids.COL_POE_STATE)
+                states = {int(item.oid.rsplit(".", 1)[1]): int(item.value) for item in walked}  # type: ignore[union-attr]
+                total = client.get(huawei_oids.OID_POE_TOTAL_MW)
+                budget = client.get(huawei_oids.OID_POE_BUDGET_MW)
+                alarm = client.get(huawei_oids.OID_POE_ALARM)
+                return {
+                    "count": len(states),
+                    "state1": states.get(1),
+                    "state17": states.get(17),
+                    "state18": states.get(18),
+                    "total": None if not hasattr(total, "value") else int(total.value),  # type: ignore[union-attr]
+                    "budget": None if not hasattr(budget, "value") else int(budget.value),  # type: ignore[union-attr]
+                    "alarm": None if not hasattr(alarm, "value") else int(alarm.value),  # type: ignore[union-attr]
+                }
+
+            snapshot = await asyncio.to_thread(_read)
+            assert snapshot["count"] == 48
+            assert snapshot["state1"] == 1 and snapshot["state17"] == 3 and snapshot["state18"] == 4
+            assert snapshot["total"] == 80_000 and snapshot["budget"] == 400_000 and snapshot["alarm"] == 1
+            await asyncio.to_thread(agent.set_poe_budget_present, False)
+            await asyncio.to_thread(agent.set_poe_alarm_state, 3)
+            snapshot = await asyncio.to_thread(_read)
+            assert snapshot["budget"] is None and snapshot["alarm"] == 3
+        finally:
+            await agent.stop()
+
+    async def test_layer2_and_stp_knobs(self, isolated_snmp_boots: None) -> None:
+        del isolated_snmp_boots
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+
+        agent = await _started_agent()
+        try:
+            await asyncio.to_thread(agent.set_loop_detected, True)
+            await asyncio.to_thread(agent.set_storm_detected, True)
+            await asyncio.to_thread(agent.set_stp_state, 2, 2)
+            await asyncio.to_thread(agent.set_fan_fault, 3, fault=True)
+
+            def _read() -> dict[str, object]:
+                client = SnmpClient(
+                    SnmpConnection(
+                        host="127.0.0.1",
+                        port=agent.port or 0,
+                        community="public",
+                        version="v2c",
+                    )
+                )
+                loop = client.get(huawei_oids.OID_LOOP_STATUS)
+                storm = client.get(huawei_oids.OID_STORM_STATUS)
+                stp = {}
+                walked, _ = client.walk(huawei_oids.COL_STP_STATE)
+                stp = {int(item.oid.rsplit(".", 1)[1]): int(item.value) for item in walked}  # type: ignore[union-attr]
+                fan_status = client.get(f"{huawei_oids.COL_ENTITY_STATUS}.3")
+                return {
+                    "loop": int(loop.value),  # type: ignore[union-attr]
+                    "storm": int(storm.value),  # type: ignore[union-attr]
+                    "stp2": stp.get(2),
+                    "stp1": stp.get(1),
+                    "fan_status": int(fan_status.value),  # type: ignore[union-attr]
+                }
+
+            snapshot = await asyncio.to_thread(_read)
+            assert snapshot["loop"] == 2 and snapshot["storm"] == 2
+            assert snapshot["stp2"] == 2 and snapshot["stp1"] == 4
+            assert snapshot["fan_status"] == 2
+        finally:
+            await agent.stop()
+
+    async def test_sys_descr_override_serves_custom_identity(self, isolated_snmp_boots: None) -> None:
+        del isolated_snmp_boots
+        from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
+        from app.infrastructure.protocols.snmp.values import SnmpValue
+
+        sys_descr = (
+            "Huawei Technologies Co., Ltd. S5700-28C-HI simulator, "
+            "VRP (R) software, Version V200R003C00"
+        )
+        agent = await _started_agent(sys_descr_override=sys_descr)
+        try:
+            def _read() -> str:
+                client = SnmpClient(
+                    SnmpConnection(
+                        host="127.0.0.1",
+                        port=agent.port or 0,
+                        community="public",
+                        version="v2c",
+                    )
+                )
+                raw = client.get(huawei_oids.OID_SYS_DESCR)
+                assert isinstance(raw, SnmpValue)
+                return str(raw.value)
+
+            text = await asyncio.to_thread(_read)
+            assert "S5700-28C-HI" in text and "S5732-H48XUM2CC" not in text
         finally:
             await agent.stop()
 

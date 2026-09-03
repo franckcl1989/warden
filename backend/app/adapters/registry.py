@@ -8,7 +8,11 @@ M3T5 registers the five certification-target vendor overlays
 server.lenovo_xcc, server.huawei_ibmc) subclassing the common base; M4T2
 registers ``nas.synology_dsm`` (the certification-target adapter for
 synology_nas — DS224+/DS225+, monitoring probe/discover/collect only until
-the NAS-ACT milestones). The device API rejects any adapter_key not present
+the NAS-ACT milestones); M5T2 registers the two Huawei VRP switch adapters
+(``switch.huawei_vrp_core`` for S5732-H48XUM2CC / S5731S-S48P4X-A and
+``switch.huawei_vrp_access`` for S5735-L48P4S-A1 — SNMP monitoring
+probe/discover/collect; the SSH/CLI operation surface arrives in M5T3).
+The device API rejects any adapter_key not present
 here (422 validation_failed field=adapter_key) — unknown drivers are never
 accepted for onboarding.
 """
@@ -17,6 +21,8 @@ from __future__ import annotations
 
 from app.adapters.dsm import SynologyDsmAdapter
 from app.adapters.fake import FakeSimpleAdapter
+from app.adapters.huawei.access import HuaweiVrpAccessAdapter
+from app.adapters.huawei.core import HuaweiVrpCoreAdapter
 from app.adapters.redfish.common import RedfishCommonAdapter
 from app.adapters.redfish.dell import DellIdracAdapter
 from app.adapters.redfish.huawei import HuaweiIbmcAdapter
@@ -70,3 +76,5 @@ register(XfusionIbmcAdapter())
 register(LenovoXccAdapter())
 register(HuaweiIbmcAdapter())
 register(SynologyDsmAdapter())
+register(HuaweiVrpCoreAdapter())
+register(HuaweiVrpAccessAdapter())

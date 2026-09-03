@@ -161,11 +161,12 @@ def test_registry_lookup_and_type_lookup() -> None:
     assert nas.adapter_key == "nas.synology_dsm"
     assert "synology_nas" in nas.supported_device_types
     assert adapter_for_device_type("synology_nas").adapter_key == "nas.synology_dsm"
-    # Adapters that are not registered yet stay unknown (e.g. switch keys).
-    with pytest.raises(UnknownAdapterError):
-        get_adapter("switch.huawei_vrp_core")
-    with pytest.raises(UnknownAdapterError):
-        adapter_for_device_type("core_switch")
+    # M5T2: the two Huawei switch adapters joined the registry and are the
+    # unique adapters serving core_switch / access_switch.
+    assert get_adapter("switch.huawei_vrp_core").adapter_key == "switch.huawei_vrp_core"
+    assert adapter_for_device_type("core_switch").adapter_key == "switch.huawei_vrp_core"
+    assert get_adapter("switch.huawei_vrp_access").adapter_key == "switch.huawei_vrp_access"
+    assert adapter_for_device_type("access_switch").adapter_key == "switch.huawei_vrp_access"
 
 
 @pytest.mark.unit
