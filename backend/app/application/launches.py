@@ -63,6 +63,7 @@ PLT_09 = "PLT-09"
 # are refused rather than guessed (AGENTS.md: 不得自行猜测).
 LAUNCH_PROTOCOL_BY_KEY: dict[str, str] = {
     "console.kvm.open": "kvm",
+    "console.dsm.open": "web",  # NAS-ACT-02 (M4T3)
 }
 
 MESSAGE_UNSUPPORTED_LAUNCH = "该能力不属于远程连接能力，不支持创建启动描述符"

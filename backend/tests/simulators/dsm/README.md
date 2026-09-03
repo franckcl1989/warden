@@ -29,6 +29,9 @@ of every API name it advertises:
 | `SYNO.Core.UPS` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM UPS family (not in the Login guide; certification pending) |
 | `SYNO.Core.System.Log` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM Log Centre family (not in the Login guide; certification pending) |
 | `SYNO.Core.Upgrade` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM Update family (not in the Login guide; certification pending) |
+| `SYNO.Core.Support` | entry.cgi | 1 | **simulator-invented** M4T3 placeholder for the DSM support-package export family (NAS-ACT-03; not in the Login guide; certification pending) |
+| `SYNO.Core.Backup` | entry.cgi | 1 | **simulator-invented** M4T3 placeholder for the DSM Hyper Backup / Snapshot Replication status family (NAS-ACT-05; not in the Login guide; certification pending) |
+| `SYNO.Core.Network.SNMP` | entry.cgi | 1 | **simulator-invented** M4T3 placeholder for the DSM Control-Panel SNMP/trap family (NAS-ACT-06; not in the Login guide; certification pending) |
 
 The value vocabularies of the family payloads (disk statuses, pool statuses,
 UPS states, fan statuses, log levels, task responses) are **simulator DSL**:
@@ -53,18 +56,49 @@ GET or a form body on POST — both are accepted for every endpoint):
 - `auth.cgi` — `SYNO.API.Auth` login/logout (`sid` sessions, `session`
   family `DiskStation`, sid parameter `_sid`);
 - `entry.cgi` — authenticated family APIs:
-  - `SYNO.Core.System`: info (identity/firmware/temperature/fan/uptime),
-    shutdown, restart (side effects end the session);
+  - `SYNO.Core.System`: info (identity/firmware/temperature/fan/uptime,
+    optional `maintenance` block while `storage_maintenance` runs),
+    shutdown (powers the device off; `shutdown_ignored` accepts without the
+    effect), restart (clears sessions/tasks and answers 503 for
+    `restart_blip_seconds`; `restart_ignored` / `restart_identity_changes`
+    failure knobs);
   - `SYNO.Storage.CGI.Storage`: load_info (disks + SMART + bad sectors,
     storage pools with status + rebuild progress, volumes with used/total
-    bytes), smart_test (async taskid: running -> success/failure),
-    smart_task_status;
+    bytes, `active_jobs` while a device job runs), smart_test (async taskid:
+    running -> success/failure; quick/full durations, never-completes knob;
+    unknown disks are rejected), smart_task_status;
   - `SYNO.Core.Share`: list (shared folders with id/name/used_bytes/
     quota_bytes — quota 0 = 无配额, the missing usage-percent denominator);
   - `SYNO.Core.UPS`: get;
   - `SYNO.Core.System.Log`: list (offset/limit pages, `total` + `log`
     entries with id/time/level/message);
-  - `SYNO.Core.Upgrade`: upgrade (async taskid), update_task_status.
+  - `SYNO.Core.Upgrade`: upgrade (async taskid; optional `url` = the
+    platform PAT device-pull ticket; when `upgrade_fetch_required` the
+    "device" fetches the URL and applies the `WARDEN-SIM-PAT` header
+    version after a reboot window of `upgrade_offline_seconds`; without a
+    fetch the version is the `upgrade_target_version` knob or the auto-bump
+    of the served firmware), update_task_status;
+  - `SYNO.Core.Support`: export (creates a deterministic
+    `warden-dsm-support-bundle/1` zip and returns its device-origin
+    download path `/support/export/<token>.zip`);
+  - `SYNO.Core.Backup`: list (Hyper Backup/Snapshot Replication package
+    availability + job statuses with fixed deterministic timestamps;
+    `backup_snapshot_available` adds the snapshot package, `backup_no_jobs`
+    empties the job list);
+  - `SYNO.Core.Network.SNMP`: get/set (trap `enabled` + the platform
+    `receiver_address` only — never a user-supplied address; enabling
+    records the DSL test-trap emission in the control snapshot);
+- `/` — the DSM web origin (the `console.dsm.open` launch target, served
+  while the device is online);
+- `/support/export/<token>.zip` — raw support-bundle download (no session;
+  the token is an unguessable random id, device-origin only).
+
+Device lifecycle (M4T3): power-off (shutdown), the restart blip and the
+update reboot window all answer HTTP 503 on every non-control endpoint —
+that is the offline window the adapter's expected_disconnect verify loops
+poll. A profile switch resets all runtime state (sessions, tasks, power,
+firmware bumps, serial override, SNMP config, traps, bundles and fetch
+evidence).
 
 ## Configuration
 
@@ -74,12 +108,20 @@ Constructor `SimulatorConfig` or the live control endpoint (no auth):
 `{"pool_rebuilding": bool}`, `{"ups_on_battery": bool}`,
 `{"ups_absent": bool}`, `{"fan_broken": bool}`, `{"fan_zero_rpm": bool}`,
 `{"share_no_quota": bool}`, `{"log_append": int}`,
+`{"storage_maintenance": bool}`, `{"backup_no_jobs": bool}`,
+`{"backup_snapshot_available": bool}`,
+`{"upgrade_fetch_required": bool}`, `{"upgrade_target_version": str}`,
+`{"smart_quick_duration_seconds": 0.05}`,
+`{"smart_full_duration_seconds": ...}`,
+`{"upgrade_duration_seconds": ...}`, `{"upgrade_offline_seconds": ...}`,
+`{"restart_blip_seconds": ...}`, `{"power_on": true}`,
+`{"snmp_config": {"enabled": bool, "receiver_address": str}}`,
 `{"missing_apis": ["SYNO.Core.UPS", ...]}`,
 `{"storage_max_version": 9}` (inflate the advertised Storage maxVersion to
 prove the client never calls above its certified version),
-`{"task_duration_seconds": ...}`, `{"failures": {...}}`,
-`{"expire_sessions": true}`. Switching profile resets every knob to the
-profile's preset (repeatable switches).
+`{"failures": {...}}`, `{"expire_sessions": true}`. Switching profile resets
+every knob to the profile's preset and the runtime state (repeatable
+switches).
 
 - Profiles: `healthy` (default), `ds224plus` and `ds225plus` (M4T2
   vendor-model profiles naming the hardware-targets units
@@ -107,7 +149,12 @@ profile's preset (repeatable switches).
   (deterministic ids/timestamps continue) for delta log reads.
 - Failure injection: `login_reject`, `login_otp`, `reads_500`,
   `error_unknown_2100`, `sessions_reject_106` (bounded re-login must fail
-  honestly instead of looping), `smart_test_fails`, `update_fails`.
+  honestly instead of looping), `smart_test_fails`,
+  `smart_test_never_completes` (job runs forever — deadline ambiguity),
+  `update_fails`, `update_never_completes`, `restart_ignored` /
+  `shutdown_ignored` (accepted without the effect — verify ends ambiguous),
+  `restart_identity_changes` (the device reports a different serial after
+  the restart blip).
 
 ## Running
 

@@ -287,7 +287,7 @@ class TestFamilyPayloads:
 
     async def test_smart_test_task_lifecycle(self, http: httpx.AsyncClient) -> None:
         sid = await login(http)
-        await control(http, {"task_duration_seconds": 0.05})
+        await control(http, {"smart_quick_duration_seconds": 0.05})
         start = await api_call(
             http, "SYNO.Storage.CGI.Storage", "smart_test", version=1, sid=sid, extra={"disk": "sata1", "type": "quick"}
         )
@@ -305,7 +305,7 @@ class TestFamilyPayloads:
 
     async def test_smart_test_failure_knob(self, http: httpx.AsyncClient) -> None:
         sid = await login(http)
-        await control(http, {"failures": {"smart_test_fails": True}, "task_duration_seconds": 0.02})
+        await control(http, {"failures": {"smart_test_fails": True}, "smart_full_duration_seconds": 0.02})
         start = await api_call(
             http, "SYNO.Storage.CGI.Storage", "smart_test", version=1, sid=sid, extra={"disk": "sata2", "type": "full"}
         )
@@ -318,18 +318,277 @@ class TestFamilyPayloads:
 
     async def test_update_job_lifecycle(self, http: httpx.AsyncClient) -> None:
         sid = await login(http)
-        await control(http, {"task_duration_seconds": 0.05})
+        await control(http, {"upgrade_duration_seconds": 0.05, "upgrade_offline_seconds": 0.05})
         start = await api_call(http, "SYNO.Core.Upgrade", "upgrade", version=1, sid=sid)
         assert start.json()["success"] is True
         task_id = start.json()["data"]["taskid"]
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
         done = await api_call(
             http, "SYNO.Core.Upgrade", "update_task_status", version=1, sid=sid, extra={"taskid": str(task_id)}
         )
         assert done.json()["data"]["status"] == "success"
+        snapshot_response = await http.get("/warden-sim/control")
+        firmware = snapshot_response.json()["firmware"]
+        assert firmware == "7.2.1-69057-update6 (simulated)"
 
     async def test_shutdown_side_effect_ends_sessions(self, http: httpx.AsyncClient) -> None:
         sid = await login(http)
         await api_call(http, "SYNO.Core.System", "shutdown", version=2, sid=sid)
         snapshot_response = await http.get("/warden-sim/control")
         assert snapshot_response.json()["sessions"] == 0
+
+
+class TestM4T3OperationSurface:
+    """M4T3 device-lifecycle DSL: power blips, SMART durations, the update
+    fetch/reboot/bump flow, support exports, backup status and SNMP traps."""
+
+    async def test_shutdown_powers_device_off_until_power_on(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        await api_call(http, "SYNO.Core.System", "shutdown", version=2, sid=sid)
+        snapshot = (await http.get("/warden-sim/control")).json()
+        assert snapshot["power"] == "off"
+        answer = await api_call(http, "SYNO.Core.System", "info", version=2, sid=sid)
+        assert answer.status_code == 503
+        root = await http.get("/")
+        assert root.status_code == 503
+        snapshot = await control(http, {"power_on": True})
+        assert snapshot["power"] == "on"
+        fresh = await login(http)
+        info = await api_call(http, "SYNO.Core.System", "info", version=2, sid=fresh)
+        assert info.status_code == 200
+        assert info.json()["data"]["serial"] == "SIM-DS224P-0001"
+
+    async def test_restart_blip_window_then_reconnect(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        await control(http, {"restart_blip_seconds": 0.3})
+        await api_call(http, "SYNO.Core.System", "restart", version=2, sid=sid)
+        during = await api_call(http, "SYNO.Core.System", "info", version=2, sid=sid)
+        assert during.status_code == 503
+        await asyncio.sleep(0.4)
+        fresh = await login(http)
+        info = await api_call(http, "SYNO.Core.System", "info", version=2, sid=fresh)
+        assert info.status_code == 200
+        assert info.json()["data"]["serial"] == "SIM-DS224P-0001"
+
+    async def test_restart_ignored_and_identity_change_knobs(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        await control(http, {"failures": {"restart_ignored": True}})
+        await api_call(http, "SYNO.Core.System", "restart", version=2, sid=sid)
+        await asyncio.sleep(0.05)
+        # The device never went down: the same session still works.
+        info = await api_call(http, "SYNO.Core.System", "info", version=2, sid=sid)
+        assert info.status_code == 200
+        await control(
+            http,
+            {
+                "failures": {"restart_ignored": False, "restart_identity_changes": True},
+                "restart_blip_seconds": 0.2,
+            },
+        )
+        await api_call(http, "SYNO.Core.System", "restart", version=2, sid=sid)
+        await asyncio.sleep(0.3)
+        fresh = await login(http)
+        changed = await api_call(http, "SYNO.Core.System", "info", version=2, sid=fresh)
+        assert changed.json()["data"]["serial"] == "SIM-DS224P-CHANGED (simulated)"
+
+    async def test_smart_quick_full_durations_and_never_completes(
+        self, http: httpx.AsyncClient
+    ) -> None:
+        sid = await login(http)
+        await control(
+            http,
+            {
+                "smart_quick_duration_seconds": 0.05,
+                "smart_full_duration_seconds": 1.0,
+            },
+        )
+        quick = await api_call(
+            http, "SYNO.Storage.CGI.Storage", "smart_test", version=1, sid=sid,
+            extra={"disk": "sata1", "type": "quick"},
+        )
+        quick_id = quick.json()["data"]["taskid"]
+        full = await api_call(
+            http, "SYNO.Storage.CGI.Storage", "smart_test", version=1, sid=sid,
+            extra={"disk": "sata2", "type": "full"},
+        )
+        full_id = full.json()["data"]["taskid"]
+        await control(http, {"failures": {"smart_test_never_completes": True}})
+        never = await api_call(
+            http, "SYNO.Storage.CGI.Storage", "smart_test", version=1, sid=sid,
+            extra={"disk": "sata1", "type": "quick"},
+        )
+        never_id = never.json()["data"]["taskid"]
+        # The load_info surface reports the running jobs honestly.
+        info = await api_call(http, "SYNO.Storage.CGI.Storage", "load_info", version=1, sid=sid)
+        kinds = {job["kind"] for job in info.json()["data"]["active_jobs"]}
+        assert kinds == {"smart"}
+        await asyncio.sleep(0.2)
+        quick_done = await api_call(
+            http, "SYNO.Storage.CGI.Storage", "smart_task_status", version=1, sid=sid,
+            extra={"taskid": str(quick_id)},
+        )
+        assert quick_done.json()["data"]["status"] == "success"
+        full_running = await api_call(
+            http, "SYNO.Storage.CGI.Storage", "smart_task_status", version=1, sid=sid,
+            extra={"taskid": str(full_id)},
+        )
+        assert full_running.json()["data"]["status"] == "running"
+        never_running = await api_call(
+            http, "SYNO.Storage.CGI.Storage", "smart_task_status", version=1, sid=sid,
+            extra={"taskid": str(never_id)},
+        )
+        assert never_running.json()["data"]["status"] == "running"
+
+    async def test_smart_test_rejects_unknown_disk(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        rejected = await api_call(
+            http, "SYNO.Storage.CGI.Storage", "smart_test", version=1, sid=sid,
+            extra={"disk": "sata9", "type": "quick"},
+        )
+        assert rejected.json()["success"] is False
+        assert rejected.json()["error"]["code"] == 101
+
+    async def test_update_reboot_window_then_firmware_bump(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        await control(
+            http,
+            {"upgrade_duration_seconds": 0.05, "upgrade_offline_seconds": 0.4, "restart_blip_seconds": 0.05},
+        )
+        await api_call(http, "SYNO.Core.Upgrade", "upgrade", version=1, sid=sid)
+        await asyncio.sleep(0.2)
+        # The DSM is mid-reboot while the update installs: all WebAPI 503.
+        during = await api_call(http, "SYNO.Core.Upgrade", "update_task_status", version=1, sid=sid)
+        assert during.status_code == 503
+        await asyncio.sleep(0.5)
+        fresh = await login(http)
+        info = await api_call(http, "SYNO.Core.System", "info", version=2, sid=fresh)
+        assert info.json()["data"]["firmware"] == "7.2.1-69057-update6 (simulated)"
+        snapshot = (await http.get("/warden-sim/control")).json()
+        assert snapshot["firmware"] == "7.2.1-69057-update6 (simulated)"
+
+    async def test_update_target_version_knob(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        await control(
+            http,
+            {
+                "upgrade_duration_seconds": 0.05,
+                "upgrade_offline_seconds": 0.05,
+                "upgrade_target_version": "7.2.1-69057-update9 (simulated)",
+            },
+        )
+        await api_call(http, "SYNO.Core.Upgrade", "upgrade", version=1, sid=sid)
+        await asyncio.sleep(0.3)
+        fresh = await login(http)
+        info = await api_call(http, "SYNO.Core.System", "info", version=2, sid=fresh)
+        assert info.json()["data"]["firmware"] == "7.2.1-69057-update9 (simulated)"
+
+    async def test_update_failure_and_never_completes(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        await control(
+            http,
+            {
+                "upgrade_duration_seconds": 0.05,
+                "upgrade_offline_seconds": 0.05,
+                "failures": {"update_fails": True},
+            },
+        )
+        start = await api_call(http, "SYNO.Core.Upgrade", "upgrade", version=1, sid=sid)
+        failing_id = start.json()["data"]["taskid"]
+        await asyncio.sleep(0.1)
+        status = await api_call(
+            http, "SYNO.Core.Upgrade", "update_task_status", version=1, sid=sid,
+            extra={"taskid": str(failing_id)},
+        )
+        assert status.json()["data"]["status"] == "failure"
+        snapshot = (await http.get("/warden-sim/control")).json()
+        assert snapshot["firmware"] == "7.2.1-69057-update5 (simulated)"
+        await control(
+            http,
+            {"failures": {"update_fails": False, "update_never_completes": True}, "upgrade_duration_seconds": 0.05},
+        )
+        start = await api_call(http, "SYNO.Core.Upgrade", "upgrade", version=1, sid=sid)
+        stuck_id = start.json()["data"]["taskid"]
+        await asyncio.sleep(0.2)
+        stuck = await api_call(
+            http, "SYNO.Core.Upgrade", "update_task_status", version=1, sid=sid,
+            extra={"taskid": str(stuck_id)},
+        )
+        assert stuck.json()["data"]["status"] == "running"
+
+    async def test_support_export_serves_downloadable_bundle(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        exported = await api_call(http, "SYNO.Core.Support", "export", version=1, sid=sid)
+        assert exported.json()["success"] is True
+        path = exported.json()["data"]["file"]
+        assert path.startswith("/support/export/") and path.endswith(".zip")
+        download = await http.get(path)
+        assert download.status_code == 200
+        assert download.headers["content-type"] == "application/zip"
+        import io
+        import json as jsonlib
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            names = set(archive.namelist())
+            assert {"manifest.json", "log-entries.json", "system.json"} <= names
+            manifest = jsonlib.loads(archive.read("manifest.json"))
+        assert manifest["format"] == "warden-dsm-support-bundle/1"
+        assert {source["name"] for source in manifest["sources"]} == {"system_log", "system_info"}
+        assert all(len(source["sha256"]) == 64 for source in manifest["sources"])
+        snapshot = (await http.get("/warden-sim/control")).json()
+        assert snapshot["exported_bundles"] == 1
+
+    async def test_backup_status_lists_packages_and_jobs(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        listed = await api_call(http, "SYNO.Core.Backup", "list", version=1, sid=sid)
+        data = listed.json()["data"]
+        assert data["total"] == 2
+        assert {job["name"] for job in data["jobs"]} == {"Daily Backup", "Weekly Backup"}
+        by_package = {package["package"]: package for package in data["packages"]}
+        assert by_package["hyper_backup"]["available"] is True
+        assert by_package["snapshot_replication"] == {
+            "name": "Snapshot Replication",
+            "package": "snapshot_replication",
+            "available": False,
+            "reason": "not_installed",
+        }
+        await control(http, {"backup_snapshot_available": True})
+        listed = await api_call(http, "SYNO.Core.Backup", "list", version=1, sid=sid)
+        data = listed.json()["data"]
+        assert {job["type"] for job in data["jobs"]} == {"hyper_backup", "snapshot"}
+        assert data["total"] == 3
+        await control(http, {"backup_no_jobs": True})
+        listed = await api_call(http, "SYNO.Core.Backup", "list", version=1, sid=sid)
+        assert listed.json()["data"]["jobs"] == []
+        assert listed.json()["data"]["total"] == 0
+
+    async def test_snmp_set_get_and_test_trap_record(self, http: httpx.AsyncClient) -> None:
+        sid = await login(http)
+        current = await api_call(http, "SYNO.Core.Network.SNMP", "get", version=1, sid=sid)
+        assert current.json()["data"] == {"enabled": False, "receiver_address": ""}
+        rejected = await api_call(
+            http, "SYNO.Core.Network.SNMP", "set", version=1, sid=sid,
+            extra={"enabled": "true", "receiver_address": ""},
+        )
+        assert rejected.json()["error"]["code"] == 101
+        accepted = await api_call(
+            http, "SYNO.Core.Network.SNMP", "set", version=1, sid=sid,
+            extra={"enabled": "true", "receiver_address": "192.0.2.10:1162"},
+        )
+        assert accepted.json()["data"] == {"enabled": True, "receiver_address": "192.0.2.10:1162"}
+        readback = await api_call(http, "SYNO.Core.Network.SNMP", "get", version=1, sid=sid)
+        assert readback.json()["data"] == {"enabled": True, "receiver_address": "192.0.2.10:1162"}
+        snapshot = (await http.get("/warden-sim/control")).json()
+        assert snapshot["traps"][0]["receiver_address"] == "192.0.2.10:1162"
+        await api_call(
+            http, "SYNO.Core.Network.SNMP", "set", version=1, sid=sid,
+            extra={"enabled": "false", "receiver_address": ""},
+        )
+        readback = await api_call(http, "SYNO.Core.Network.SNMP", "get", version=1, sid=sid)
+        assert readback.json()["data"] == {"enabled": False, "receiver_address": ""}
+
+    async def test_web_origin_served_while_online(self, http: httpx.AsyncClient) -> None:
+        root = await http.get("/")
+        assert root.status_code == 200
+        assert "text/html" in root.headers["content-type"]
+        assert b"DSM (simulated)" in root.content

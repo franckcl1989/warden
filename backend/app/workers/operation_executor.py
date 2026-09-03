@@ -116,6 +116,11 @@ DEADLINE_MARGIN_SECONDS = 0.25
 
 UI_EVENT_TYPE_OPERATION_UPDATED = "operation.updated"
 
+# Platform runtime-context key for snmp.configure (NAS-ACT-06): the trap
+# receiver address from the deployment config — same key as the adapter's
+# dsm_operations module reads.
+SNMP_RECEIVER_CTX_KEY = "snmp_receiver"
+
 # Virtual-media device-pull tickets live up to 24 h (ARCHITECTURE.md §3.6).
 VIRTUAL_MEDIA_TICKET_HOURS = 24
 
@@ -123,6 +128,12 @@ VIRTUAL_MEDIA_TICKET_HOURS = 24
 # certification shape only — real vendor images are overlay territory, M3T5).
 IMAGE_HEADER_MARKER = b"WARDEN-SIM-FW "
 IMAGE_HEADER_MAX_BYTES = 4096
+
+# NAS PAT package metadata header: the warden-sim PAT format (simulator
+# certification shape only — real Synology PAT metadata parsing is
+# vendor_private, [sim] basis until target-model certification, ADR-018).
+PAT_HEADER_MARKER = b"WARDEN-SIM-PAT "
+PAT_HEADER_MAX_BYTES = 4096
 
 
 def _replace_plan_runtime(plan: OperationPlan, runtime: dict[str, object]) -> OperationPlan:
@@ -836,6 +847,50 @@ class OperationExecutor:
             return None
         return {"model": model, "target": target, "version": version}
 
+    def _nas_pat_metadata(
+        self, storage: FileStorage, file_row: File
+    ) -> dict[str, str] | None:
+        """Parse the warden-sim PAT header (bounded head read).
+
+        The platform reads ONLY the certified PAT header shape (simulator
+        DSL; real Synology PAT metadata parsing is vendor_private — [sim]
+        basis until target-model certification records the exact format,
+        ADR-018). An unreadable/absent header returns None — the platform
+        never guesses package metadata.
+        """
+        stored = StoredFile(
+            storage_key=storage_key(file_row),
+            encrypted=False,
+            size_bytes=file_row.size_bytes,
+            key_version=None,
+        )
+        try:
+            limit = min(PAT_HEADER_MAX_BYTES, file_row.size_bytes)
+            chunks = storage.open_chunks(stored, key_cipher=None, start=0, limit=limit)
+            head = b"".join(chunks)
+        except (FileStorageError, ValueError):
+            return None
+        line, _, _ = head.partition(b"\n")
+        if not line.startswith(PAT_HEADER_MARKER):
+            return None
+        raw = line[len(PAT_HEADER_MARKER) :].strip()
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        model = payload.get("model")
+        version = payload.get("version")
+        if not (
+            isinstance(model, str)
+            and model
+            and isinstance(version, str)
+            and version
+        ):
+            return None
+        return {"model": model, "version": version}
+
     def _operation_context(
         self,
         session: Session,
@@ -928,32 +983,55 @@ class OperationExecutor:
             if file_row is None:
                 return None
             storage, _cipher = self._file_services()
-            metadata = self._firmware_image_metadata(storage, file_row)
-            target_id = plan.normalized_parameters.get("target_id")
-            if metadata is None:
-                self._fail_task(
-                    session,
-                    task,
-                    error_code="validation_failed",
-                    error_detail="固件包元数据无法解析（缺少 warden-sim 图像头），操作未执行",
-                )
-                return None
-            if metadata["target"] != target_id:
-                self._fail_task(
-                    session,
-                    task,
-                    error_code="validation_failed",
-                    error_detail=f"固件包目标（{metadata['target']}）与操作参数（{target_id}）不一致，操作未执行",
-                )
-                return None
-            if device.model is not None and device.model != metadata["model"]:
-                self._fail_task(
-                    session,
-                    task,
-                    error_code="validation_failed",
-                    error_detail=f"固件包型号（{metadata['model']}）与设备型号（{device.model}）不匹配，操作未执行",
-                )
-                return None
+            if plan.requirement_id == "NAS-ACT-06":
+                # NAS PAT update (M4T3): the warden-sim PAT header carries
+                # model + version only (no target inventory id). The model
+                # must match the device — anything else fails BEFORE the
+                # dispatch fence (validation_failed), never reaching the DSM.
+                metadata = self._nas_pat_metadata(storage, file_row)
+                if metadata is None:
+                    self._fail_task(
+                        session,
+                        task,
+                        error_code="validation_failed",
+                        error_detail="PAT 包元数据无法解析（缺少 warden-sim PAT 头），操作未执行",
+                    )
+                    return None
+                if device.model is not None and device.model != metadata["model"]:
+                    self._fail_task(
+                        session,
+                        task,
+                        error_code="validation_failed",
+                        error_detail=f"PAT 包型号（{metadata['model']}）与设备型号（{device.model}）不匹配，操作未执行",
+                    )
+                    return None
+            else:
+                metadata = self._firmware_image_metadata(storage, file_row)
+                target_id = plan.normalized_parameters.get("target_id")
+                if metadata is None:
+                    self._fail_task(
+                        session,
+                        task,
+                        error_code="validation_failed",
+                        error_detail="固件包元数据无法解析（缺少 warden-sim 图像头），操作未执行",
+                    )
+                    return None
+                if metadata["target"] != target_id:
+                    self._fail_task(
+                        session,
+                        task,
+                        error_code="validation_failed",
+                        error_detail=f"固件包目标（{metadata['target']}）与操作参数（{target_id}）不一致，操作未执行",
+                    )
+                    return None
+                if device.model is not None and device.model != metadata["model"]:
+                    self._fail_task(
+                        session,
+                        task,
+                        error_code="validation_failed",
+                        error_detail=f"固件包型号（{metadata['model']}）与设备型号（{device.model}）不匹配，操作未执行",
+                    )
+                    return None
             link_input_file(
                 db=session,
                 file_row=file_row,
@@ -976,18 +1054,28 @@ class OperationExecutor:
                     audit=audit,
                 )
                 session.flush()
-            runtime["file"] = {
+            file_ctx: dict[str, object] = {
                 "file_id": str(file_row.id),
                 "file_type": file_row.file_type,
                 "sha256": file_row.sha256,
                 "expected_model": metadata["model"],
-                "expected_target": metadata["target"],
                 "expected_version": metadata["version"],
             }
+            if "expected_target" in metadata:
+                file_ctx["expected_target"] = metadata["target"]
+            runtime["file"] = file_ctx
             runtime["ticket"] = {
                 "url": ticket_url_for(self._settings, ticket),
                 "id": str(ticket.id),
             }
+        elif key == "snmp.configure":
+            # The trap receiver address comes ONLY from the deployment
+            # configuration (NAS-ACT-06 profile prohibition: 用户不能提供接
+            # 收地址 — the parameter schema accepts enabled only). An empty
+            # value stays in the context so the ADAPTER preflight fails
+            # not_configured before the dispatch fence.
+            receiver = self._settings.snmp_trap_receiver_address.strip()
+            runtime[SNMP_RECEIVER_CTX_KEY] = {"address": receiver}
         elif key == "virtual_media.unmount":
             slot_id = plan.normalized_parameters.get("slot_id")
             if isinstance(slot_id, str) and self._mount_task_for_slot(session, task, slot_id) is None:

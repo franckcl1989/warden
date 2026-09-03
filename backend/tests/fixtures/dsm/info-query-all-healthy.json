@@ -21,6 +21,11 @@
       "minVersion": 1,
       "maxVersion": 1
     },
+    "SYNO.Core.Share": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    },
     "SYNO.Core.UPS": {
       "path": "entry.cgi",
       "minVersion": 1,
@@ -32,6 +37,21 @@
       "maxVersion": 1
     },
     "SYNO.Core.Upgrade": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    },
+    "SYNO.Core.Support": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    },
+    "SYNO.Core.Backup": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    },
+    "SYNO.Core.Network.SNMP": {
       "path": "entry.cgi",
       "minVersion": 1,
       "maxVersion": 1

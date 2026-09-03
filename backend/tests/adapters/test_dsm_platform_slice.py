@@ -252,6 +252,17 @@ def _onboard(
         "shared_folder.usage_percent",
         "ups.status",
         "connectivity.management",
+        # NAS-ACT operation rows (M4T3): supported when the certified source
+        # API is callable on the discovered device.
+        "power.restart",
+        "power.shutdown",
+        "console.dsm.open",
+        "logs.support_bundle.collect",
+        "disk.smart_test.quick",
+        "disk.smart_test.full",
+        "backup.status.refresh",
+        "firmware.update",
+        "snmp.configure",
         "event.system_log",
     }
     psu = next(item for item in discovery["capabilities"] if item["capability_key"] == "psu.status")
@@ -344,7 +355,8 @@ class TestDsmPlatformSlice:
                             ),
                             {"id": device_id},
                         ).scalar()
-                        == 14
+                        # 14 monitoring rows + 9 NAS-ACT operation rows (M4T3).
+                        == 23
                     )
 
                 # Connectivity-only health run FIRST (the real 30 s cadence):

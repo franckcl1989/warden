@@ -117,6 +117,12 @@ class WardenSettings(BaseSettings):
     # The ingest listener must accept traps from the LAN; bind-all is the deployment default,
     # operators narrow it via WARDEN_INGEST_BIND_HOST behind the firewall.
     ingest_bind_host: str = Field(default="0.0.0.0")  # noqa: S104
+    # The trap receiver ADDRESS the platform hands to devices through
+    # snmp.configure (NAS-ACT-06): host:port as the DSM must reach it.
+    # Deployment configuration ONLY — the operation profile prohibits
+    # user-supplied receiver addresses; empty = snmp.configure preflight
+    # fails not_configured.
+    snmp_trap_receiver_address: str = Field(default="")
 
     # Platform base URL devices use to pull firmware / virtual media
     device_access_base_url: str = Field(default="")

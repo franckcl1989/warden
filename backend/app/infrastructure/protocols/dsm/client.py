@@ -81,6 +81,9 @@ CERTIFIED_API_VERSIONS: dict[str, int] = {
     "SYNO.Core.UPS": 1,  # [sim] fixture-certified v1
     "SYNO.Core.System.Log": 1,  # [sim] fixture-certified v1
     "SYNO.Core.Upgrade": 1,  # [sim] fixture-certified v1
+    "SYNO.Core.Support": 1,  # [sim] fixture-certified v1 (M4T3 NAS-ACT-03 export)
+    "SYNO.Core.Backup": 1,  # [sim] fixture-certified v1 (M4T3 NAS-ACT-05 status)
+    "SYNO.Core.Network.SNMP": 1,  # [sim] fixture-certified v1 (M4T3 NAS-ACT-06 trap config)
 }
 
 

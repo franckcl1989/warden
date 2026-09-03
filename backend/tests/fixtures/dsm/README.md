@@ -16,9 +16,9 @@ simulator DSL documented in `tests/simulators/dsm/README.md`.
 
 | File | Represents | Origin | Captured |
 | --- | --- | --- | --- |
-| `info-query-all-healthy.json` | `GET /webapi/query.cgi` (SYNO.API.Info.Query query=all API map) | simulator profile `healthy`, uvicorn 127.0.0.1 | 2026-09-03 |
-| `info-query-api-map-missing.json` | `GET /webapi/query.cgi` (API map WITHOUT SYNO.Storage.CGI.Storage) | simulator profile `api_map_missing`, uvicorn 127.0.0.1 | 2026-09-03 |
-| `info-query-ds224plus.json` | `GET /webapi/query.cgi` (SYNO.API.Info.Query query=all API map incl. SYNO.Core.Share) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `info-query-all-healthy.json` | `GET /webapi/query.cgi` (SYNO.API.Info.Query query=all API map incl. the M4T3 operation families SYNO.Core.Support/SYNO.Core.Backup/SYNO.Core.Network.SNMP) | simulator profile `healthy`, uvicorn 127.0.0.1 | 2026-09-03 (re-captured 2026-09-03 for M4T3) |
+| `info-query-api-map-missing.json` | `GET /webapi/query.cgi` (API map WITHOUT SYNO.Storage.CGI.Storage) | simulator profile `api_map_missing`, uvicorn 127.0.0.1 | 2026-09-03 (re-captured 2026-09-03 for M4T3) |
+| `info-query-ds224plus.json` | `GET /webapi/query.cgi` (SYNO.API.Info.Query query=all API map incl. SYNO.Core.Share and the M4T3 operation families) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 (re-captured 2026-09-03 for M4T3) |
 | `login-otp-required.json` | `GET /webapi/auth.cgi` (SYNO.API.Auth login answer: two-step required, code 403) | simulator failures knob `login_otp`, uvicorn 127.0.0.1 | 2026-09-03 |
 | `system-info-healthy.json` | `GET /webapi/entry.cgi` (SYNO.Core.System method=info, version 2) | simulator profile `healthy`, uvicorn 127.0.0.1 | 2026-09-03 |
 | `system-info-ds224plus.json` | `GET /webapi/entry.cgi` (SYNO.Core.System info, version 2 — ds224plus identity) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |

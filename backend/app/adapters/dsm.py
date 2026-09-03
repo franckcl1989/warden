@@ -1,12 +1,13 @@
-"""Synology NAS adapter — ``nas.synology_dsm`` (M4T2, NAS-MON-01..06).
+"""Synology NAS adapter — ``nas.synology_dsm`` (M4T2 collect + M4T3 ops).
 
 Registered device_type ``synology_nas`` for the two hardware-targets
 certification units (contracts/hardware-targets.json: nas.synology_ds224plus
 DS224+ and nas.synology_ds225plus DS225+, certification_scope=exact_model).
-Only monitoring probe/discover/collect is implemented here; the NAS-ACT
-operation mappings (M4T3+) are NOT wired yet, and discovery says so honestly
-(reason ``adapter_mapping_missing``) instead of claiming support this
-adapter cannot deliver.
+M4T2 wires probe/discover/collect (NAS-MON-01..06); M4T3 wires the NAS-ACT
+operation surface through ``dsm_operations.py`` (power restart/shutdown,
+console.dsm.open, logs.support_bundle.collect, disk.smart_test quick/full,
+backup.status.refresh, firmware.update, snmp.configure — 9 profiles, all
+verification strategies from contracts/operations.json).
 
 Honesty ledger (docs/DEVICE_ADAPTERS.md §5/§10, ADR-018 — every row with an
 explicit basis; the simulator is a TEST DEVICE, never 真机 evidence):
@@ -92,6 +93,7 @@ from ipaddress import IPv4Address, IPv6Address, ip_address
 
 import httpx
 
+from app.adapters.dsm_operations import SynologyDsmOperationsMixin
 from app.domain.adapter import (
     AdapterError,
     CapabilitySupport,
@@ -101,19 +103,13 @@ from app.domain.adapter import (
     DeviceSession,
     DiscoveryResult,
     EventObservation,
-    LaunchDescriptor,
     Observation,
     ObservationBatch,
     ObservationError,
-    OperationProgress,
-    OperationResult,
-    PreflightResult,
     ProbeResult,
     ProbeStage,
     Quality,
-    VerificationResult,
 )
-from app.domain.operation_plan import DeviceSnapshot, OperationPlan, OperationRequest
 from app.generated.capabilities import REQUIREMENTS
 from app.infrastructure.protocols.dsm.client import DSMClient, DSMEndpoint
 from app.infrastructure.protocols.dsm.discovery import AUTH_API_NAME, INFO_API_NAME
@@ -149,8 +145,8 @@ MAX_LOG_PAGES = 25  # bounded DSM log page walk (parse-layer budget, honest erro
 # the DSM Login Web API guide; [sim] rows are simulator-DSL placeholders for
 # the DSM vendor_private management families (DEVICE_ADAPTERS.md §5: 官方登录
 # 指南只证明 API 发现/认证流程；每个非公开管理 API 必须标记 vendor_private
-# 并以 fixture + 真机认证形成证据) — fixture-certified in M4T2, real-DSM
-# certification pending. Versions are enforced by the client ledger
+# 并以 fixture + 真机认证形成证据) — fixture-certified in M4T2/M4T3,
+# real-DSM certification pending. Versions are enforced by the client ledger
 # (CERTIFIED_API_VERSIONS); this module documents the mapping-level basis.
 API_BASIS: dict[str, str] = {
     INFO_API_NAME: "[guide] DSM Login Web API guide（discovery，query.cgi v1）",
@@ -163,7 +159,22 @@ API_BASIS: dict[str, str] = {
     ),
     "SYNO.Core.UPS": "[sim] DSM UPS 族占位 API（get v1，fixture 认证；真机待认证）",
     "SYNO.Core.System.Log": "[sim] DSM 日志中心族占位 API（list v1，fixture 认证；真机待认证）",
-    "SYNO.Core.Upgrade": ("[sim] DSM 更新族占位 API（v1，fixture 认证；真机待认证；NAS-ACT-06 固件升级用）"),
+    "SYNO.Core.Upgrade": (
+        "[sim] DSM 更新族占位 API（upgrade/update_task_status v1，fixture 认证；真机待认证；"
+        "NAS-ACT-06 固件升级用）"
+    ),
+    "SYNO.Core.Support": (
+        "[sim] DSM 支持中心/日志导出族占位 API（export v1，fixture 认证；真机待认证；"
+        "NAS-ACT-03 支持包导出用）"
+    ),
+    "SYNO.Core.Backup": (
+        "[sim] DSM Hyper Backup/快照复制状态族占位 API（list v1，fixture 认证；真机待认证；"
+        "NAS-ACT-05 备份/快照任务状态用）"
+    ),
+    "SYNO.Core.Network.SNMP": (
+        "[sim] DSM 控制面板 SNMP/Trap 配置族占位 API（get/set v1，fixture 认证；真机待认证；"
+        "NAS-ACT-06 snmp.configure 用；MIB Guide 声称 DSM 不支持 SNMP trap，最终映射以真机认证为准）"
+    ),
 }
 
 # --- capability evidence vocabulary -------------------------------------------
@@ -200,6 +211,38 @@ KEY_API: dict[str, str] = {
     "ups.status": "SYNO.Core.UPS",
     "connectivity.management": "SYNO.Core.System",
     "event.system_log": "SYNO.Core.System.Log",
+}
+
+# Operation key -> the certified API name that serves it (M4T3 NAS-ACT
+# profiles from contracts/operations.json). ``console.dsm.open`` is the
+# launch-channel exception: its target IS the validated DSM management
+# origin, so the certified surface it depends on is the authenticated
+# SYNO.Core.System row (any device that logs in serves DSM on that origin).
+OPERATION_KEY_API: dict[str, str] = {
+    "power.restart": "SYNO.Core.System",
+    "power.shutdown": "SYNO.Core.System",
+    "console.dsm.open": "SYNO.Core.System",
+    "logs.support_bundle.collect": "SYNO.Core.Support",
+    "disk.smart_test.quick": "SYNO.Storage.CGI.Storage",
+    "disk.smart_test.full": "SYNO.Storage.CGI.Storage",
+    "backup.status.refresh": "SYNO.Core.Backup",
+    "firmware.update": "SYNO.Core.Upgrade",
+    "snmp.configure": "SYNO.Core.Network.SNMP",
+}
+
+# Per-operation basis notes appended to the discovery row detail (method
+# families actually mapped — the client ledger enforces (api, version), the
+# per-call method evidence is recorded in the execution evidence).
+OPERATION_METHOD_BASIS: dict[str, str] = {
+    "power.restart": "SYNO.Core.System restart",
+    "power.shutdown": "SYNO.Core.System shutdown",
+    "console.dsm.open": "DSM 管理来源 URL（不带凭据）",
+    "logs.support_bundle.collect": "SYNO.Core.Support export",
+    "disk.smart_test.quick": "SYNO.Storage.CGI.Storage smart_test(type=quick)",
+    "disk.smart_test.full": "SYNO.Storage.CGI.Storage smart_test(type=full)",
+    "backup.status.refresh": "SYNO.Core.Backup list",
+    "firmware.update": "SYNO.Core.Upgrade upgrade",
+    "snmp.configure": "SYNO.Core.Network.SNMP set/get",
 }
 
 # --- certified component-status projections (simulator-DSL rows) --------------
@@ -1114,11 +1157,11 @@ def _api_basis(api_name: str) -> str:
 
 def _capability_rows(client: DSMClient, adapter_key: str) -> tuple[CapabilitySupport, ...]:
     """One row per synology_nas capability key (24 unique keys across
-    NAS-MON-01..06 + NAS-ACT-01..06). A monitoring row is supported when its
-    certified source API is callable on the discovered device AND the
-    adapter implements the mapping; NAS-ACT rows stay unsupported
-    (``adapter_mapping_missing``) until the operation milestone wires them —
-    an honest platform-side gap, never blamed on the device."""
+    NAS-MON-01..06 + NAS-ACT-01..06). A row is supported when its certified
+    source API is callable on the discovered device AND the adapter
+    implements the mapping; missing/unnegotiable API rows stay unsupported
+    with the honest reason (api_not_discovered / no_certified_version /
+    device_too_old / range_mismatch) — never guessed paths."""
     rows: list[CapabilitySupport] = []
     seen: set[str] = set()
     for requirement in REQUIREMENTS.values():
@@ -1151,14 +1194,7 @@ def _one_capability_row(
     kind: str,
 ) -> CapabilitySupport:
     if kind == "operation":
-        return CapabilitySupport(
-            capability_key=key,
-            support_state="unsupported",
-            requirement_id=requirement_id,
-            discovery_method=adapter_key,
-            reason_code=REASON_MAPPING_MISSING,
-            detail="NAS-ACT 操作映射尚未接线（M4T3+ 里程碑）；这是适配器侧缺口，不是设备不支持",
-        )
+        return _operation_capability_row(client, adapter_key, requirement_id, key)
     api_name = KEY_API.get(key, MISSING_CERTIFIED_API)
     if api_name == MISSING_CERTIFIED_API:
         return CapabilitySupport(
@@ -1182,6 +1218,55 @@ def _one_capability_row(
             requirement_id=requirement_id,
             discovery_method=adapter_key,
             detail=f"来源 {api_name} v{version}（{_api_basis(api_name)}）",
+        )
+    reason_code, detail = _api_reason_detail(reason, api_name)
+    return CapabilitySupport(
+        capability_key=key,
+        support_state="unsupported",
+        requirement_id=requirement_id,
+        discovery_method=adapter_key,
+        reason_code=reason_code,
+        detail=detail,
+    )
+
+
+def _operation_capability_row(
+    client: DSMClient,
+    adapter_key: str,
+    requirement_id: str,
+    key: str,
+) -> CapabilitySupport:
+    """One NAS-ACT operation capability row (M4T3).
+
+    ``console.dsm.open`` (launch channel) depends on the authenticated DSM
+    management surface — the same SYNO.Core.System row every other call
+    needs; all other NAS-ACT profiles map to their certified source API. A
+    callable certified API -> supported with the (api, version) + method
+    basis; an uncallable one -> unsupported with the honest negotiation
+    reason. Platform-side prerequisites (e.g. a configured trap receiver for
+    snmp.configure) are runtime preflight items, never discovery claims.
+    """
+    api_name = OPERATION_KEY_API.get(key, MISSING_CERTIFIED_API)
+    if api_name == MISSING_CERTIFIED_API:
+        return CapabilitySupport(
+            capability_key=key,
+            support_state="unsupported",
+            requirement_id=requirement_id,
+            discovery_method=adapter_key,
+            reason_code=REASON_MAPPING_MISSING,
+            detail="该 NAS-ACT 能力键没有已接线的适配路径（适配器侧缺口，不是设备不支持）",
+        )
+    reason = _callable_reason(client, api_name)
+    method_note = OPERATION_METHOD_BASIS.get(key, "")
+    if reason is None:
+        spec = client.call_spec(api_name)
+        version = spec.version if spec is not None else "?"
+        return CapabilitySupport(
+            capability_key=key,
+            support_state="supported",
+            requirement_id=requirement_id,
+            discovery_method=adapter_key,
+            detail=f"来源 {api_name} v{version}（{_api_basis(api_name)}；{method_note}）",
         )
     reason_code, detail = _api_reason_detail(reason, api_name)
     return CapabilitySupport(
@@ -1230,16 +1315,17 @@ def _capability_probe_summary(client: DSMClient) -> str:
 # --- adapter ---------------------------------------------------------------------------
 
 
-class SynologyDsmAdapter:
+class SynologyDsmAdapter(SynologyDsmOperationsMixin):
     """Synology NAS DSM WebAPI adapter (adapter_key ``nas.synology_dsm``).
 
     probe/discover/collect implement NAS-MON-01..06 against the certified
     DSM WebAPI rows at the top of this module (docs/DEVICE_ADAPTERS.md §5.1
     mapping table — EXACT keys/units from contracts/metrics.json and
     contracts/events.json; missing device values are ObservationErrors,
-    never 0/normal). Operation protocol methods honestly refuse with
-    ``unsupported_capability`` until the NAS-ACT milestone wires them
-    (discovery rows agree: reason ``adapter_mapping_missing``).
+    never 0/normal). The NAS-ACT operation surface (M4T3) lives in
+    ``dsm_operations.py``: plan/preflight/execute/verify per profile and the
+    console.dsm.open launch descriptor (``create_launch``), all driven by
+    contracts/operations.json profiles and DEVICE_ADAPTERS.md §7/§9.
     """
 
     adapter_key = "nas.synology_dsm"
@@ -1467,37 +1553,10 @@ class SynologyDsmAdapter:
         finally:
             http.close()
 
-    # -- operation protocol (the NAS-ACT milestone wires these) ----------------------
-
-    def plan_operation(self, snapshot: DeviceSnapshot, request: OperationRequest) -> OperationPlan:
-        del snapshot, request
-        raise AdapterError("unsupported_capability", "NAS-ACT 操作映射未接线（M4T3+ 里程碑）", stage="prepare")
-
-    def preflight_operation(self, session: DeviceSession, plan: OperationPlan) -> PreflightResult:
-        del session, plan
-        raise AdapterError("unsupported_capability", "NAS-ACT 操作映射未接线（M4T3+ 里程碑）", stage="preflight")
-
-    def execute_operation(
-        self,
-        session: DeviceSession,
-        plan: OperationPlan,
-        progress: OperationProgress,
-    ) -> OperationResult:
-        del session, plan, progress
-        raise AdapterError("unsupported_capability", "NAS-ACT 操作映射未接线（M4T3+ 里程碑）", stage="execute")
-
-    def verify_operation(
-        self,
-        session: DeviceSession,
-        plan: OperationPlan,
-        result: OperationResult | None,
-    ) -> VerificationResult:
-        del session, plan, result
-        raise AdapterError("unsupported_capability", "NAS-ACT 操作映射未接线（M4T3+ 里程碑）", stage="verify")
-
-    def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor:
-        del session, capability
-        raise AdapterError("unsupported_capability", "NAS-ACT 操作映射未接线（M4T3+ 里程碑）", stage="launch")
+    # -- operation protocol -------------------------------------------------
+    # plan/preflight/execute/verify + create_launch come from the M4T3
+    # operations mixin (dsm_operations.py) — NAS-ACT-01..06 profiles from
+    # contracts/operations.json.
 
 
 def _not_executed_stages(names: tuple[str, ...]) -> tuple[ProbeStage, ...]:

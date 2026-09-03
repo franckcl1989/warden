@@ -264,7 +264,8 @@ class TestDiscover:
         # psu.status: no certified WebAPI source -> unsupported, never a value.
         assert rows["psu.status"].support_state == "unsupported"
         assert rows["psu.status"].reason_code == "no_webapi_source"
-        # NAS-ACT rows: honest platform-side gap until the ops milestone.
+        # NAS-ACT rows (M4T3): supported when the certified operation source
+        # API is callable on the device; the row detail carries the mapping.
         for key in (
             "power.restart",
             "power.shutdown",
@@ -276,8 +277,10 @@ class TestDiscover:
             "firmware.update",
             "snmp.configure",
         ):
-            assert rows[key].support_state == "unsupported", key
-            assert rows[key].reason_code == "adapter_mapping_missing", key
+            assert rows[key].support_state == "supported", key
+            assert rows[key].reason_code is None, key
+            assert "SYNO." in (rows[key].detail or ""), key
+            assert "[" in (rows[key].detail or ""), key  # [sim]/[guide] basis tag
 
     def test_discovery_api_map_missing_marks_affected_keys_unsupported(self, dsm: DSMControl) -> None:
         dsm.set(profile="api_map_missing")
@@ -288,10 +291,33 @@ class TestDiscover:
         assert rows["disk.status"].reason_code == "api_not_discovered"
         assert rows["storage_pool.status"].support_state == "unsupported"
         assert rows["volume.usage_percent"].support_state == "unsupported"
+        # NAS-ACT SMART rows share the missing Storage family.
+        assert rows["disk.smart_test.quick"].support_state == "unsupported"
+        assert rows["disk.smart_test.quick"].reason_code == "api_not_discovered"
+        assert rows["disk.smart_test.full"].support_state == "unsupported"
         # Families whose API is present stay supported.
         assert rows["temperature.system"].support_state == "supported"
         assert rows["ups.status"].support_state == "supported"
         assert rows["connectivity.management"].support_state == "supported"
+        assert rows["power.restart"].support_state == "supported"
+        assert rows["backup.status.refresh"].support_state == "supported"
+
+    def test_discovery_missing_operation_family_apis_stay_honest(self, dsm: DSMControl) -> None:
+        dsm.set(missing_apis=["SYNO.Core.Support", "SYNO.Core.Backup", "SYNO.Core.Network.SNMP"])
+        adapter = get_adapter(ADAPTER_KEY)
+        discovery = adapter.discover(_profile(dsm))
+        rows = {row.capability_key: row for row in discovery.capabilities}
+        for key, api in (
+            ("logs.support_bundle.collect", "SYNO.Core.Support"),
+            ("backup.status.refresh", "SYNO.Core.Backup"),
+            ("snmp.configure", "SYNO.Core.Network.SNMP"),
+        ):
+            assert rows[key].support_state == "unsupported", key
+            assert rows[key].reason_code == "api_not_discovered", key
+            assert api in (rows[key].detail or ""), key
+        # The remaining operation families are unaffected.
+        assert rows["power.shutdown"].support_state == "supported"
+        assert rows["firmware.update"].support_state == "supported"
 
     def test_discovery_ds225plus_identity(self, dsm: DSMControl) -> None:
         dsm.set(profile="ds225plus")

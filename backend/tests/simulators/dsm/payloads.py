@@ -8,6 +8,11 @@ client and contract parsing tests only and are NOT real-DSM evidence.
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
+import re
+import zipfile
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +22,9 @@ BASE = "/webapi"
 # API map the simulator advertises via SYNO.API.Info.Query. Per-API
 # (path, minVersion, maxVersion); versions sit inside the platform ledger's
 # certified rows except where a test inflates one (see README basis notes).
+# SYNO.Core.Support / SYNO.Core.Backup / SYNO.Core.Network.SNMP are the
+# M4T3 operation-family rows (NAS-ACT-03/05/06), same simulator-DSL basis as
+# the other control-panel families (README basis table).
 API_MAP: dict[str, dict[str, object]] = {
     "SYNO.API.Info": {"path": "query.cgi", "minVersion": 1, "maxVersion": 1},
     "SYNO.API.Auth": {"path": "auth.cgi", "minVersion": 1, "maxVersion": 6},
@@ -26,7 +34,24 @@ API_MAP: dict[str, dict[str, object]] = {
     "SYNO.Core.UPS": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
     "SYNO.Core.System.Log": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
     "SYNO.Core.Upgrade": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+    "SYNO.Core.Support": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+    "SYNO.Core.Backup": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+    "SYNO.Core.Network.SNMP": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
 }
+
+# Operation-family task/DSL defaults (M4T3): SMART quick/full async durations,
+# the DSM update install + reboot windows and the restart blip. Tests shorten
+# every duration through the live control endpoint; the defaults below are
+# the documented DSL behavior the operation verify loops are built against.
+DEFAULT_SMART_QUICK_SECONDS = 2.0
+DEFAULT_SMART_FULL_SECONDS = 5.0
+DEFAULT_UPGRADE_DURATION_SECONDS = 2.0
+DEFAULT_UPGRADE_OFFLINE_SECONDS = 0.6
+DEFAULT_RESTART_BLIP_SECONDS = 0.5
+
+# Fixed backup-job timestamps (deterministic DSL data, ISO-8601 UTC).
+BACKUP_JOB_LAST_RUN_AT = "2026-09-03T00:30:00+00:00"
+BACKUP_SNAPSHOT_LAST_RUN_AT = "2026-09-03T01:00:00+00:00"
 
 PROFILES = (
     "healthy",
@@ -68,14 +93,38 @@ def _identity_for(profile: str) -> dict[str, str]:
     return _IDENTITY_DS224PLUS
 
 
+def identity_of(cfg: SimulatorConfig) -> dict[str, str]:
+    """The profile's identity block (model/serial/firmware, DSL data)."""
+    return _identity_for(cfg.profile)
+
+
 @dataclass(frozen=True)
 class SimulatorConfig:
-    """Constructor configuration (tests may also switch live via control)."""
+    """Constructor configuration (tests may also switch live via control).
+
+    Task/operation timing knobs (M4T3): SMART quick/full async tests run for
+    ``smart_quick_duration_seconds`` / ``smart_full_duration_seconds`` then
+    complete (or fail / never complete via failure injection); a DSM update
+    installs for ``upgrade_duration_seconds`` then reboots (all /webapi
+    endpoints answer 503) for ``upgrade_offline_seconds`` before the new
+    firmware version is served; a restart is an offline blip of
+    ``restart_blip_seconds``. ``upgrade_fetch_required`` makes the update
+    flow fetch the platform PAT ticket URL (device-pull evidence, like the
+    Redfish simulator's update fetch) and apply the header version;
+    ``upgrade_target_version`` overrides the auto-bumped version when the
+    device does not fetch. ``storage_maintenance`` reports an active scrub
+    on SYNO.Core.System info (blocks power/update preflight in the DSL);
+    ``backup_no_jobs`` serves an empty SYNO.Core.Backup job list.
+    """
 
     username: str = "admin"
     password: str = "sim-pass-1"
     profile: str = "healthy"
-    task_duration_seconds: float = 0.15
+    smart_quick_duration_seconds: float = DEFAULT_SMART_QUICK_SECONDS
+    smart_full_duration_seconds: float = DEFAULT_SMART_FULL_SECONDS
+    upgrade_duration_seconds: float = DEFAULT_UPGRADE_DURATION_SECONDS
+    upgrade_offline_seconds: float = DEFAULT_UPGRADE_OFFLINE_SECONDS
+    restart_blip_seconds: float = DEFAULT_RESTART_BLIP_SECONDS
     log_total: int = 24
     log_page_size: int = 20
     # Knobs — each exercises one honest adapter edge:
@@ -104,6 +153,12 @@ class SimulatorConfig:
     share_no_quota: bool = False
     log_append: int = 0
     missing_apis: tuple[str, ...] = ()
+    # M4T3 operation knobs (see class docstring).
+    upgrade_fetch_required: bool = False
+    upgrade_target_version: str = ""
+    storage_maintenance: bool = False
+    backup_no_jobs: bool = False
+    backup_snapshot_available: bool = False
 
     def effective_map(self) -> dict[str, dict[str, object]]:
         excluded = frozenset(self.missing_apis)
@@ -132,10 +187,14 @@ class TaskRecord:
     created_monotonic: float
     duration_seconds: float
     fails: bool = False
+    never_completes: bool = False
+    target_version: str | None = None
+    reboot_seconds: float = 0.0
+    disk: str | None = None
 
     def state_at(self, now: float) -> tuple[str, int]:
         elapsed = now - self.created_monotonic
-        if elapsed < self.duration_seconds:
+        if self.never_completes or elapsed < self.duration_seconds:
             return "running", 40
         if self.fails:
             return "failure", 100
@@ -225,19 +284,40 @@ def system_info_payload(cfg: SimulatorConfig) -> dict[str, Any]:
         else:
             fans.append({"id": index, "name": f"Fan {index}", "rpm": 2100, "status": "Normal"})
     identity = _identity_for(cfg.profile)
-    return success(
-        {
-            "model": identity["model"],
-            "serial": identity["serial"],
-            "firmware": identity["firmware"],
-            "temperature": [
-                {"id": "system", "name": "System", "temp_c": 41.0},
-                {"id": "disk", "name": "Disk", "temp_c": 38.0},
-            ],
-            "fan": fans,
-            "uptime_seconds": 86400 * 21,
-        }
-    )
+    data: dict[str, object] = {
+        "model": identity["model"],
+        "serial": identity["serial"],
+        "firmware": identity["firmware"],
+        "temperature": [
+            {"id": "system", "name": "System", "temp_c": 41.0},
+            {"id": "disk", "name": "Disk", "temp_c": 38.0},
+        ],
+        "fan": fans,
+        "uptime_seconds": 86400 * 21,
+    }
+    if cfg.storage_maintenance:
+        # M4T3 DSL: DSM reports an ACTIVE storage maintenance only while it
+        # runs (mirrors the rebuild_progress-only-while-rebuilding rule).
+        data["maintenance"] = {"active": True, "kind": "scrub"}
+    return success(data)
+
+
+def identity_firmware_version(cfg: SimulatorConfig) -> str:
+    """The profile's default DSM firmware version (runtime override base)."""
+    return _identity_for(cfg.profile)["firmware"]
+
+
+def bump_firmware_version(version: str) -> str:
+    """Auto-bump a simulator firmware version ``...-update<N>`` to N+1.
+
+    The M4T3 DSL default upgrade target when the device does not fetch the
+    PAT (deterministic version-bump knob semantics); a version without an
+    ``update<N>`` suffix is returned unchanged (never invented).
+    """
+    match = re.search(r"update(\d+)", version)
+    if match is None:
+        return version
+    return version[: match.start()] + f"update{int(match.group(1)) + 1}" + version[match.end() :]
 
 
 def storage_payload(cfg: SimulatorConfig) -> dict[str, Any]:
@@ -366,3 +446,138 @@ def upgrade_payload(task_id: int) -> dict[str, Any]:
 
 def update_task_status_payload(task_id: int, status: str, progress: int) -> dict[str, Any]:
     return success({"taskid": task_id, "status": status, "progress": progress})
+
+
+# --- M4T3 operation-family payload builders -----------------------------------
+# All rows below are SIMULATOR DSL (README basis table): the DSM log-centre
+# export/support-package, Hyper Backup/Snapshot Replication and Control-Panel
+# SNMP families are NOT in the public Login guide and stay simulator-invented
+# placeholders until real-DSM certification (ADR-018) records the exact
+# target-model API shapes.
+
+
+def backup_payload(cfg: SimulatorConfig) -> dict[str, Any]:
+    """SYNO.Core.Backup method=list: backup/snapshot package + job statuses.
+
+    Snapshot Replication is reported unavailable (``not_installed``) by
+    default so a refresh always carries an explicit unavailable package
+    (contracts/operations.json backup.status.refresh success: 不可用包必须
+    显式); ``backup_snapshot_available`` adds it plus its snapshot job rows.
+    Job status/timestamps are device-reported DSL data (fixed deterministic
+    ISO-8601 timestamps); ``backup_no_jobs`` serves an empty job list.
+    """
+    packages: list[dict[str, object]] = [
+        {"name": "Hyper Backup", "package": "hyper_backup", "available": True},
+    ]
+    jobs: list[dict[str, object]] = []
+    if not cfg.backup_no_jobs:
+        jobs = [
+            {
+                "name": "Daily Backup",
+                "type": "hyper_backup",
+                "status": "success",
+                "last_run_at": BACKUP_JOB_LAST_RUN_AT,
+            },
+            {
+                "name": "Weekly Backup",
+                "type": "hyper_backup",
+                "status": "success",
+                "last_run_at": BACKUP_JOB_LAST_RUN_AT,
+            },
+        ]
+    if cfg.backup_snapshot_available:
+        packages.append({"name": "Snapshot Replication", "package": "snapshot_replication", "available": True})
+        if not cfg.backup_no_jobs:
+            jobs.append(
+                {
+                    "name": "Snapshot Schedule 1",
+                    "type": "snapshot",
+                    "status": "success",
+                    "last_run_at": BACKUP_SNAPSHOT_LAST_RUN_AT,
+                }
+            )
+    else:
+        packages.append(
+            {
+                "name": "Snapshot Replication",
+                "package": "snapshot_replication",
+                "available": False,
+                "reason": "not_installed",
+            }
+        )
+    return success({"packages": packages, "jobs": jobs, "total": len(jobs)})
+
+
+def snmp_config_payload(enabled: bool, receiver_address: str) -> dict[str, Any]:
+    """SYNO.Core.Network.SNMP get/set data member (trap config, DSL).
+
+    Only the trap enable state + the platform receiver address are modeled:
+    the platform NEVER accepts a user-supplied receiver (operations.json
+    snmp.configure prohibition); community/USM credential rows are ingest
+    (M5) territory and are not invented here.
+    """
+    return success({"enabled": enabled, "receiver_address": receiver_address})
+
+
+def _source_blob(name: str, payload: object) -> tuple[str, bytes, str]:
+    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return name, blob, hashlib.sha256(blob).hexdigest()
+
+
+def support_bundle_bytes(cfg: SimulatorConfig) -> bytes:
+    """The DSM support-package export content (deterministic zip, DSL).
+
+    Layout mirrors what the M4T3 adapter expects: a top-level
+    ``manifest.json`` (``warden-dsm-support-bundle/1``) listing every
+    included source with its SHA-256, plus one JSON member per source. The
+    log-centre entries reuse the deterministic LOG_EPOCH cadence so the
+    export is repeatable; ``created_at`` is the only live member.
+    """
+    total = cfg.log_total + cfg.log_append
+    entries: list[dict[str, object]] = []
+    for index in range(1, total + 1):
+        entries.append(
+            {
+                "id": index,
+                "time": int(LOG_EPOCH.timestamp()) + index,
+                "level": "INFO" if index % 5 else "WARNING",
+                "message": f"Simulated DSM log entry {index}",
+            }
+        )
+    identity = _identity_for(cfg.profile)
+    sources: list[dict[str, object]] = []
+    files: list[tuple[str, bytes]] = []
+    log_name, log_blob, log_sha = _source_blob(
+        "log-entries.json",
+        {"source": "system_log", "entries": entries, "total": total},
+    )
+    files.append((log_name, log_blob))
+    sources.append({"name": "system_log", "file": log_name, "entries": total, "sha256": log_sha})
+    sys_name, sys_blob, sys_sha = _source_blob(
+        "system.json",
+        {
+            "source": "system_info",
+            "system": {
+                "model": identity["model"],
+                "serial": identity["serial"],
+                "firmware": identity["firmware"],
+                "maintenance": "scrub" if cfg.storage_maintenance else "none",
+            },
+        },
+    )
+    files.append((sys_name, sys_blob))
+    sources.append({"name": "system_info", "file": sys_name, "entries": 1, "sha256": sys_sha})
+    manifest: dict[str, object] = {
+        "format": "warden-dsm-support-bundle/1",
+        "created_at": datetime.now(UTC).isoformat(),
+        "sources": sources,
+        "unavailable": [],
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+        )
+        for name, blob in files:
+            archive.writestr(name, blob)
+    return buffer.getvalue()
