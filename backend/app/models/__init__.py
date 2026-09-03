@@ -14,6 +14,7 @@ from app.models.devices import (
     DeviceCredential,
 )
 from app.models.files import ACTIVE_FILE_REFERENCE_STATES, DeviceFileTicket, File, FileLink
+from app.models.launch import LAUNCH_PROTOCOLS, LAUNCH_STATUSES, LaunchSession
 from app.models.observation import (
     ALERT_STATUSES,
     COLLECTION_STATES,
@@ -54,6 +55,8 @@ __all__ = [
     "HEALTH_STATES",
     "IDEMPOTENCY_KEY_MAX_LENGTH",
     "IDEMPOTENCY_KEY_MIN_LENGTH",
+    "LAUNCH_PROTOCOLS",
+    "LAUNCH_STATUSES",
     "METRIC_QUALITIES",
     "REACHABILITY_STATES",
     "READINESS_STATES",
@@ -71,6 +74,7 @@ __all__ = [
     "DeviceFileTicket",
     "File",
     "FileLink",
+    "LaunchSession",
     "MetricLatest",
     "MetricPoint",
     "OperationTask",

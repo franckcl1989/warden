@@ -31,7 +31,11 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import structlog
 
-from app.infrastructure.protocols.redfish.errors import RedfishError, map_http_error
+from app.infrastructure.protocols.redfish.errors import (
+    RedfishError,
+    classify_transport_error,
+    map_http_error,
+)
 
 
 class AuthMode(StrEnum):
@@ -205,15 +209,22 @@ class SessionAuth:
             "UserName": self._credentials.username,
             "Password": self._credentials.password,
         }
-        response = self._http.request(
-            "POST",
-            self._login_path(),
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            content=json.dumps(body),
-        )
+        try:
+            response = self._http.request(
+                "POST",
+                self._login_path(),
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                content=json.dumps(body),
+            )
+        except httpx.TransportError as exc:
+            # Same stable-code mapping as RedfishClient.request: a manager
+            # that is down/unreachable during login is a network_unreachable
+            # RedfishError, never a raw transport exception escaping into the
+            # adapter boundary (DEVICE_ADAPTERS.md §7).
+            raise classify_transport_error(exc) from exc
         if response.status_code in _SESSION_UNSUPPORTED_STATUSES:
             # No silent downgrade (SECURITY.md §6): basic requires an explicit
             # connection-config declaration.

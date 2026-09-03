@@ -78,6 +78,7 @@ class RateLimiter:
         probe_per_minute: int = 10,
         operation_preview_per_minute: int = 30,
         operation_submit_per_minute: int = 10,
+        launch_per_minute: int = 10,
         clock: Clock | None = None,
     ) -> None:
         self._login = FixedWindowLimiter(limit=login_per_minute, window_seconds=60, clock=clock)
@@ -89,6 +90,7 @@ class RateLimiter:
         self._submit = FixedWindowLimiter(
             limit=operation_submit_per_minute, window_seconds=60, clock=clock
         )
+        self._launch = FixedWindowLimiter(limit=launch_per_minute, window_seconds=60, clock=clock)
 
     def check_login(self, source_ip: str) -> RateLimitResult:
         return self._login.check(f"login:{source_ip}")
@@ -104,3 +106,6 @@ class RateLimiter:
 
     def check_operation_submit(self, user_id: str) -> RateLimitResult:
         return self._submit.check(f"submit:{user_id}")
+
+    def check_launch(self, user_id: str) -> RateLimitResult:
+        return self._launch.check(f"launch:{user_id}")

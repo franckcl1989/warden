@@ -75,6 +75,7 @@ from app.domain.adapter import (
     DeviceSession,
     DiscoveryResult,
     EventObservation,
+    LaunchDescriptor,
     Observation,
     ObservationBatch,
     ObservationError,
@@ -94,6 +95,10 @@ FAILURE_MODE_KEY = "failure_mode"
 PARTIAL_MODE_KEY = "partial_mode"
 CRITICAL_MODE_KEY = "critical_mode"
 NO_DATA_MODE_KEY = "no_data_mode"
+# M3T4 launch knob (dev/test only, mirrors the Redfish simulator knob): the
+# device reports no graphical console, so console.kvm.open launches fail
+# honestly with not_configured instead of fabricating a console URL.
+NO_GRAPHICAL_CONSOLE_KEY = "no_graphical_console"
 
 FAIL_PREFLIGHT_MODE_KEY = "fail_preflight_mode"
 STALE_PREFLIGHT_MODE_KEY = "stale_preflight_mode"
@@ -224,6 +229,8 @@ class FakeSimpleAdapter:
             JOB_POLL_FAIL_MODE_KEY: {"type": "boolean"},
             CRASH_BEFORE_FENCE_MODE_KEY: {"type": "boolean"},
             CRASH_AFTER_FENCE_MODE_KEY: {"type": "boolean"},
+            # M3T4 launch knob (dev/test only).
+            NO_GRAPHICAL_CONSOLE_KEY: {"type": "boolean"},
         },
     }
 
@@ -525,6 +532,44 @@ class FakeSimpleAdapter:
                 "strategy": strategy,
                 "device_job_id": job or (FAKE_DEVICE_JOB_ID if config.get(DEVICE_JOB_MODE_KEY) else None),
             },
+        )
+
+    def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor:
+        """Simulated launch descriptor (DEVICE_ADAPTERS.md §2, M3T4).
+
+        console.kvm.open yields the device's graphical-console entry URL on
+        the management origin — never credentials. The ``no_graphical_console``
+        knob (dev/test only) fails honestly with ``not_configured`` (the
+        adapter never fabricates a console that is not advertised);
+        unrecognized capabilities are ``unsupported_capability``.
+        """
+        if capability != "console.kvm.open":
+            raise AdapterError(
+                "unsupported_capability",
+                f"模拟设备未实现该能力的启动描述符 {capability}",
+                stage="launch",
+            )
+        if session.connection_config.get(NO_GRAPHICAL_CONSOLE_KEY):
+            raise AdapterError(
+                "not_configured",
+                "no_graphical_console：管理卡未提供图形控制台",
+                stage="launch",
+            )
+        config = session.connection_config
+        protocol = config.get("protocol", "https")
+        scheme = protocol if isinstance(protocol, str) and protocol in ("https", "http") else "https"
+        port_value = config.get("port")
+        port = port_value if isinstance(port_value, int) else None
+        # A default scheme port is omitted from the display URL (standard URL
+        # formatting); an explicit non-default port stays visible.
+        if port in (443 if scheme == "https" else 80, None):
+            authority = session.management_endpoint
+        else:
+            authority = f"{session.management_endpoint}:{port}"
+        return LaunchDescriptor(
+            kind="url",
+            url=f"{scheme}://{authority}/console",
+            display_hint="模拟设备图形控制台入口",
         )
 
     @staticmethod

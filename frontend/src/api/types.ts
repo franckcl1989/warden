@@ -61,6 +61,9 @@ export type OperationTaskDetail = Schemas['OperationTaskDetail'];
 export type OperationEventView = Schemas['OperationEventView'];
 export type OperationsListResponse = Schemas['OperationsListResponse'];
 
+export type LaunchCreateResponse = Schemas['LaunchCreateResponse'];
+export type LaunchConsumeResponse = Schemas['LaunchConsumeResponse'];
+
 export type FileView = Schemas['FileView'];
 export type FileListResponse = Schemas['FileListResponse'];
 export type FileUploadCreateRequest = Schemas['FileUploadCreateRequest'];

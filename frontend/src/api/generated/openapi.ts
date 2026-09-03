@@ -552,6 +552,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices/{id}/launches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Device Launches Create */
+        post: operations["device_launches_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/launches/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Launches Get
+         * @description One-shot descriptor read: first GET consumes; later GETs are 404.
+         *
+         *     The atomic claim (user-owned + issued + unexpired) runs first; a
+         *     permission re-check against the ticket's own profile follows — a user
+         *     demoted since issue can no longer consume (role changes revoke sessions
+         *     anyway — SECURITY.md §3.1 server-side re-validation). Any failure raises
+         *     before commit, so a refused read never consumes the ticket.
+         */
+        get: operations["launches_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/stream": {
         parameters: {
             query?: never;
@@ -1578,6 +1621,65 @@ export interface components {
             source: string;
             /** Freshness */
             freshness: string;
+        };
+        /**
+         * LaunchConsumeResponse
+         * @description JSON consume view (Accept: application/json); browsers get the HTML
+         *     auto-redirect page instead. Never contains credentials.
+         */
+        LaunchConsumeResponse: {
+            /**
+             * Launch Id
+             * Format: uuid
+             */
+            launch_id: string;
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            device_id: string;
+            /** Capability Key */
+            capability_key: string;
+            /** Requirement Id */
+            requirement_id: string;
+            descriptor: components["schemas"]["LaunchDescriptorPayload"];
+        };
+        /**
+         * LaunchCreateRequest
+         * @description API_CONTRACT.md §7: launch 请求只接受 capability_key 与 profile 参数.
+         */
+        LaunchCreateRequest: {
+            /** Capability Key */
+            capability_key: string;
+        };
+        /**
+         * LaunchCreateResponse
+         * @description 201 issue response: the ticket id, its expiry and the single-use
+         *     same-origin consume URL. The vendor descriptor URL is NOT included —
+         *     it leaves the platform exactly once through GET /launches/{id}.
+         */
+        LaunchCreateResponse: {
+            /**
+             * Launch Id
+             * Format: uuid
+             */
+            launch_id: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Url */
+            url: string;
+        };
+        /** LaunchDescriptorPayload */
+        LaunchDescriptorPayload: {
+            /** Kind */
+            kind: string;
+            /** Url */
+            url?: string | null;
+            /** Display Hint */
+            display_hint?: string | null;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -3694,6 +3796,112 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    device_launches_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LaunchCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LaunchCreateResponse"];
+                };
+            };
+            /** @description unauthenticated/session_expired */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description permission_denied / csrf_failed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description unsupported_operation / not_configured / validation_failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description rate_limited（含每用户 3、每设备 1 活动票据上限） */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    launches_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LaunchConsumeResponse"];
+                };
+            };
+            /** @description unauthenticated/session_expired */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description resource_not_found（已使用/已过期/已撤销/非本人/未知，统一 404） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

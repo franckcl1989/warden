@@ -62,8 +62,9 @@ class SimulatorConfig:
     # - no_virtual_media: the Manager resource has no VirtualMedia link;
     # - no_storage: the ComputerSystem has no Storage link;
     # - missing_system_status: the ComputerSystem has no Status block;
-    # - sel_oem_timestamps: SEL entries carry an OEM timestamp member instead
-    #   of the standard Created field.
+    # - no_graphical_console (M3T4): the Manager resource has no
+    #   GraphicalConsole block (console.kvm.open must fail honestly as
+    #   not_configured at launch time; discovery reports it unsupported).
     missing_memory_metrics: bool = False
     no_raid_volume: bool = False
     empty_sel: bool = False
@@ -72,6 +73,7 @@ class SimulatorConfig:
     no_storage: bool = False
     missing_system_status: bool = False
     sel_oem_timestamps: bool = False
+    no_graphical_console: bool = False
     # - missing_fan_reading: the first fan carries no Reading member;
     # - drives_without_oem: drives exist but carry no OEM SMART/predictive
     #   members.
@@ -622,6 +624,7 @@ def manager(
         "GraphicalConsole": {
             "ServiceEnabled": True,
             "MaxConcurrentSessions": 1,
+            "ConnectTypesSupported": ["KVM"],
         },
         "Actions": {
             "#Manager.Reset": {
@@ -636,6 +639,8 @@ def manager(
     }
     if view.cfg.no_virtual_media:
         payload.pop("VirtualMedia", None)
+    if view.cfg.no_graphical_console:
+        payload.pop("GraphicalConsole", None)
     return _odata(payload, f"{BASE}/Managers/1", "#Manager.v1_14_0.Manager")
 
 

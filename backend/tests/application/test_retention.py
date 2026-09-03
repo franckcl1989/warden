@@ -27,6 +27,7 @@ from app.config import WardenSettings
 from app.infrastructure.observation_store import ensure_metric_partitions
 from app.models.auth import AuditLog, User
 from app.models.auth import Session as DBSession
+from app.models.launch import LaunchSession
 from app.models.observation import (
     Alert,
     DeviceEvent,
@@ -692,3 +693,149 @@ class TestFunctionSafety:
         assert (NOW.date() - datetime.timedelta(days=2)).strftime(
             "metric_points_%Y_%m_%d"
         ) in report.partitions_dropped
+
+
+class TestLaunchSessionRetention:
+    """One-time launch tickets (migration 0013, API_CONTRACT.md §7).
+
+    Issued rows past their 60-second window are marked ``expired`` by the
+    sweep (bookkeeping — the single-use claim checks ``expires_at`` itself,
+    so an expired row can never be consumed); rows leave after the 30-day
+    lifetime (DATA_MODEL.md §10 set), like login sessions. Consumed rows
+    keep their status/time until the 30-day purge (forensics), then leave —
+    the permanent audit trail (launch.create / launch.consume) is what
+    survives.
+    """
+
+    def _launch_row(
+        self,
+        db_session: Session,
+        device_id: uuid.UUID,
+        user_id: uuid.UUID,
+        web_session_id: uuid.UUID,
+        *,
+        status: str,
+        consumed_at: datetime.datetime | None,
+        expires_at: datetime.datetime,
+        revoked_at: datetime.datetime | None = None,
+    ) -> None:
+        db_session.add(
+            LaunchSession(
+                device_id=device_id,
+                capability_key="console.kvm.open",
+                requirement_id="SRV-ACT-03",
+                user_id=user_id,
+                session_id=web_session_id,
+                protocol="kvm",
+                descriptor_url=f"https://192.0.2.10/console/{uuid.uuid4().hex}",
+                status=status,
+                consumed_at=consumed_at,
+                expires_at=expires_at,
+                revoked_at=revoked_at,
+                created_at=expires_at - datetime.timedelta(seconds=60),
+            )
+        )
+
+    def test_issued_rows_past_expiry_are_marked_expired(self, db_session: Session) -> None:
+        device = make_collection_device(db_session, index=20)
+        user = _user(db_session)
+        web_session = _session_row(db_session, user, revoked_at=None)
+        db_session.flush()
+        # Expired 5 minutes ago: the sweep must mark it expired.
+        self._launch_row(
+            db_session,
+            device.id,
+            user.id,
+            web_session.id,
+            status="issued",
+            consumed_at=None,
+            expires_at=NOW - datetime.timedelta(minutes=5),
+        )
+        # Still inside the 60-second window: stays issued.
+        self._launch_row(
+            db_session,
+            device.id,
+            user.id,
+            web_session.id,
+            status="issued",
+            consumed_at=None,
+            expires_at=NOW + datetime.timedelta(seconds=30),
+        )
+        db_session.commit()
+
+        report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
+        assert report.launch_sessions_expired == 1
+        rows = db_session.scalars(select(LaunchSession).order_by(LaunchSession.expires_at)).all()
+        assert {row.status for row in rows} == {"expired", "issued"}
+        # Neither row is old enough for the 30-day purge.
+        assert report.launch_sessions_deleted == 0
+
+    def test_rows_older_than_thirty_days_are_purged_in_every_status(self, db_session: Session) -> None:
+        device = make_collection_device(db_session, index=21)
+        user = _user(db_session)
+        web_session = _session_row(db_session, user, revoked_at=None)
+        db_session.flush()
+        for index, status in enumerate(("issued", "consumed", "expired", "revoked")):
+            self._launch_row(
+                db_session,
+                device.id,
+                user.id,
+                web_session.id,
+                status=status,
+                consumed_at=NOW - datetime.timedelta(days=40)
+                if status == "consumed"
+                else None,
+                expires_at=NOW - datetime.timedelta(days=40 + index),
+                revoked_at=NOW - datetime.timedelta(days=40 + index)
+                if status == "revoked"
+                else None,
+            )
+        # A fresh consumed row stays (forensics window not reached).
+        self._launch_row(
+            db_session,
+            device.id,
+            user.id,
+            web_session.id,
+            status="consumed",
+            consumed_at=NOW - datetime.timedelta(minutes=1),
+            expires_at=NOW - datetime.timedelta(seconds=10),
+        )
+        db_session.commit()
+
+        report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
+        assert report.launch_sessions_deleted == 4
+        remaining = db_session.scalars(select(LaunchSession.status)).all()
+        assert remaining == ["consumed"]
+        # Issued rows past expiry are marked even when they stay for the
+        # forensics window; the expired/revoked rows above were already gone
+        # before the marking pass ran? The sweep marks BEFORE it purges, so a
+        # 40-day-old issued row counts in both counters.
+        assert report.launch_sessions_expired == 1
+
+    def test_launch_retention_is_idempotent(self, db_session: Session) -> None:
+        device = make_collection_device(db_session, index=22)
+        user = _user(db_session)
+        web_session = _session_row(db_session, user, revoked_at=None)
+        db_session.flush()
+        self._launch_row(
+            db_session,
+            device.id,
+            user.id,
+            web_session.id,
+            status="issued",
+            consumed_at=None,
+            expires_at=NOW - datetime.timedelta(days=31),
+        )
+        db_session.commit()
+
+        first = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+        second = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
+        assert first.launch_sessions_expired == 1
+        assert first.launch_sessions_deleted == 1
+        assert second.launch_sessions_expired == 0
+        assert second.launch_sessions_deleted == 0
+        assert db_session.scalar(select(func.count()).select_from(LaunchSession)) == 0
+

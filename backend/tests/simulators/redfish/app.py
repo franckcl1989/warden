@@ -86,6 +86,7 @@ SURFACE_KNOB_KEYS = frozenset(
         "sel_oem_timestamps",
         "missing_fan_reading",
         "drives_without_oem",
+        "no_graphical_console",
         # M3T3 operation knobs (booleans).
         "power_readback_stale",
         "media_insert_rejects_foreign_url",

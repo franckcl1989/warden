@@ -28,6 +28,7 @@ from app.api.routes import (
     devices,
     events,
     files,
+    launches,
     metrics,
     operations,
     overview,
@@ -63,6 +64,7 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
         probe_per_minute=configured_settings.probe_rate_limit_per_minute,
         operation_preview_per_minute=configured_settings.operation_preview_rate_limit_per_minute,
         operation_submit_per_minute=configured_settings.operation_submit_rate_limit_per_minute,
+        launch_per_minute=configured_settings.launch_rate_limit_per_minute,
     )
     app.state.session_factory = None
     app.state.audit_logger = None
@@ -95,6 +97,10 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     api_v1_router.include_router(alerts.router, dependencies=[Depends(require_password_changed)])
     # M2T4 two-phase operations API (PLT-05): preview/confirm + task lifecycle.
     api_v1_router.include_router(operations.router, dependencies=[Depends(require_password_changed)])
+    # M3T4 launch sessions (PLT-09 launch 部分, SRV-ACT-03 console.kvm.open):
+    # issue + single-use descriptor GET. Same-origin by design — the consume
+    # GET is a plain browser navigation with the session cookie.
+    api_v1_router.include_router(launches.router, dependencies=[Depends(require_password_changed)])
     # M2T6 SSE realtime stream (PLT-09): ui_events replay + live updates.
     api_v1_router.include_router(events.router, dependencies=[Depends(require_password_changed)])
     # M2T5 controlled files (PLT-06): upload sessions / metadata / download /

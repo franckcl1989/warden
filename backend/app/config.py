@@ -50,6 +50,10 @@ class WardenSettings(BaseSettings):
     # 提交还有设备互斥作为真实并发边界。
     operation_preview_rate_limit_per_minute: int = Field(default=30, ge=1)
     operation_submit_rate_limit_per_minute: int = Field(default=10, ge=1)
+    # API_CONTRACT.md §11 launch：每用户每分钟可发起的远程连接请求数；真正的
+    # 并发边界是 §7 的"每用户最多 3、每设备最多 1"活动票据上限
+    # （application/launches.py 活动票据计数 + 事务级 advisory lock）。
+    launch_rate_limit_per_minute: int = Field(default=10, ge=1)
 
     # Database
     postgres_dsn_file: Path | None = Field(default=None)

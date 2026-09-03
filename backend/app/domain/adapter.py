@@ -152,7 +152,9 @@ class DeviceAdapter(Protocol):
     (``DeviceSession`` + ``CollectionRequest`` -> ``ObservationBatch``); M2T4
     adds the operation contract (``plan_operation``/``preflight_operation``/
     ``execute_operation``/``verify_operation`` over
-    ``DeviceSnapshot``/``OperationPlan``); M3 extends with launch descriptors.
+    ``DeviceSnapshot``/``OperationPlan``); M3T4 adds ``create_launch``
+    (API_CONTRACT.md §7 launch descriptors — connection-class capabilities
+    never enter the side-effect task queue).
     """
 
     adapter_key: str
@@ -173,6 +175,33 @@ class DeviceAdapter(Protocol):
     def verify_operation(
         self, session: DeviceSession, plan: OperationPlan, result: OperationResult | None
     ) -> VerificationResult: ...
+    def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor: ...
+
+
+@dataclass(frozen=True)
+class LaunchDescriptor:
+    """One controlled remote-connection launch target (API_CONTRACT.md §7,
+    docs/GLOSSARY.md launch_descriptor, DEVICE_ADAPTERS.md §2).
+
+    ``kind`` is ``url`` (open the vendor page in a new tab — KVM console
+    entry, DSM/web management origin) or ``terminal`` (browser-terminal
+    tickets arrive with the M3T5 terminal milestone). A ``url`` descriptor
+    NEVER carries credentials, platform session tokens or long-lived vendor
+    tokens (SECURITY.md §6, ADR-006: 不代理厂商页面、不注入凭据): the vendor
+    page may ask for its own authentication again (PRODUCT_DESIGN.md §7.3:
+    允许厂商再次认证). ``vendor_session_ref`` is an opaque vendor-side
+    reference for future HTML5-session launches (never a bearer token).
+    ``display_hint`` is a safe display string (e.g. the device protocol
+    label). Adapters that cannot produce a real target raise ``AdapterError``
+    (``not_configured``/``unsupported_capability``) — a fabricated or
+    generic homepage-only descriptor is never success
+    (contracts/operations.json verification.launch_target_validation).
+    """
+
+    kind: str  # url | terminal
+    url: str | None = None
+    vendor_session_ref: str | None = None
+    display_hint: str | None = None
 
 
 class Quality(StrEnum):

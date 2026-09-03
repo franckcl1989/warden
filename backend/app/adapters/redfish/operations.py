@@ -115,6 +115,7 @@ from app.domain.adapter import (
     DeviceSession,
     FirmwareItem,
     InventorySnapshot,
+    LaunchDescriptor,
     OperationProgress,
     OperationResult,
     PreflightResult,
@@ -395,6 +396,92 @@ def _system_identity(client: RedfishClient) -> dict[str, object]:
         "manager_uuid": manager_uuid,
         "model": _text_of(system, "Model"),
     }
+
+
+# -- launch (M3T4, API_CONTRACT.md §7) ---------------------------------------
+
+
+def _graphical_console_target(
+    manager: RedfishResource | Mapping[str, Any] | None,
+) -> dict[str, object] | None:
+    """The manager's usable KVM console advertisement, if any (M3T4).
+
+    Redfish has no standard KVM launch API; the Manager ``GraphicalConsole``
+    block is the ONLY standard advertisement of a KVM-capable console
+    (DSP2046 Manager GraphicalConsole: ServiceEnabled + optional
+    ConnectTypesSupported). ``ServiceEnabled`` must be true; when
+    ``ConnectTypesSupported`` is present it must include ``KVM`` (a console
+    limited to Text/Graphics is not a KVM target). Returns the console
+    block; None when the manager does not advertise a usable console — the
+    caller must fail honestly (``not_configured``), never fabricate a URL.
+    """
+    if manager is None:
+        return None
+    console = manager.get("GraphicalConsole")
+    if not isinstance(console, Mapping):
+        return None
+    if console.get("ServiceEnabled") is not True:
+        return None
+    connect_types = console.get("ConnectTypesSupported")
+    if connect_types is not None and (
+        not isinstance(connect_types, list) or "KVM" not in connect_types
+    ):
+        return None
+    return dict(console)
+
+
+def _console_origin_url(session: DeviceSession) -> str:
+    """The management origin URL for the console descriptor (never credentials).
+
+    Same endpoint resolution as every other adapter call
+    (``_endpoint_for``: operator-declared protocol/port; https default).
+    The descriptor URL carries no credentials/platform tokens (SECURITY.md
+    §6, ADR-006) — the vendor page may ask the operator to authenticate
+    again (PRODUCT_DESIGN.md §7.3: 允许厂商再次认证).
+    """
+    from app.adapters.redfish.common import _endpoint_for
+
+    endpoint = _endpoint_for(
+        resolved_ip=session.resolved_ip,
+        management_endpoint=session.management_endpoint,
+        connection_config=dict(session.connection_config),
+    )
+    return f"{endpoint.scheme}://{endpoint.host}:{endpoint.port}/"
+
+
+@_adapter_boundary("launch")
+def create_launch_method(session: DeviceSession, capability: str) -> LaunchDescriptor:
+    """console.kvm.open launch descriptor for the generic Redfish surface.
+
+    The generic adapter can only launch what the standard surface proves: a
+    Manager GraphicalConsole advertisement with ServiceEnabled + KVM among
+    ConnectTypesSupported (when present) yields a URL descriptor for the
+    management origin — a validated vendor entry that continues into the
+    console plugin/HTML5 KVM. No advertisement -> ``not_configured``
+    (reason ``no_graphical_console``), never a fabricated or generic
+    homepage-only success (contracts/operations.json
+    verification.launch_target_validation). Vendor HTML5 session-creation
+    APIs (Dell/iDRAC etc.) are M3T5 overlay territory.
+    """
+    if capability != "console.kvm.open":
+        raise AdapterError(
+            "unsupported_capability",
+            f"通用 Redfish 适配器未实现该能力的启动描述符 {capability}",
+            stage="launch",
+        )
+    with _open_session(session) as client:
+        console = _graphical_console_target(_manager(client))
+        if console is None:
+            raise AdapterError(
+                "not_configured",
+                "no_graphical_console：管理卡未提供启用的图形控制台（KVM）",
+                stage="launch",
+            )
+        return LaunchDescriptor(
+            kind="url",
+            url=_console_origin_url(session),
+            display_hint="管理卡图形控制台入口",
+        )
 
 
 # -- plan --------------------------------------------------------------------
@@ -2166,3 +2253,6 @@ class RedfishOperationsMixin:
         result: OperationResult | None,
     ) -> VerificationResult:
         return verify_operation_method(session, plan, result)
+
+    def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor:
+        return create_launch_method(session, capability)

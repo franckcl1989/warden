@@ -118,6 +118,9 @@ class MaintenanceReport:
     ui_events_deleted: int = 0
     sessions_deleted: int = 0
     audit_skipped_append_only: bool = False
+    # M3T4 launch tickets (0013): issued rows expired + 30-day purge.
+    launch_sessions_expired: int = 0
+    launch_sessions_deleted: int = 0
     partitions_created: int = 0
     # M2T5 file retention counters (0 when the pass skipped a cadence or no
     # file storage is configured for the loop).
@@ -212,6 +215,8 @@ class MaintenanceLoop:
                         orphaned_upload_spools_removed=report.orphaned_upload_spools_removed,
                         tickets_deleted=report.tickets_deleted,
                         physical_files_removed=report.physical_files_removed,
+                        launch_sessions_expired=report.launch_sessions_expired,
+                        launch_sessions_deleted=report.launch_sessions_deleted,
                     )
             except Exception:
                 self._log.exception("maintenance_pass_failed")
@@ -248,6 +253,8 @@ class MaintenanceLoop:
         report.ui_events_deleted = retention_report.ui_events_deleted
         report.sessions_deleted = retention_report.sessions_deleted
         report.audit_skipped_append_only = retention_report.audit_skipped_append_only
+        report.launch_sessions_expired = retention_report.launch_sessions_expired
+        report.launch_sessions_deleted = retention_report.launch_sessions_deleted
         report.partitions_created = ensure_partitions(session, now=now)
         if self._file_storage is not None:
             file_report = enforce_file_retention(

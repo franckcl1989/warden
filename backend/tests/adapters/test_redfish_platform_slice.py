@@ -514,5 +514,179 @@ class TestRedfishPlatformSlice:
             if engine is not None:
                 engine.dispose()
 
+    def test_launch_single_use_html_redirect_and_honest_not_configured(
+        self,
+        fresh_test_db_dsn: str,
+        sim_url: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        """M3T4 launch slice over the REAL Redfish path (SRV-ACT-03):
+
+        probe -> save -> POST /devices/{id}/launches (201, single-use consume
+        URL) -> GET with a browser Accept returns the HTML auto-redirect page
+        embedding the manager origin console URL (http://127.0.0.1:{port}/),
+        Referrer-Policy: no-referrer; a second GET is 404. psql evidence
+        shows the launch_sessions row issued->consumed and the
+        launch.create/launch.consume audit rows. Killing the simulator's
+        GraphicalConsole advertisement then fails a NEW launch honestly
+        (422 not_configured, no fabricated descriptor row).
+        """
+        port = _port_of(sim_url)
+        _allow_simulator_resolution(monkeypatch, port)
+        key_file = tmp_path / "credential_master.key"
+        key_file.write_text("K" * 64, encoding="utf-8")
+        session_file = tmp_path / "session_secret.txt"
+        session_file.write_text("S" * 64, encoding="utf-8")
+        settings = WardenSettings(
+            postgres_dsn=fresh_test_db_dsn,
+            app_env="development",
+            public_url="http://localhost",
+            _env_file=None,
+            allowed_device_cidrs=f"{SIM_HOST}/32",
+            credential_master_key_file=key_file,
+            session_secret_file=session_file,
+        )
+        app = create_app(settings)
+        factory = create_session_factory(create_engine(dsn_with_psycopg_dialect(fresh_test_db_dsn)))
+        with factory() as session:
+            create_admin(session)
+        try:
+            with TestClient(app) as client:
+                response, csrf = login_csrf(client, ADMIN_USERNAME, ADMIN_PASSWORD)
+                assert response.status_code == 200
+
+                probe = client.post(
+                    f"{API}/device-probes",
+                    json={
+                        "device_type": "server",
+                        "adapter_key": ADAPTER_KEY,
+                        "management_endpoint": SIM_HOST,
+                        "port": port,
+                        "connection_config": {"protocol": "http"},
+                        "credentials": {"username": SIM_USERNAME, "password": SIM_PASSWORD},
+                    },
+                    headers={"X-CSRF-Token": csrf},
+                )
+                assert probe.status_code == 200, probe.text
+                body = probe.json()
+                assert body["ok"] is True
+                console_cap = next(
+                    item
+                    for item in body["discovery"]["capabilities"]
+                    if item["capability_key"] == "console.kvm.open"
+                )
+                assert console_cap["support_state"] == "supported"
+
+                created = client.post(
+                    f"{API}/devices",
+                    json={
+                        "name": "sim-redfish-launch",
+                        "device_type": "server",
+                        "adapter_key": ADAPTER_KEY,
+                        "management_endpoint": SIM_HOST,
+                        "port": port,
+                        "connection_config": {"protocol": "http"},
+                        "credentials": {"username": SIM_USERNAME, "password": SIM_PASSWORD},
+                        "enabled": True,
+                        "probe_token": body["probe_token"],
+                    },
+                    headers={"X-CSRF-Token": csrf},
+                )
+                assert created.status_code == 201, created.text
+                device_id = uuid.UUID(created.json()["id"])
+
+                issued = client.post(
+                    f"{API}/devices/{device_id}/launches",
+                    json={"capability_key": "console.kvm.open"},
+                    headers={"X-CSRF-Token": csrf},
+                )
+                assert issued.status_code == 201, issued.text
+                issued_body = issued.json()
+                launch_id = issued_body["launch_id"]
+                assert issued_body["url"].endswith(f"/api/v1/launches/{launch_id}")
+                assert str(port) not in issued_body["url"]
+
+                # Browser navigation: HTML auto-redirect page with the console
+                # origin URL and no-referrer; the ticket is consumed once.
+                consumed = client.get(
+                    f"{API}/launches/{launch_id}", headers={"Accept": "text/html"}
+                )
+                assert consumed.status_code == 200
+                assert consumed.headers.get("Referrer-Policy") == "no-referrer"
+                assert consumed.headers.get("X-Content-Type-Options") == "nosniff"
+                assert f"http://{SIM_HOST}:{port}/" in consumed.text
+                assert "http-equiv=\"refresh\"" in consumed.text
+                assert SIM_PASSWORD not in consumed.text
+                assert SIM_USERNAME not in consumed.text
+
+                second = client.get(f"{API}/launches/{launch_id}")
+                assert second.status_code == 404
+
+                with factory() as session:
+                    launch_evidence = session.execute(
+                        text(
+                            "SELECT id, capability_key, requirement_id, protocol, "
+                            "status, descriptor_url, expires_at - created_at AS ttl, "
+                            "consumed_at - created_at AS consumed_after "
+                            "FROM launch_sessions WHERE id = :id"
+                        ),
+                        {"id": uuid.UUID(launch_id)},
+                    ).one()
+                    launch_map = dict(launch_evidence._mapping)
+                    audit_evidence = session.execute(
+                        text(
+                            "SELECT action, result, requirement_id, detail_jsonb "
+                            "FROM audit_logs WHERE action IN ('launch.create', 'launch.consume') "
+                            "AND resource_id = :id ORDER BY occurred_at"
+                        ),
+                        {"id": launch_id},
+                    ).all()
+                    task_rows = session.execute(
+                        text("SELECT count(*) FROM operation_tasks")
+                    ).scalar()
+                _print_evidence(
+                    "launch-flow",
+                    {
+                        "launch_session": {k: str(v) for k, v in launch_map.items()},
+                        "audit": [dict(row._mapping) for row in audit_evidence],
+                        "operation_task_rows": int(task_rows),
+                    },
+                )
+                assert launch_map["status"] == "consumed"
+                assert launch_map["descriptor_url"] == f"http://{SIM_HOST}:{port}/"
+                assert launch_map["protocol"] == "kvm"
+                assert int(task_rows) == 0  # launch is NOT a task
+                assert [dict(row._mapping)["action"] for row in audit_evidence] == [
+                    "launch.create",
+                    "launch.consume",
+                ]
+                assert all(dict(row._mapping)["result"] == "success" for row in audit_evidence)
+
+                # The console advertisement disappears: a fresh launch fails
+                # honestly with 422 not_configured — no descriptor row exists.
+                _control(sim_url, no_graphical_console=True)
+                gone = client.post(
+                    f"{API}/devices/{device_id}/launches",
+                    json={"capability_key": "console.kvm.open"},
+                    headers={"X-CSRF-Token": csrf},
+                )
+                assert gone.status_code == 422, gone.text
+                error = gone.json()["error"]
+                assert error["code"] == "not_configured"
+                assert error["details"]["capability_key"] == "console.kvm.open"
+                assert error["details"]["missing"] == "no_graphical_console：管理卡未提供启用的图形控制台（KVM）"
+                with factory() as session:
+                    assert (
+                        session.execute(
+                            text("SELECT count(*) FROM launch_sessions WHERE status = 'issued'")
+                        ).scalar()
+                        == 0
+                    )
+        finally:
+            engine = app.state.engine
+            if engine is not None:
+                engine.dispose()
+
 
 from app.models.observation import CollectionRun as CollectionRunModel  # noqa: E402

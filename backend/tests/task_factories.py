@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import uuid
 
+from app.models.auth import Session as WebSession
 from app.models.auth import User
 from app.models.devices import Device
 from app.models.operation import OperationTask
@@ -31,6 +32,23 @@ def make_user(db: Session, *, index: int = 0) -> User:
     db.commit()
     db.refresh(user)
     return user
+
+
+def make_web_session(
+    db: Session, *, user_id: uuid.UUID, index: int = 0
+) -> WebSession:
+    """One valid web session row (launch-session FK target)."""
+    session = WebSession(
+        session_id_hash=f"session-hash-{index}-{uuid.uuid4().hex}",
+        user_id=user_id,
+        expires_at=datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=12),
+        absolute_expires_at=datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=12),
+        csrf_secret_hash="c" * 64,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
 
 
 def make_device(db: Session, *, index: int = 0) -> Device:

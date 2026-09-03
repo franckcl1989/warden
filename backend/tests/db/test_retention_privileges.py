@@ -26,7 +26,7 @@ from app.infrastructure.db import create_db_engine, create_session_factory
 
 from tests.db.conftest import WARDEN_APP_ROLE, base_test_dsn
 from tests.observation_factories import make_collection_device
-from tests.task_factories import make_task, make_user
+from tests.task_factories import make_task, make_user, make_web_session
 
 PURGEABLE_TABLES = (
     "metric_points",
@@ -45,6 +45,11 @@ PURGEABLE_TABLES = (
     "files",
     "file_links",
     "device_file_tickets",
+    # M3T4 (0013): launch_sessions (one-time remote-connection tickets) is
+    # owned by warden_app — the retention sweep marks issued rows expired
+    # (UPDATE) and purges them after 30 days (DELETE), both via ownership
+    # exactly like the 0010 ledger.
+    "launch_sessions",
 )
 APPEND_ONLY_TABLES = ("audit_logs", "operation_task_events")
 
@@ -212,6 +217,53 @@ def test_0010_preview_token_ledger_owned_by_warden_app_and_purgeable(
         connection.commit()
         deleted = connection.execute(
             "DELETE FROM preview_token_uses WHERE token_hash = '0010-ledger-hash-1'"
+        )
+        connection.commit()
+        assert deleted.rowcount == 1
+
+
+@pytest.mark.integration
+def test_0013_launch_sessions_owned_by_warden_app_and_purgeable(
+    warden_app_dsn: str, superuser_session_factory
+) -> None:
+    """The launch-session table (migration 0013) follows the 0008 ownership
+    pattern: warden_app OWNS it, so the retention sweep (which runs as the
+    app account) can UPDATE issued->expired and DELETE 30-day-old rows;
+    INSERT/DELETE work as warden_app and the append-only pair is untouched."""
+    with superuser_session_factory() as session:
+        user = make_user(session, index=3)
+        device = make_collection_device(session, index=3)
+        user_id = user.id
+        device_id = device.id
+        web_session = make_web_session(session, user_id=user_id)
+
+    with psycopg.connect(base_test_dsn()) as connection:
+        owner = connection.execute(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class "
+            "WHERE oid = 'launch_sessions'::regclass"
+        ).fetchone()[0]
+    assert owner == WARDEN_APP_ROLE
+
+    with psycopg.connect(warden_app_dsn) as connection:
+        connection.execute(
+            "INSERT INTO launch_sessions (id, device_id, capability_key, "
+            "requirement_id, user_id, session_id, protocol, status, expires_at) "
+            "VALUES (gen_random_uuid(), %s, 'console.kvm.open', 'SRV-ACT-03', "
+            "%s, %s, 'kvm', 'issued', now() + interval '60 seconds')",
+            (device_id, user_id, web_session.id),
+        )
+        connection.commit()
+        # warden_app can expire an issued row (the sweep's UPDATE) ...
+        expired = connection.execute(
+            "UPDATE launch_sessions SET status = 'expired' "
+            "WHERE device_id = %s AND status = 'issued'",
+            (device_id,),
+        )
+        connection.commit()
+        assert expired.rowcount == 1
+        # ... and purge it (the 30-day DELETE).
+        deleted = connection.execute(
+            "DELETE FROM launch_sessions WHERE device_id = %s", (device_id,)
         )
         connection.commit()
         assert deleted.rowcount == 1

@@ -73,7 +73,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from typing import cast as typing_cast
 
-from sqlalchemy import Uuid, cast, func, select, text
+from sqlalchemy import Uuid, cast, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -84,6 +84,7 @@ from app.infrastructure.audit import AuditLogger
 from app.infrastructure.files import FileStorage, FileStorageError
 from app.infrastructure.observation_store import ensure_metric_partitions
 from app.models.files import File, FileLink
+from app.models.launch import LaunchSession
 from app.models.observation import (
     MetricPoint,
     MetricRollup1h,
@@ -110,6 +111,12 @@ UI_EVENT_RETENTION = datetime.timedelta(minutes=10)
 PREVIEW_TOKEN_USE_RETENTION = datetime.timedelta(hours=1)
 # Login session cleanup (DATA_MODEL.md §10: 登录会话 过期后 30 天清理).
 SESSION_CLEANUP_DELAY = datetime.timedelta(days=30)
+# Launch-session one-time tickets (API_CONTRACT.md §7, migration 0013):
+# issued rows are marked ``expired`` once their 60-second window passes
+# (bookkeeping — the single-use claim checks ``expires_at`` itself), and rows
+# leave after a 30-day lifetime like login sessions (the audit trail in
+# audit_logs is permanent).
+LAUNCH_SESSION_CLEANUP_DELAY = datetime.timedelta(days=30)
 
 # Chunk size for retention batch deletes (DATA_MODEL.md §10: 分批删除).
 DELETE_BATCH_SIZE = 2000
@@ -135,6 +142,7 @@ _RETENTION_TABLES = frozenset(
         "operation_tasks",
         "ui_events",
         "sessions",
+        "launch_sessions",
     }
 )
 
@@ -202,6 +210,16 @@ _CHUNKED_DELETE_SQL: dict[str, str] = {
         "AND NOT EXISTS (SELECT 1 FROM audit_logs a WHERE a.session_id = s.id) "
         "ORDER BY s.id LIMIT 2000)"
     ),
+    "launch_sessions": (
+        # One-time launch tickets (migration 0013): rows only cover the
+        # 60-second ticket window plus the 30-day retention margin. Any
+        # status older than the cutoff is expired history — the permanent
+        # record is audit_logs (launch.create / launch.consume), never this
+        # row. Runs as warden_app, which owns the table (0013, 0008 model).
+        "DELETE FROM launch_sessions WHERE id IN "
+        "(SELECT id FROM launch_sessions WHERE expires_at < :cutoff "
+        "ORDER BY id LIMIT 2000)"
+    ),
 }
 
 
@@ -252,6 +270,10 @@ class RetentionReport:
     # state becomes visible instead of silently deleting history.
     audit_skipped_append_only: bool = False
     operation_task_events_skipped_append_only: bool = False
+    # M3T4 launch tickets (migration 0013): issued rows marked expired past
+    # their 60-second window, and rows purged after the 30-day lifetime.
+    launch_sessions_expired: int = 0
+    launch_sessions_deleted: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -688,6 +710,27 @@ def _chunked_delete(db: Session, table: str, params: dict[str, object]) -> int:
         deleted += int(rowcount)
 
 
+def _expire_launch_sessions(db: Session, *, now: datetime.datetime) -> int:
+    """Mark issued launch tickets past their 60-second window as expired.
+
+    Bookkeeping for migration 0013: the single-use claim already refuses
+    rows whose ``expires_at`` passed, so this only keeps the status column
+    honest (the concurrency guards count only ``issued`` rows that are not
+    yet past ``expires_at``). Runs as warden_app in production (0013
+    ownership; UPDATE comes from the blanket S/I/U grant).
+    """
+    result = db.execute(
+        update(LaunchSession)
+        .where(
+            LaunchSession.status == "issued",
+            LaunchSession.expires_at <= now,
+        )
+        .values(status="expired")
+    )
+    rowcount = typing_cast(Any, result).rowcount
+    return int(rowcount) if rowcount is not None else 0
+
+
 def _append_only_trigger_exists(db: Session, table: str, trigger: str) -> bool:
     """True when an append-only trigger protects ``table`` (0002/0005).
 
@@ -789,6 +832,17 @@ def enforce_retention(
         db,
         "sessions",
         {"cutoff": now - SESSION_CLEANUP_DELAY},
+    )
+    # Launch tickets (M3T4, migration 0013): issued rows past their
+    # 60-second window become ``expired`` (bookkeeping — the single-use
+    # claim checks ``expires_at`` at read time, so an expired row can never
+    # be consumed), then every row older than the 30-day lifetime is purged
+    # (expired first so a just-expired row is not deleted a day early).
+    report.launch_sessions_expired = _expire_launch_sessions(db, now=now)
+    report.launch_sessions_deleted = _chunked_delete(
+        db,
+        "launch_sessions",
+        {"cutoff": now - LAUNCH_SESSION_CLEANUP_DELAY},
     )
     # DATA_MODEL.md §10 lists audit rows and task events at 365 days, but both
     # streams are append-only at the database (0002/0005 triggers + the 0004

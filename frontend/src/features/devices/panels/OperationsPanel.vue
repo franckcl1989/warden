@@ -3,13 +3,16 @@ import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 
 import CapabilityButton from '@/components/CapabilityButton.vue';
+import LaunchConsoleDialog from '@/features/devices/LaunchConsoleDialog.vue';
 import OperationLaunchDialog from '@/features/operations/OperationLaunchDialog.vue';
 import type { CapabilityView } from '@/api/types';
 import { REQUIREMENTS } from '@/api/generated/contracts';
 import { useAuthStore } from '@/stores/auth';
 
 // 设备详情"操作"页签（PRODUCT_DESIGN §5.1/§5.2-5.5）：
-// 按 *-ACT-* 需求分组展示能力按钮；点击后进入真实的两阶段预览流程
+// 按 *-ACT-* 需求分组展示能力按钮。console.* 连接类能力（M3T4 起
+// console.kvm.open）走一次性 launch 流程（LaunchConsoleDialog → 新标签页
+// 打开受控入口，ADR-006：不代理厂商页面）；其余操作能力进入两阶段预览流程
 // （OperationLaunchDialog → 预览 → 设备名确认 → 202 → 任务详情）。
 // 观察员无 operation.execute.* 权限时不展示操作页签内容（UI_SPEC §12）。
 const props = defineProps<{
@@ -22,10 +25,14 @@ const auth = useAuthStore();
 const router = useRouter();
 
 const dialogVisible = ref(false);
+const launchDialogVisible = ref(false);
 const activeKey = ref('');
 
 const canExecute = (): boolean =>
   auth.permissions.some((permission) => permission.startsWith('operation.execute.'));
+
+const isConsoleCapability = (capability: CapabilityView): boolean =>
+  capability.capability_key.startsWith('console.');
 
 const operationGroups = (): { requirementId: string; rows: CapabilityView[] }[] => {
   const groups = new Map<string, CapabilityView[]>();
@@ -41,25 +48,16 @@ const operationGroups = (): { requirementId: string; rows: CapabilityView[] }[] 
   return [...groups.entries()].map(([requirementId, rows]) => ({ requirementId, rows }));
 };
 
-/** launch 通道（console.*）在 M2 无 /launches 端点：如实禁用并注明里程碑。 */
-const LAUNCH_REASON = '连接能力待设备适配里程碑交付（M3）';
-
-function disabledReasonFor(capability: CapabilityView): string | undefined {
-  if (capability.capability_key.startsWith('console.')) {
-    return LAUNCH_REASON;
-  }
-  return undefined;
-}
-
 function openFlow(capabilityKey: string): void {
   const capability = props.capabilities.find((row) => row.capability_key === capabilityKey);
   if (capability === undefined || capability.support_state !== 'supported') {
     return;
   }
-  if (capability.capability_key.startsWith('console.')) {
+  activeKey.value = capabilityKey;
+  if (isConsoleCapability(capability)) {
+    launchDialogVisible.value = true;
     return;
   }
-  activeKey.value = capabilityKey;
   dialogVisible.value = true;
 }
 
@@ -69,6 +67,11 @@ function onCreated(taskId: string): void {
 
 function activeCapability(): CapabilityView | undefined {
   return props.capabilities.find((row) => row.capability_key === activeKey.value);
+}
+
+function activeIsConsole(): boolean {
+  const active = activeCapability();
+  return active !== undefined && isConsoleCapability(active);
 }
 </script>
 
@@ -101,7 +104,6 @@ function activeCapability(): CapabilityView | undefined {
               :support-state="row.support_state"
               :reason-code="row.reason_code"
               :detail="row.detail"
-              :disabled-reason="disabledReasonFor(row)"
               @click="openFlow(row.capability_key)"
             />
             <p class="operations-panel__discovery">
@@ -114,12 +116,19 @@ function activeCapability(): CapabilityView | undefined {
     <p v-else class="operations-panel__note">当前账号无操作执行权限</p>
 
     <OperationLaunchDialog
-      v-if="activeCapability()"
+      v-if="activeCapability() && !activeIsConsole()"
       v-model="dialogVisible"
       :device="{ id: deviceId, name: deviceName }"
       :capability-key="activeCapability()?.capability_key ?? ''"
       :requirement-id="activeCapability()?.requirement_id ?? ''"
       @created="onCreated"
+    />
+    <LaunchConsoleDialog
+      v-if="activeCapability() && activeIsConsole()"
+      v-model="launchDialogVisible"
+      :device-id="deviceId"
+      :capability-key="activeCapability()?.capability_key ?? ''"
+      :requirement-id="activeCapability()?.requirement_id ?? ''"
     />
   </div>
 </template>
