@@ -36,9 +36,10 @@ device off (503 until ``power_on`` control); a DSM update installs for
 ``upgrade_duration_seconds``, then reboots for ``upgrade_offline_seconds``
 before serving the new firmware version. ``restart_ignored`` /
 ``shutdown_ignored`` accept without the effect (ambiguous verify paths),
-``restart_identity_changes`` swaps the serial after a restart (identity
-drift), ``smart_test_never_completes`` / ``update_never_completes`` keep the
-job running forever (deadline -> verification_required), and
+``restart_identity_changes`` swaps the serial after a restart and
+``update_identity_changes`` swaps it when an update reboot completes
+(identity drift), ``smart_test_never_completes`` / ``update_never_completes``
+keep the job running forever (deadline -> verification_required), and
 ``upgrade_fetch_required`` makes the update fetch the platform PAT ticket
 URL (recorded as device-fetch evidence) and apply the header version.
 
@@ -61,6 +62,8 @@ Live control (no auth): ``GET /warden-sim/control`` for state;
 ``{"storage_maintenance": bool}``, ``{"backup_no_jobs": bool}``,
 ``{"backup_snapshot_available": bool}``,
 ``{"upgrade_fetch_required": bool}``, ``{"upgrade_target_version": str}``,
+``{"support_export_file": str}`` (override the support-export download path
+answer),
 ``{"smart_quick_duration_seconds": ...}``,
 ``{"smart_full_duration_seconds": ...}``, ``{"upgrade_duration_seconds":
 ...}``, ``{"upgrade_offline_seconds": ...}``, ``{"restart_blip_seconds":
@@ -77,7 +80,8 @@ code 2100 — the client must preserve it, never guess),
 ``sessions_reject_106`` (every authenticated call answers 106 even after
 re-login — bounded re-login must fail honestly), ``smart_test_fails``,
 ``smart_test_never_completes``, ``update_fails``, ``update_never_completes``,
-``restart_ignored``, ``shutdown_ignored``, ``restart_identity_changes``.
+``restart_ignored``, ``shutdown_ignored``, ``restart_identity_changes``,
+``update_identity_changes``.
 """
 
 from __future__ import annotations
@@ -119,6 +123,7 @@ FAILURE_KEYS = frozenset(
         "restart_ignored",
         "shutdown_ignored",
         "restart_identity_changes",
+        "update_identity_changes",
     }
 )
 BOOL_KNOB_KEYS = frozenset(
@@ -145,7 +150,7 @@ FLOAT_KNOB_KEYS = frozenset(
         "restart_blip_seconds",
     }
 )
-STRING_KNOB_KEYS = frozenset({"upgrade_target_version"})
+STRING_KNOB_KEYS = frozenset({"upgrade_target_version", "support_export_file"})
 INT_KNOB_KEYS = frozenset({"log_append"})
 
 # The DSM web origin served at ``/`` while the device is on line.
@@ -240,6 +245,12 @@ class _SimulatorState:
                 continue
             if task.target_version is not None:
                 self.firmware_override = task.target_version
+            if self.failures["update_identity_changes"]:
+                # Identity-drift failure knob: after the update reboot the
+                # device reports a different serial (the firmware verify must
+                # fail as identity_changed_during_update, never claim the
+                # update landed on the same device).
+                self.serial_override = "SIM-DS224P-CHANGED (simulated)"
             self.applied_updates.add(task.task_id)
         if self.pending_serial_change and self.restart_until <= now:
             self.serial_override = "SIM-DS224P-CHANGED (simulated)"
@@ -699,9 +710,25 @@ class _Dispatcher:
         content = payloads.support_bundle_bytes(state.cfg)
         token = uuid.uuid4().hex
         state.exported_bundles[token] = content
+        answer = state.cfg.support_export_file
+        if answer:
+            # ``support_export_file`` overrides the returned download path so
+            # adapter tests can exercise device answers the DSM must never
+            # serve (foreign/protocol-relative URLs). When the override has
+            # the device-origin /support/export/<token>.zip shape the bundle
+            # is served there too (a legit relative path must still work).
+            if answer.startswith("/support/export/"):
+                override_token = answer.rsplit("/", 1)[-1]
+                if override_token.endswith(".zip"):
+                    override_token = override_token[:-4]
+                if override_token:
+                    state.exported_bundles[override_token] = content
+            path = answer
+        else:
+            path = f"/support/export/{token}.zip"
         # The download path is DEVICE-ORIGIN ONLY (a relative path on the
         # same host/port): the M4T3 adapter refuses absolute/foreign URLs.
-        return 200, payloads.success({"file": f"/support/export/{token}.zip"}), {}
+        return 200, payloads.success({"file": path}), {}
 
     def _snmp(
         self, api: str, method: str, params: dict[str, list[str]]

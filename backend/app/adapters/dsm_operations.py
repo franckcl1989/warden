@@ -46,9 +46,15 @@ operations.json):
   fresh-login identity (serial/model unchanged) + firmware version readback
   == the platform-declared package version; a completed job with a provably
   wrong final version is a device-side failure (operation_failed), never
-  success without proof. PAT header metadata parsing is the WORKER's
-  (platform side, warden-sim PAT header; real Synology PAT parsing is
-  vendor_private, [sim] basis until certified).
+  success without proof. A missing job id is NOT an implied terminal job: a
+  crash-recovery verification without a persisted job/evidence that reads a
+  concrete-but-not-expected version at the deadline stays ambiguous (only a
+  terminal job state READ from the device proves failure). A version-
+  converged readback with a drifted serial/model fails as
+  identity_changed_during_update (the drift is the proven anomaly). PAT
+  header metadata parsing is the WORKER's (platform side, warden-sim PAT
+  header; real Synology PAT parsing is vendor_private, [sim] basis until
+  certified).
 - snmp.configure (NAS-ACT-06): SYNO.Core.Network.SNMP set/get [sim]. The
   trap receiver address comes ONLY from the platform deployment config via
   the plan runtime context (profile prohibition: 用户不能提供接收地址 —
@@ -771,8 +777,14 @@ def _support_bundle_execute(
     if download_path is None:
         raise DSMError("protocol_error", "支持包导出未返回下载路径", stage="parse")
     # DEVICE-ORIGIN ONLY: a relative path on the same host/port. Absolute or
-    # foreign URLs from the device are refused (no SSRF from device answers).
-    if not download_path.startswith("/") or "://" in download_path:
+    # foreign URLs from the device are refused (no SSRF from device answers);
+    # a leading "//" is protocol-relative — httpx would join it onto a
+    # FOREIGN host, so it is refused too.
+    if (
+        not download_path.startswith("/")
+        or download_path.startswith("//")
+        or "://" in download_path
+    ):
         raise DSMError(
             "protocol_error",
             "支持包导出返回了非设备来源的下载地址",
@@ -1294,7 +1306,17 @@ def _firmware_update_verify(
     version/identity read-back happens inside a budget-bounded loop (the DSM
     may still be applying): readback == expected AND identity unchanged ->
     succeeded; a terminal job with a provably wrong final version at the
-    deadline -> failed (operation_failed); unprovable -> ambiguous."""
+    deadline -> failed (operation_failed); a version-converged readback
+    whose serial/model drifted from the pre-update identity -> failed
+    (operation_failed, identity_changed_during_update — the drift is a
+    device-read anomaly, never a version timeout); unprovable -> ambiguous.
+    A MISSING job id is never an implied terminal job: the crash-recovery
+    corner (fence committed, execute died in transit, no job/evidence
+    persisted) has no device job state to read, so a concrete-but-not-
+    expected readback at the deadline stays ambiguous (verification_required)
+    — only a terminal job state actually READ from the device makes a
+    mismatch a proven failure (the Redfish 204-acceptance job-less corner
+    differs: there job=None IS the explicit acceptance proof)."""
     file_ctx = _ctx_dict(plan, "file")
     expected_version = file_ctx.get("expected_version")
     if not isinstance(expected_version, str):
@@ -1312,7 +1334,8 @@ def _firmware_update_verify(
         raw = _evidence_get(evidence, "device_job_id")
         job = raw if isinstance(raw, str) else None
     deadline = time.monotonic() + _budget_remaining(plan, DSM_VERSION_READBACK_CAP_SECONDS)
-    terminal_success_seen = job is None
+    terminal_success_seen = False
+    identity_drift_seen = False
     job_state_seen: str | None = None
     last_concrete_version: str | None = None
     while time.monotonic() < deadline:
@@ -1400,6 +1423,12 @@ def _firmware_update_verify(
                     and current.get(key) != value
                 }
                 if mismatch:
+                    # A version-converged readback whose serial/model drifted
+                    # is a device-side anomaly, not a version timeout: keep
+                    # polling (a mid-boot read may transiently drift), but
+                    # remember it so the deadline verdict reports the real
+                    # blocker.
+                    identity_drift_seen = True
                     time.sleep(DSM_RETRY_INTERVAL_SECONDS)
                     continue
             return VerificationResult(
@@ -1415,6 +1444,20 @@ def _firmware_update_verify(
         if isinstance(readback_version, str):
             last_concrete_version = readback_version
         time.sleep(DSM_RETRY_INTERVAL_SECONDS)
+    if identity_drift_seen:
+        # The version converged but the stable identity (serial/model) never
+        # matched the pre-update read: a proven anomaly (never a misleading
+        # version-mismatch label for a version that DID land).
+        return VerificationResult(
+            succeeded=False,
+            error_code="operation_failed",
+            evidence={
+                "reason": "identity_changed_during_update",
+                "expected_version": expected_version,
+                "readback_version": last_concrete_version,
+                "job_state": job_state_seen,
+            },
+        )
     if terminal_success_seen and last_concrete_version is not None:
         return VerificationResult(
             succeeded=False,

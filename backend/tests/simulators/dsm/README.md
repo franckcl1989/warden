@@ -80,7 +80,11 @@ GET or a form body on POST — both are accepted for every endpoint):
     of the served firmware), update_task_status;
   - `SYNO.Core.Support`: export (creates a deterministic
     `warden-dsm-support-bundle/1` zip and returns its device-origin
-    download path `/support/export/<token>.zip`);
+    download path `/support/export/<token>.zip`; the `support_export_file`
+    knob overrides that answer so adapter tests can exercise foreign/
+    protocol-relative values the device must never serve — a
+    `/support/export/<token>.zip`-shaped override is served too, so a legit
+    relative path still downloads);
   - `SYNO.Core.Backup`: list (Hyper Backup/Snapshot Replication package
     availability + job statuses with fixed deterministic timestamps;
     `backup_snapshot_available` adds the snapshot package, `backup_no_jobs`
@@ -111,6 +115,7 @@ Constructor `SimulatorConfig` or the live control endpoint (no auth):
 `{"storage_maintenance": bool}`, `{"backup_no_jobs": bool}`,
 `{"backup_snapshot_available": bool}`,
 `{"upgrade_fetch_required": bool}`, `{"upgrade_target_version": str}`,
+`{"support_export_file": str}`,
 `{"smart_quick_duration_seconds": 0.05}`,
 `{"smart_full_duration_seconds": ...}`,
 `{"upgrade_duration_seconds": ...}`, `{"upgrade_offline_seconds": ...}`,
@@ -154,7 +159,10 @@ switches).
   `update_fails`, `update_never_completes`, `restart_ignored` /
   `shutdown_ignored` (accepted without the effect — verify ends ambiguous),
   `restart_identity_changes` (the device reports a different serial after
-  the restart blip).
+  the restart blip), `update_identity_changes` (the device reports a
+  different serial once an update reboot completes — the firmware verify
+  must fail as `identity_changed_during_update`, never claim the update
+  landed on the same device).
 
 ## Running
 

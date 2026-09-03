@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import hashlib
 import io
 import json
 import time
@@ -138,6 +139,7 @@ def dsm(dsm_server: DSMControl) -> Iterator[DSMControl]:
         "backup_snapshot_available": False,
         "upgrade_fetch_required": False,
         "upgrade_target_version": "",
+        "support_export_file": "",
         "missing_apis": [],
     }
     dsm_server.set(**reset)
@@ -618,7 +620,7 @@ class TestSupportBundleOps:
         assert {source["name"] for source in manifest["sources"]} == {"system_log", "system_info"}
         with zipfile.ZipFile(io.BytesIO(artifact.content_bytes)) as archive:
             assert set(archive.namelist()) >= {"manifest.json", "log-entries.json", "system.json"}
-        assert result.evidence["artifact_sha256"] == artifact.content_bytes.hex().join([""]) or True
+        assert result.evidence["artifact_sha256"] == hashlib.sha256(artifact.content_bytes).hexdigest()
         verdict = ADAPTER.verify_operation(session, plan, _merge_evidence(result, **_stored_proof(result)))
         assert verdict.succeeded
         assert verdict.evidence["strategy"] == "artifact_manifest"
@@ -632,6 +634,29 @@ class TestSupportBundleOps:
         assert not verdict.succeeded
         assert verdict.ambiguous is True
         assert verdict.evidence["reason"] == "artifact_not_stored_ready"
+
+    def test_collect_refuses_protocol_relative_download_url(self, dsm: DSMControl) -> None:
+        # A device answer starting with "//" is PROTOCOL-RELATIVE: httpx
+        # would join it onto a FOREIGN host. The origin guard must refuse it
+        # before any download happens (no SSRF from device answers).
+        dsm.set(support_export_file="//evil.example/support.zip")
+        session = _session(dsm)
+        plan = _plan("logs.support_bundle.collect")
+        with pytest.raises(AdapterError) as exc:
+            ADAPTER.execute_operation(session, plan, lambda _p, _s: None)
+        assert exc.value.code == "protocol_error"
+
+    def test_collect_still_accepts_a_legit_relative_path(self, dsm: DSMControl) -> None:
+        # An override with the device-origin shape must keep downloading: the
+        # guard only refuses non-device origins.
+        dsm.set(support_export_file="/support/export/knobbed.zip")
+        session = _session(dsm)
+        plan = _plan("logs.support_bundle.collect")
+        result = ADAPTER.execute_operation(session, plan, lambda _p, _s: None)
+        assert result.ok
+        assert len(result.artifacts) == 1
+        assert result.artifacts[0].content_bytes.startswith(b"PK")
+        assert result.evidence["artifact_manifest"]["format"] == "warden-dsm-support-bundle/1"
 
 
 class TestBackupRefresh:
@@ -743,6 +768,64 @@ class TestFirmwareUpdateOps:
         verdict = ADAPTER.verify_operation(session, plan, result)
         assert verdict.pending
         assert not verdict.succeeded and not verdict.ambiguous
+
+    def test_update_crash_recovery_without_job_id_stays_ambiguous(self, dsm: DSMControl) -> None:
+        # Crash-recovery corner: the dispatch fence was committed and the DSM
+        # accepted the upgrade (slow pre-reboot PAT install), but the worker
+        # died BEFORE the evidence checkpoint — the parked re-verification
+        # has NO device job id and NO evidence, and the DSM serves the
+        # PRE-update version for the whole read-back window. A missing job id
+        # is NOT an implied terminal job: the unprovable outcome must stay
+        # ambiguous (verification_required), never a proven device failure.
+        dsm.set(upgrade_duration_seconds=60.0)
+        session = _session(dsm)
+        plan = _short_deadline(
+            _plan(
+                "firmware.update",
+                {"file_id": str(uuid.uuid4())},
+                runtime_context=_firmware_context(expected_version=self.TARGET_VERSION),
+            ),
+            seconds=2.0,
+        )
+        accepted = ADAPTER.execute_operation(session, plan, lambda _p, _s: None)
+        assert accepted.ok and accepted.device_job_id is not None
+        verdict = ADAPTER.verify_operation(session, plan, None)
+        assert not verdict.succeeded
+        assert verdict.ambiguous is True
+        assert verdict.error_code == "ambiguous_result"
+        assert "deadline" in str(verdict.evidence.get("reason", ""))
+
+    def test_update_identity_drift_with_matching_version_fails_with_accurate_reason(
+        self, dsm: DSMControl
+    ) -> None:
+        # The update lands (readback == the platform package version) but the
+        # device reports a DIFFERENT serial after the reboot: the drifted
+        # stable identity is the proven blocker, so the verdict must fail
+        # with identity_changed_during_update — never the misleading
+        # version_mismatch_after_completed_job label for a version that did
+        # arrive, and never success without the same-device proof.
+        dsm.set(
+            upgrade_duration_seconds=0.2,
+            upgrade_offline_seconds=0.2,
+            failures={"update_identity_changes": True},
+        )
+        session = _session(dsm)
+        plan = _short_deadline(
+            _plan(
+                "firmware.update",
+                {"file_id": str(uuid.uuid4())},
+                runtime_context=_firmware_context(expected_version=self.TARGET_VERSION),
+            ),
+            seconds=3.0,
+        )
+        result = ADAPTER.execute_operation(session, plan, lambda _p, _s: None)
+        assert result.ok and result.device_job_id is not None
+        verdict = _poll_verify(session, plan, result, timeout=20.0)
+        assert not verdict.succeeded
+        assert verdict.ambiguous is False
+        assert verdict.error_code == "operation_failed"
+        assert verdict.evidence["reason"] == "identity_changed_during_update"
+        assert dsm.snapshot()["serial"] == "SIM-DS224P-CHANGED (simulated)"
 
 
 class TestEvidenceBasis:

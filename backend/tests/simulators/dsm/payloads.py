@@ -112,7 +112,9 @@ class SimulatorConfig:
     flow fetch the platform PAT ticket URL (device-pull evidence, like the
     Redfish simulator's update fetch) and apply the header version;
     ``upgrade_target_version`` overrides the auto-bumped version when the
-    device does not fetch. ``storage_maintenance`` reports an active scrub
+    device does not fetch; ``support_export_file`` overrides the support-
+    export download path answer (device answers the adapter must refuse are
+    injected through it). ``storage_maintenance`` reports an active scrub
     on SYNO.Core.System info (blocks power/update preflight in the DSL);
     ``backup_no_jobs`` serves an empty SYNO.Core.Backup job list.
     """
@@ -156,6 +158,7 @@ class SimulatorConfig:
     # M4T3 operation knobs (see class docstring).
     upgrade_fetch_required: bool = False
     upgrade_target_version: str = ""
+    support_export_file: str = ""
     storage_maintenance: bool = False
     backup_no_jobs: bool = False
     backup_snapshot_available: bool = False
