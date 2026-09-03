@@ -66,6 +66,21 @@ FAILURE_KEYS = frozenset(
         "reset_task_fails",
     }
 )
+# M3T2 SRV-MON surface knobs (SimulatorConfig booleans switchable via control).
+SURFACE_KNOB_KEYS = frozenset(
+    {
+        "missing_memory_metrics",
+        "no_raid_volume",
+        "empty_sel",
+        "thermal_missing_context",
+        "no_virtual_media",
+        "no_storage",
+        "missing_system_status",
+        "sel_oem_timestamps",
+        "missing_fan_reading",
+        "drives_without_oem",
+    }
+)
 
 _FAIL_ACTION_MESSAGE = "Simulated reset failure (test device simulator)"
 
@@ -120,6 +135,16 @@ class _SimulatorState:
             "pagination": self.cfg.pagination,
             "task_duration_seconds": self.cfg.task_duration_seconds,
             "absolute_links": self.cfg.absolute_links,
+            "missing_memory_metrics": self.cfg.missing_memory_metrics,
+            "no_raid_volume": self.cfg.no_raid_volume,
+            "empty_sel": self.cfg.empty_sel,
+            "thermal_missing_context": self.cfg.thermal_missing_context,
+            "no_virtual_media": self.cfg.no_virtual_media,
+            "no_storage": self.cfg.no_storage,
+            "missing_system_status": self.cfg.missing_system_status,
+            "sel_oem_timestamps": self.cfg.sel_oem_timestamps,
+            "missing_fan_reading": self.cfg.missing_fan_reading,
+            "drives_without_oem": self.cfg.drives_without_oem,
             "failures": dict(self.failures),
             "media_hosts_required": self.cfg.media_hosts_required,
             "media_hosts": list(self.cfg.media_hosts),
@@ -150,6 +175,16 @@ class _SimulatorState:
                         media_hosts_required=self.cfg.media_hosts_required,
                         media_hosts=self.cfg.media_hosts,
                         absolute_links=self.cfg.absolute_links,
+                        missing_memory_metrics=self.cfg.missing_memory_metrics,
+                        no_raid_volume=self.cfg.no_raid_volume,
+                        empty_sel=self.cfg.empty_sel,
+                        thermal_missing_context=self.cfg.thermal_missing_context,
+                        no_virtual_media=self.cfg.no_virtual_media,
+                        no_storage=self.cfg.no_storage,
+                        missing_system_status=self.cfg.missing_system_status,
+                        sel_oem_timestamps=self.cfg.sel_oem_timestamps,
+                        missing_fan_reading=self.cfg.missing_fan_reading,
+                        drives_without_oem=self.cfg.drives_without_oem,
                     )
                     self.reset_dynamic()
             elif key == "vendor":
@@ -169,6 +204,8 @@ class _SimulatorState:
                 self.cfg = _replace(self.cfg, task_duration_seconds=float(value))  # type: ignore[arg-type]
             elif key == "absolute_links":
                 self.cfg = _replace(self.cfg, absolute_links=bool(value))  # type: ignore[arg-type]
+            elif key in SURFACE_KNOB_KEYS:
+                self.cfg = _replace(self.cfg, **{key: bool(value)})  # type: ignore[arg-type]
             elif key == "failures":
                 if not isinstance(value, dict):
                     msg = "failures must be an object"
@@ -430,7 +467,7 @@ class _Dispatcher:
             f"{payloads.BASE}/Systems/1/Storage": payloads.storage_collection(),
             f"{payloads.BASE}/Systems/1/Storage/SATA1": payloads.storage_sata1(view),
             f"{payloads.BASE}/Systems/1/Storage/SATA1/Drives": payloads.drives_collection(),
-            f"{payloads.BASE}/Systems/1/Storage/SATA1/Volumes": payloads.volumes_collection(),
+            f"{payloads.BASE}/Systems/1/Storage/SATA1/Volumes": payloads.volumes_collection(view),
             f"{payloads.BASE}/Chassis": payloads.chassis_collection(),
             f"{payloads.BASE}/Chassis/1": payloads.chassis(view),
             f"{payloads.BASE}/Chassis/1/Thermal": payloads.thermal(view),
@@ -455,7 +492,7 @@ class _Dispatcher:
 
         # Memory DIMMs
         dimm = self._match(f"{payloads.BASE}/Systems/1/Memory/", path)
-        if dimm is not None and dimm in ("DIMM0", "DIMM1", "DIMM2", "DIMM3"):
+        if dimm is not None and dimm in ("DIMM0", "DIMM1", "DIMM2", "DIMM3", "DIMM4"):
             return 200, payloads.memory_dimm(view, dimm), {}
 
         # Drives

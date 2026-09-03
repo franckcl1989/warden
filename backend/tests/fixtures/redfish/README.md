@@ -15,11 +15,17 @@ stays `not_started` until real-device runs exist.
 | `service-root-healthy.json` | `GET /redfish/v1` (ServiceRoot) | simulator profile `healthy` | 2026-09-03 |
 | `sel-entries-page1-healthy.json` | `GET /redfish/v1/Managers/1/LogServices/SEL/Entries` (first page, 4 entries, inline LogEntry members) | simulator profile `healthy` | 2026-09-03 |
 | `computer-system-critical.json` | `GET /redfish/v1/Systems/1` | simulator profile `critical` | 2026-09-03 |
+| `memory-dimm0-healthy.json` | `GET /redfish/v1/Systems/1/Memory/DIMM0` (populated DIMM with the generic OEM ECC aggregate counter) | simulator profile `healthy` | 2026-09-03 |
+| `memory-dimm4-empty-slot.json` | `GET /redfish/v1/Systems/1/Memory/DIMM4` (empty DIMM slot: State Absent, no counters) | simulator profile `healthy` | 2026-09-03 |
+| `thermal-healthy.json` | `GET /redfish/v1/Chassis/1/Thermal` (CPU/Memory/Intake/Board context sensors + fans) | simulator profile `healthy` | 2026-09-03 |
+| `power-healthy.json` | `GET /redfish/v1/Chassis/1/Power` (PSUs with OutputPowerWatts/OutputVoltage readings) | simulator profile `healthy` | 2026-09-03 |
+| `drive-sda-healthy.json` | `GET /redfish/v1/Systems/1/Storage/SATA1/Drives/sda` (generic OEM SMART/predictive members) | simulator profile `healthy` | 2026-09-03 |
+| `volume-raid6-healthy.json` | `GET /redfish/v1/Systems/1/Storage/SATA1/Volumes/RAID6_1` (OEM RAIDStatus member) | simulator profile `healthy` | 2026-09-03 |
 
 Capture provenance: the healthy files were captured over real HTTP
 (uvicorn on 127.0.0.1, HTTP Basic) via `tests/simulators/redfish/serving.py`;
 the critical file was captured from the same simulator over an ASGI
-transport. All three come from `SimulatorConfig()` defaults except
+transport. All come from `SimulatorConfig()` defaults except
 `computer-system-critical.json` (`profile="critical"`). Synthetic data needs
 no sanitization; it contains no credentials, tokens, serials or real device
 identity.

@@ -1,0 +1,12 @@
+{
+  "Id": "DIMM4",
+  "Name": "DIMM_C1",
+  "DeviceLocator": "DIMM_C1",
+  "CapacityMiB": 0,
+  "Status": {
+    "State": "Absent",
+    "Health": "OK"
+  },
+  "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM4",
+  "@odata.type": "#Memory.v1_11_0.Memory"
+}

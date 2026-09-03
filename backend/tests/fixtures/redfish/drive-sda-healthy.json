@@ -1,0 +1,23 @@
+{
+  "Id": "sda",
+  "Name": "Simulated drive sda",
+  "MediaType": "SSD",
+  "CapacityBytes": 480000000000,
+  "Model": "Warden Sim SSD 480G",
+  "Manufacturer": "Warden Simulator",
+  "SerialNumber": "WARDEN-DSK-SDA",
+  "Revision": "SIM1",
+  "Status": {
+    "State": "Enabled",
+    "Health": "OK"
+  },
+  "Oem": {
+    "Vendor": {
+      "@odata.type": "#WardenSimDriveMetrics.v1_0_0.WardenSimDriveMetrics",
+      "PredictiveFailure": false,
+      "SMARTStatus": "OK"
+    }
+  },
+  "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Drives/sda",
+  "@odata.type": "#Drive.v1_15_0.Drive"
+}

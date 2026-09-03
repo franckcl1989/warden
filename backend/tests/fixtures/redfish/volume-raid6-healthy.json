@@ -1,0 +1,20 @@
+{
+  "Id": "RAID6_1",
+  "Name": "Simulated RAID6 volume",
+  "RAIDType": "RAID6",
+  "VolumeType": "RAID6",
+  "CapacityBytes": 8000000000000,
+  "Status": {
+    "State": "Enabled",
+    "Health": "OK"
+  },
+  "Oem": {
+    "Vendor": {
+      "@odata.type": "#WardenSimVolumeMetrics.v1_0_0.WardenSimVolumeMetrics",
+      "RAIDStatus": "Optimal",
+      "RebuildProgressPercent": null
+    }
+  },
+  "@odata.id": "/redfish/v1/Systems/1/Storage/SATA1/Volumes/RAID6_1",
+  "@odata.type": "#Volume.v1_7_0.Volume"
+}

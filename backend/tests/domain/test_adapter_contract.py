@@ -137,7 +137,13 @@ def test_fake_capabilities_cover_all_server_requirement_keys() -> None:
 @pytest.mark.unit
 def test_registry_lookup_and_type_lookup() -> None:
     assert get_adapter("fake.simple").adapter_key == "fake.simple"
-    assert adapter_for_device_type("server").adapter_key == "fake.simple"
+    # M3T2: server.redfish (common Redfish base) joined fake.simple as a
+    # registered server adapter — a unique per-type lookup now has two
+    # matches, so onboarding always selects by adapter_key.
+    assert get_adapter("server.redfish").adapter_key == "server.redfish"
+    assert "server" in get_adapter("server.redfish").supported_device_types
+    with pytest.raises(UnknownAdapterError):
+        adapter_for_device_type("server")
     with pytest.raises(UnknownAdapterError):
         get_adapter("server.dell_idrac")
     with pytest.raises(UnknownAdapterError):

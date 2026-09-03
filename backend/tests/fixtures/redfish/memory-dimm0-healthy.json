@@ -1,0 +1,22 @@
+{
+  "Id": "DIMM0",
+  "Name": "DIMM_A1",
+  "DeviceLocator": "DIMM_A1",
+  "MemoryDeviceType": "DDR5",
+  "CapacityMiB": 16384,
+  "OperatingSpeedMhz": 4800,
+  "Status": {
+    "State": "Enabled",
+    "Health": "OK"
+  },
+  "Oem": {
+    "Vendor": {
+      "@odata.type": "#WardenSimMemoryMetrics.v1_0_0.WardenSimMemoryMetrics",
+      "ECCErrorCount": 3,
+      "CorrectableECCErrorCount": 3,
+      "UncorrectableECCErrorCount": 0
+    }
+  },
+  "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM0",
+  "@odata.type": "#Memory.v1_11_0.Memory"
+}

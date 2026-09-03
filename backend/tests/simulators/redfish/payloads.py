@@ -52,6 +52,31 @@ class SimulatorConfig:
     # @odata.id/@odata.nextLink/target/Location/TaskMonitor instead of bare
     # paths — a spec-legal style some real managers use (client must accept).
     absolute_links: bool = False
+    # SRV-MON surface knobs (M3T2) — each exercises one strict adapter edge
+    # (missing value -> observation error / unsupported capability row):
+    # - missing_memory_metrics: DIMM OEM blocks carry no ECC counter;
+    # - no_raid_volume: Storage/Volumes collection is empty;
+    # - empty_sel: the SEL log service exists but has zero entries;
+    # - thermal_missing_context: adds a temperature sensor without a
+    #   PhysicalContext (and a name with no certified heuristic);
+    # - no_virtual_media: the Manager resource has no VirtualMedia link;
+    # - no_storage: the ComputerSystem has no Storage link;
+    # - missing_system_status: the ComputerSystem has no Status block;
+    # - sel_oem_timestamps: SEL entries carry an OEM timestamp member instead
+    #   of the standard Created field.
+    missing_memory_metrics: bool = False
+    no_raid_volume: bool = False
+    empty_sel: bool = False
+    thermal_missing_context: bool = False
+    no_virtual_media: bool = False
+    no_storage: bool = False
+    missing_system_status: bool = False
+    sel_oem_timestamps: bool = False
+    # - missing_fan_reading: the first fan carries no Reading member;
+    # - drives_without_oem: drives exist but carry no OEM SMART/predictive
+    #   members.
+    missing_fan_reading: bool = False
+    drives_without_oem: bool = False
 
     def __post_init__(self) -> None:
         if self.profile not in PROFILES:
@@ -77,6 +102,8 @@ class _View:
 
     @property
     def sel_count(self) -> int:
+        if self.cfg.empty_sel:
+            return 0
         return {  # type: ignore[no-any-return]
             "healthy": 4,
             "critical": 25,
@@ -190,11 +217,15 @@ def system(view: _View) -> dict[str, Any]:
     }
     if view.profile == "critical":
         payload["Status"] = _status("Critical")
+    if view.cfg.missing_system_status:
+        payload.pop("Status", None)
+    if view.cfg.no_storage:
+        payload.pop("Storage", None)
     return _odata(payload, f"{BASE}/Systems/1", "#ComputerSystem.v1_16_0.ComputerSystem")
 
 
 def memory_collection() -> dict[str, Any]:
-    members = [{"@odata.id": f"{BASE}/Systems/1/Memory/DIMM{i}"} for i in range(4)]
+    members = [{"@odata.id": f"{BASE}/Systems/1/Memory/DIMM{i}"} for i in range(5)]
     return _odata(
         {"Members@odata.count": len(members), "Members": members},
         f"{BASE}/Systems/1/Memory",
@@ -203,15 +234,46 @@ def memory_collection() -> dict[str, Any]:
 
 
 def memory_dimm(view: _View, dimm_id: str) -> dict[str, Any]:
-    slot = {"DIMM0": "DIMM_A1", "DIMM1": "DIMM_A2", "DIMM2": "DIMM_B1", "DIMM3": "DIMM_B2"}[dimm_id]
+    slots = {
+        "DIMM0": "DIMM_A1",
+        "DIMM1": "DIMM_A2",
+        "DIMM2": "DIMM_B1",
+        "DIMM3": "DIMM_B2",
+        "DIMM4": "DIMM_C1",
+    }
+    slot = slots[dimm_id]
+    if dimm_id == "DIMM4":
+        # An EMPTY DIMM slot: no memory device installed (State Absent, no
+        # capacity/type/counters). The adapter reports the absent component
+        # and no memory points for it.
+        return _odata(
+            {
+                "Id": dimm_id,
+                "Name": slot,
+                "DeviceLocator": slot,
+                "CapacityMiB": 0,
+                "Status": _status("OK", state="Absent"),
+            },
+            f"{BASE}/Systems/1/Memory/{dimm_id}",
+            "#Memory.v1_11_0.Memory",
+        )
     critical_dimm = view.profile == "critical" and dimm_id == "DIMM1"
     ecc_correctable = 3 + int(dimm_id[-1])
     ecc_uncorrectable = 7 if critical_dimm else 0
-    oem_block = {
-        "@odata.type": view.oem_type("MemoryMetrics"),
-        "CorrectableECCErrorCount": ecc_correctable,
-        "UncorrectableECCErrorCount": ecc_uncorrectable,
-    }
+    if view.cfg.missing_memory_metrics:
+        # No explicit ECC counter anywhere in the OEM block: the adapter must
+        # NOT infer one and reports memory.ecc_errors as missing.
+        oem_block: dict[str, Any] = {"@odata.type": view.oem_type("MemoryMetrics")}
+    else:
+        oem_block = {
+            "@odata.type": view.oem_type("MemoryMetrics"),
+            # Explicit aggregate ECC error counter (correctable + uncorrectable)
+            # — the generic shape this simulator certifies for the common
+            # adapter (simulator origin only, never 真机).
+            "ECCErrorCount": ecc_correctable + ecc_uncorrectable,
+            "CorrectableECCErrorCount": ecc_correctable,
+            "UncorrectableECCErrorCount": ecc_uncorrectable,
+        }
     return _odata(
         {
             "Id": dimm_id,
@@ -248,27 +310,26 @@ def storage_controller(view: _View) -> dict[str, Any]:
 def drive(view: _View, drive_id: str) -> dict[str, Any]:
     critical_drive = view.profile == "critical" and drive_id == "sdb"
     health = "Critical" if critical_drive else "OK"
-    oem_block = {
-        "@odata.type": view.oem_type("DriveMetrics"),
-        "PredictiveFailure": critical_drive,
-        "SMARTStatus": "Failed" if critical_drive else "OK",
+    payload: dict[str, Any] = {
+        "Id": drive_id,
+        "Name": f"Simulated drive {drive_id}",
+        "MediaType": "SSD" if drive_id == "sda" else "HDD",
+        "CapacityBytes": 480_000_000_000 if drive_id == "sda" else 4_000_000_000_000,
+        "Model": "Warden Sim SSD 480G" if drive_id == "sda" else "Warden Sim HDD 4T",
+        "Manufacturer": "Warden Simulator",
+        "SerialNumber": f"WARDEN-DSK-{drive_id.upper()}",
+        "Revision": "SIM1",
+        "Status": _status(health),
     }
-    return _odata(
-        {
-            "Id": drive_id,
-            "Name": f"Simulated drive {drive_id}",
-            "MediaType": "SSD" if drive_id == "sda" else "HDD",
-            "CapacityBytes": 480_000_000_000 if drive_id == "sda" else 4_000_000_000_000,
-            "Model": "Warden Sim SSD 480G" if drive_id == "sda" else "Warden Sim HDD 4T",
-            "Manufacturer": "Warden Simulator",
-            "SerialNumber": f"WARDEN-DSK-{drive_id.upper()}",
-            "Revision": "SIM1",
-            "Status": _status(health),
-            "Oem": {view.oem_key(): oem_block},
-        },
-        f"{BASE}/Systems/1/Storage/SATA1/Drives/{drive_id}",
-        "#Drive.v1_15_0.Drive",
-    )
+    if not view.cfg.drives_without_oem:
+        payload["Oem"] = {
+            view.oem_key(): {
+                "@odata.type": view.oem_type("DriveMetrics"),
+                "PredictiveFailure": critical_drive,
+                "SMARTStatus": "Failed" if critical_drive else "OK",
+            }
+        }
+    return _odata(payload, f"{BASE}/Systems/1/Storage/SATA1/Drives/{drive_id}", "#Drive.v1_15_0.Drive")
 
 
 def drives_collection() -> dict[str, Any]:
@@ -305,7 +366,13 @@ def volume(view: _View) -> dict[str, Any]:
     )
 
 
-def volumes_collection() -> dict[str, Any]:
+def volumes_collection(view: _View) -> dict[str, Any]:
+    if view.cfg.no_raid_volume:
+        return _odata(
+            {"Members@odata.count": 0, "Members": []},
+            f"{BASE}/Systems/1/Storage/SATA1/Volumes",
+            "#VolumeCollection.VolumeCollection",
+        )
     return _odata(
         {"Members@odata.count": 1, "Members": [{"@odata.id": f"{BASE}/Systems/1/Storage/SATA1/Volumes/RAID6_1"}]},
         f"{BASE}/Systems/1/Storage/SATA1/Volumes",
@@ -385,21 +452,34 @@ def thermal(view: _View) -> dict[str, Any]:
                 "Status": _status(sensor_health),
             }
         )
+    if view.cfg.thermal_missing_context:
+        # A sensor with NO PhysicalContext and a name the common adapter has
+        # no certified heuristic for: collect must report an explicit error
+        # instead of fabricating a classification.
+        temperatures.append(
+            {
+                "@odata.id": f"{BASE}/Chassis/1/Thermal#/Temperatures/{len(temperatures)}",
+                "MemberId": str(len(temperatures)),
+                "Name": "Misc Zone Temp",
+                "ReadingCelsius": 33,
+                "Status": _status("OK"),
+            }
+        )
     fans: list[dict[str, Any]] = []
     for index in range(1, 5):
         name = f"FAN{index}"
         low = index == 3 and critical
-        fans.append(
-            {
-                "@odata.id": f"{BASE}/Chassis/1/Thermal#/Fans/{index - 1}",
-                "MemberId": str(index - 1),
-                "Name": name,
-                "Reading": 800 if low else 7000 + index * 500,
-                "ReadingUnits": "RPM",
-                "LowerThresholdCritical": 1200,
-                "Status": _status("Critical" if low else "OK"),
-            }
-        )
+        fan: dict[str, Any] = {
+            "@odata.id": f"{BASE}/Chassis/1/Thermal#/Fans/{index - 1}",
+            "MemberId": str(index - 1),
+            "Name": name,
+            "ReadingUnits": "RPM",
+            "LowerThresholdCritical": 1200,
+            "Status": _status("Critical" if low else "OK"),
+        }
+        if not (view.cfg.missing_fan_reading and index == 1):
+            fan["Reading"] = 800 if low else 7000 + index * 500
+        fans.append(fan)
     return _odata(
         {
             "Id": "1",
@@ -426,9 +506,13 @@ def power(view: _View) -> dict[str, Any]:
                 "Name": name,
                 "Id": name,
                 "PowerCapacityWatts": 800,
-                "LastPowerOutputWatts": 0 if absent else 240 + index * 20,
-                "LineInputVoltage": 230.0 if not absent else None,
-                "Voltage": {"ReadingVolts": 231.2 if not absent else None},
+                # Current output power/voltage readings (M3T2 SRV-MON-05):
+                # an ABSENT supply reports null readings — never a fake 0.
+                "OutputPowerWatts": None if absent else 240 + index * 20,
+                "LastPowerOutputWatts": None if absent else 260 + index * 20,
+                "OutputVoltage": None if absent else (12.2 if index == 1 else 12.3),
+                "LineInputVoltage": None if absent else 230.0,
+                "Voltage": {"ReadingVolts": None if absent else 231.2},
                 "Status": _status("OK", state="Absent" if absent else "Enabled"),
             }
         )
@@ -462,33 +546,36 @@ def managers_collection() -> dict[str, Any]:
 
 
 def manager(view: _View, *, date_time: datetime) -> dict[str, Any]:
-    return _odata(
-        {
-            "Id": "1",
-            "Name": "Simulated BMC",
-            "ManagerType": "BMC",
-            "Manufacturer": "Warden Simulator",
-            "Model": "SIM-BMC",
-            "FirmwareVersion": "SIM-BMC-1.0.0",
-            "UUID": MANAGER_UUID,
-            "DateTime": date_time.isoformat(),
-            "DateTimeLocalOffset": "+00:00",
-            "PowerState": "On",
-            "Status": _status("OK" if view.health_ok else "Warning"),
-            "Actions": {
-                "#Manager.Reset": {
-                    "target": f"{BASE}/Managers/1/Actions/Manager.Reset",
-                    "ResetType@Redfish.AllowableValues": ["GracefulRestart", "ForceRestart"],
-                }
-            },
-            "LogServices": {"@odata.id": f"{BASE}/Managers/1/LogServices"},
-            "VirtualMedia": {"@odata.id": f"{BASE}/Managers/1/VirtualMedia"},
-            "NetworkProtocol": {"@odata.id": f"{BASE}/Managers/1/NetworkProtocol"},
-            "EthernetInterfaces": {"@odata.id": f"{BASE}/Managers/1/EthernetInterfaces"},
+    payload: dict[str, Any] = {
+        "Id": "1",
+        "Name": "Simulated BMC",
+        "ManagerType": "BMC",
+        "Manufacturer": "Warden Simulator",
+        "Model": "SIM-BMC",
+        "FirmwareVersion": "SIM-BMC-1.0.0",
+        "UUID": MANAGER_UUID,
+        "DateTime": date_time.isoformat(),
+        "DateTimeLocalOffset": "+00:00",
+        "PowerState": "On",
+        "Status": _status("OK" if view.health_ok else "Warning"),
+        "GraphicalConsole": {
+            "ServiceEnabled": True,
+            "MaxConcurrentSessions": 1,
         },
-        f"{BASE}/Managers/1",
-        "#Manager.v1_14_0.Manager",
-    )
+        "Actions": {
+            "#Manager.Reset": {
+                "target": f"{BASE}/Managers/1/Actions/Manager.Reset",
+                "ResetType@Redfish.AllowableValues": ["GracefulRestart", "ForceRestart"],
+            }
+        },
+        "LogServices": {"@odata.id": f"{BASE}/Managers/1/LogServices"},
+        "VirtualMedia": {"@odata.id": f"{BASE}/Managers/1/VirtualMedia"},
+        "NetworkProtocol": {"@odata.id": f"{BASE}/Managers/1/NetworkProtocol"},
+        "EthernetInterfaces": {"@odata.id": f"{BASE}/Managers/1/EthernetInterfaces"},
+    }
+    if view.cfg.no_virtual_media:
+        payload.pop("VirtualMedia", None)
+    return _odata(payload, f"{BASE}/Managers/1", "#Manager.v1_14_0.Manager")
 
 
 def log_services_collection() -> dict[str, Any]:
@@ -532,20 +619,33 @@ def _sel_entries(view: _View) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for index in range(count):
         severity, message = _SEL_TEMPLATES[index % len(_SEL_TEMPLATES)]
-        entry = _odata(
-            {
-                "Id": f"SEL{index + 1:06d}",
-                "Name": f"SEL Entry {index + 1}",
-                "EntryType": "SEL",
-                "Severity": severity,
-                "Created": (SEL_EPOCH + timedelta(minutes=13 * index)).isoformat(),
-                "Message": message,
-                "SensorType": "Memory" if severity == "Critical" else "Other",
-            },
-            f"{BASE}/Managers/1/LogServices/SEL/Entries/{index + 1}",
-            "#LogEntry.v1_8_0.LogEntry",
+        created = (SEL_EPOCH + timedelta(minutes=13 * index)).isoformat()
+        entry: dict[str, Any] = {
+            "Id": f"SEL{index + 1:06d}",
+            "Name": f"SEL Entry {index + 1}",
+            "EntryType": "SEL",
+            "Severity": severity,
+            "Message": message,
+            "SensorType": "Memory" if severity == "Critical" else "Other",
+        }
+        if view.cfg.sel_oem_timestamps:
+            # OEM-timestamp variant: no standard Created; the timestamp lives
+            # in an OEM member (adapter must fall back to it).
+            entry["Oem"] = {
+                view.oem_key(): {
+                    "@odata.type": view.oem_type("LogEntryTimestamp"),
+                    "Timestamp": created,
+                }
+            }
+        else:
+            entry["Created"] = created
+        entries.append(
+            _odata(
+                entry,
+                f"{BASE}/Managers/1/LogServices/SEL/Entries/{index + 1}",
+                "#LogEntry.v1_8_0.LogEntry",
+            )
         )
-        entries.append(entry)
     return entries
 
 

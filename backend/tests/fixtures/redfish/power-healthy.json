@@ -1,0 +1,54 @@
+{
+  "Id": "1",
+  "Name": "Simulated power",
+  "PowerControl": [
+    {
+      "@odata.id": "/redfish/v1/Chassis/1/Power#/PowerControl/0",
+      "MemberId": "0",
+      "Name": "Simulated system power control",
+      "PowerConsumedWatts": 420,
+      "PowerCapacityWatts": 1600
+    }
+  ],
+  "PowerSupplies": [
+    {
+      "@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/0",
+      "MemberId": "0",
+      "Name": "PSU1",
+      "Id": "PSU1",
+      "PowerCapacityWatts": 800,
+      "OutputPowerWatts": 260,
+      "LastPowerOutputWatts": 280,
+      "OutputVoltage": 12.2,
+      "LineInputVoltage": 230.0,
+      "Voltage": {
+        "ReadingVolts": 231.2
+      },
+      "Status": {
+        "State": "Enabled",
+        "Health": "OK"
+      }
+    },
+    {
+      "@odata.id": "/redfish/v1/Chassis/1/Power#/PowerSupplies/1",
+      "MemberId": "1",
+      "Name": "PSU2",
+      "Id": "PSU2",
+      "PowerCapacityWatts": 800,
+      "OutputPowerWatts": 280,
+      "LastPowerOutputWatts": 300,
+      "OutputVoltage": 12.3,
+      "LineInputVoltage": 230.0,
+      "Voltage": {
+        "ReadingVolts": 231.2
+      },
+      "Status": {
+        "State": "Enabled",
+        "Health": "OK"
+      }
+    }
+  ],
+  "Redundancy": [],
+  "@odata.id": "/redfish/v1/Chassis/1/Power",
+  "@odata.type": "#Power.v1_7_1.Power"
+}
