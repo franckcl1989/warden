@@ -108,3 +108,23 @@ def db_session(fresh_test_db_dsn: str) -> Iterator[Session]:
             yield session
     finally:
         engine.dispose()
+
+
+@pytest.fixture()
+def isolated_snmp_boots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point pysnmp's engine-boots persistence at a per-test tempdir.
+
+    pysnmp persists snmpEngineBoots under ``tempfile.gettempdir()`` for
+    engines with a custom engine id (entity/engine.py). SNMP tests must
+    isolate it per test so USM time-window/reboot semantics are
+    deterministic (M5T1 switch simulator + trap receiver tests).
+    """
+    import tempfile as tempfile_module
+
+    import pysnmp.entity.engine as pysnmp_engine_module
+
+    isolated = tmp_path / "snmp-boots"
+    isolated.mkdir(exist_ok=True)
+    monkeypatch.setattr(tempfile_module, "gettempdir", lambda: str(isolated))
+    monkeypatch.setattr(pysnmp_engine_module.tempfile, "gettempdir", lambda: str(isolated))
+    yield

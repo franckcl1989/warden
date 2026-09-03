@@ -67,6 +67,12 @@ disallow_untyped_decorators = true
 module = ["passlib.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# pysnmp-lextudio ships no type stubs; the SNMP protocol modules wrap its
+# surface behind typed app interfaces (M5T1).
+module = ["pysnmp.*", "pyasn1.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers --tb=short"
@@ -80,9 +86,13 @@ markers = [
 ]
 # starlette 1.6 prefers the httpx2 package for TestClient and warns on the httpx
 # fallback; httpx2 is not a lockfile dependency (M0T3: no new dependencies).
+# pysnmp-lextudio is pinned in the lockfile and emits a deprecation warning at
+# import (it is the only snmp implementation allowed by the lockfile, M5T1);
+# the warning is noise, not a code problem.
 filterwarnings = [
     "error",
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+    "ignore:The 'pysnmp-lextudio' package is deprecated.*:RuntimeWarning",
 ]
 
 [tool.coverage.run]

@@ -56,6 +56,40 @@ OPERATION_APPLIED_COMPONENT_KINDS = frozenset({"fru", "firmware"})
 
 DEFAULT_MANAGEMENT_PORT = 443
 
+# --- event-source IPs (RISK R-14; ingest attribution) -----------------------
+# Devices may declare ADDITIONAL source IPs/CIDRs for syslog/trap attribution
+# under ``connection_config[event_source_ips]`` (the platform matches event
+# source IPs against device management endpoints AND these entries). The key
+# and the per-item pattern live here so every event-capable adapter declares
+# the identical strict schema; the ingest layer re-parses defensively with
+# ``ipaddress`` (application/event_ingest.py).
+EVENT_SOURCE_IPS_CONFIG_KEY = "event_source_ips"
+
+_IPV4 = r"(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+_IPV4_CIDR = rf"{_IPV4}/(?:3[0-2]|[12]?[0-9])"
+# RFC 3986 IPv6 form (the canonical well-tested alternation).
+_IPV6 = (
+    r"(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,7}:"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}"
+    r"|[0-9a-fA-F]{1,4}:(?:(?::[0-9a-fA-F]{1,4}){1,6})"
+    r"|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)"
+)
+_IPV6_CIDR = rf"(?:{_IPV6})/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9])"
+#: Strict per-item pattern for ``connection_config[event_source_ips]``:
+#: IPv4/IPv6 addresses or CIDR prefixes (mirrors ipaddress parsing).
+EVENT_SOURCE_IPS_ITEM_PATTERN = rf"^(?:{_IPV4}|{_IPV4_CIDR}|{_IPV6}|{_IPV6_CIDR})$"
+
+#: The schema fragment adapters embed in their connection_schema.
+EVENT_SOURCE_IPS_SCHEMA: dict[str, object] = {
+    "type": "array",
+    "items": {"type": "string", "pattern": EVENT_SOURCE_IPS_ITEM_PATTERN},
+}
+
 
 @dataclass(frozen=True)
 class ProbeStage:

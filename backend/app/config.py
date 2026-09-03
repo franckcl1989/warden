@@ -123,6 +123,13 @@ class WardenSettings(BaseSettings):
     # user-supplied receiver addresses; empty = snmp.configure preflight
     # fails not_configured.
     snmp_trap_receiver_address: str = Field(default="")
+    # The SNMPv3 USM engine id of the ingest trap receiver, hex encoded
+    # (5..32 octets). SNMPv3 keys are localized per engine id (RFC 3414), so
+    # the id must be STABLE across ingest restarts or every device-side USM
+    # user stops matching; devices must be configured with this engine id.
+    # Empty = the deterministic 0.1.0 default (single-site deployment);
+    # multi-install deployments MUST set their own value (M5T1 decision).
+    snmp_trap_engine_id: str = Field(default="", pattern=r"^$|^[0-9a-fA-F]{10,64}$")
 
     # Platform base URL devices use to pull firmware / virtual media
     device_access_base_url: str = Field(default="")

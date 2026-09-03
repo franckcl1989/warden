@@ -95,6 +95,8 @@ import httpx
 
 from app.adapters.dsm_operations import SynologyDsmOperationsMixin
 from app.domain.adapter import (
+    EVENT_SOURCE_IPS_CONFIG_KEY,
+    EVENT_SOURCE_IPS_SCHEMA,
     AdapterError,
     CapabilitySupport,
     CollectionRequest,
@@ -1353,6 +1355,9 @@ class SynologyDsmAdapter(SynologyDsmOperationsMixin):
                 "type": ["string", "null"],
                 "pattern": "^[0-9a-fA-F]{64}$",
             },
+            # RISK R-14: additional event-source IPs/CIDRs the ingest layer
+            # attributes syslog/trap sources against (domain/adapter.py).
+            EVENT_SOURCE_IPS_CONFIG_KEY: dict(EVENT_SOURCE_IPS_SCHEMA),
         },
     }
 
