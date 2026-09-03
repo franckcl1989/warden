@@ -44,12 +44,19 @@ Per-collection-type content (ARCHITECTURE.md §8, TRACEABILITY.md §2.1):
   health never degrades to unknown between metrics runs;
 - ``metrics``: health subset + thermal/power/storage/memory/fan mappings
   (SRV-MON-02..07) + the full component inventory observed this pass;
-- ``logs``: health subset + SEL entries (SRV-MON-08). Entries are read from
-  the oldest entry forward and only pages NEWER than the previous logs run
-  are emitted (``CollectionRequest.last_run_at``); on the first run the full
-  tail (bounded by the parse layer's page budget) is imported. Re-emitting
-  already-known entries is harmless — the platform dedupes on the device
-  native event id (DATA_MODEL.md §5.5);
+- ``logs``: health subset + SEL entries (SRV-MON-08). The SEL is walked
+  page-by-page from the first page to the tail within the parse layer's page
+  budget — NO collection ordering is assumed — and only entries not older
+  than the previous logs run are emitted (``CollectionRequest.last_run_at``,
+  the previous run's finished_at): ``occurred_at >= last_run_at``, plus any
+  entry whose timestamp is unparseable (an explicit ObservationError
+  downstream, never a fabricated time). A page whose members all predate the
+  cursor is read and skipped, never used to stop the walk — newer members
+  may follow in later pages under any ordering. Entries at exactly the
+  cursor are re-emitted on purpose (they may have appeared while the
+  previous run was still reading); re-emitting already-known entries is
+  harmless — the platform dedupes on the device native event id
+  (DATA_MODEL.md §5.5);
 - ``discovery``: the health subset (full re-discovery is probe/discover
   territory; collect never re-walks capability rows).
 
@@ -1557,8 +1564,9 @@ def _read_health_resources(client: RedfishClient) -> tuple[RedfishResource | Non
 
 def _collect_logs(bundle: _Bundle, client: RedfishClient, request: CollectionRequest) -> None:
     """SRV-MON-08: SEL entries as event.sel observations. Entries older than
-    the previous logs run are skipped (SEL is time-ordered ascending); every
-    entry missing a timestamp/message is an explicit ObservationError."""
+    the previous logs run are skipped by per-entry comparison (no collection
+    ordering assumed — see ``_iter_sel_pages``); every entry missing a
+    timestamp/message is an explicit ObservationError."""
     manager = _manager_of(client)
     service = _find_sel_service(client, manager)
     if service is None:
@@ -1575,9 +1583,21 @@ def _collect_logs(bundle: _Bundle, client: RedfishClient, request: CollectionReq
 def _iter_sel_pages(
     client: RedfishClient, entries_url: str, since: datetime | None
 ) -> Iterator[RedfishResource]:
-    """Yield LogEntry members newer than ``since`` (all when None), walking
-    $skip pages within the parse layer's page budget. A whole page older than
-    ``since`` stops the walk (time-ordered logs: the rest is older too)."""
+    """Yield LogEntry members not older than ``since`` (all when None).
+
+    Walks pages from the first one to the tail of the collection within the
+    parse layer's page budget (``MAX_COLLECTION_PAGES``). NO collection
+    ordering is assumed: a page whose members all predate ``since`` may still
+    be followed by pages carrying newer members, so an early stop on an old
+    page would silently drop the newer tail — the walk only ends at the true
+    collection end (``Members@odata.count`` reached, an empty payload, or the
+    budget, which raises ``protocol_error``). Members with
+    ``occurred_at >= since`` and members whose timestamp is unparseable are
+    yielded; older members are read but skipped. Re-reads are absorbed by the
+    platform dedupe on the native event id — ``since`` is the previous logs
+    run's finished_at, and entries at exactly that instant are re-emitted on
+    purpose (they may have appeared while that run was still reading).
+    """
     page_url = entries_url
     pages = 0
     collected = 0
@@ -1589,17 +1609,11 @@ def _iter_sel_pages(
         raw_members = page.get("Members")
         if not isinstance(raw_members, list):
             return
-        page_entries = [member for member in raw_members if isinstance(member, Mapping)]
-        if since is not None:
-            page_has_newer = any(
-                occurred is None or (since is not None and occurred > since)
-                for occurred in (_entry_occurred_at(member) for member in page_entries)
-            )
-            if not page_has_newer:
-                return
-        for member in page_entries:
+        for member in raw_members:
+            if not isinstance(member, Mapping):
+                continue
             occurred = _entry_occurred_at(member)
-            if since is None or occurred is None or occurred > since:
+            if since is None or occurred is None or occurred >= since:
                 yield RedfishResource(member)
         collected += len(raw_members)
         total = page.get("Members@odata.count")

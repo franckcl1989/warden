@@ -24,7 +24,8 @@ Profiles (constructor ``SimulatorConfig`` or the live control endpoint):
 - ``critical``: overall/critical component statuses, intrusion detected,
   blinking indicator, PSU absent, predictive-failing drive, ECC errors;
 - ``auth_fail``: login is always rejected with 401;
-- ``slow_paginated``: 150 SEL entries served in pages of 20.
+- ``slow_paginated``: 150 SEL entries served in pages of 20
+  (``sel_append`` grows the SEL by extra strictly-newer tail entries).
 
 ``SimulatorConfig.absolute_links`` (control key ``absolute_links``) rewrites
 every path-only link the simulator emits (``@odata.id``, ``@odata.nextLink``,
@@ -35,8 +36,9 @@ use, which the client must accept.
 Failure injection (``POST /warden-sim/control {"failures": {...}}``):
 ``login_401``, ``reads_500``, ``reads_429``, ``reset_rejected_400``,
 ``reset_forbidden_403``, ``reset_task_fails``. Control also switches
-``profile``/``vendor``/``pagination``/``task_duration_seconds`` and reports
-the live state on ``GET /warden-sim/control``.
+``profile``/``vendor``/``pagination``/``task_duration_seconds``, the SRV-MON
+surface knobs (``SimulatorConfig`` booleans + integer ``sel_append``), and
+reports the live state on ``GET /warden-sim/control``.
 """
 
 from __future__ import annotations
@@ -81,6 +83,8 @@ SURFACE_KNOB_KEYS = frozenset(
         "drives_without_oem",
     }
 )
+# Integer-valued surface knobs (per-test reset mirrors booleans with 0).
+INT_KNOB_KEYS = frozenset({"sel_append"})
 
 _FAIL_ACTION_MESSAGE = "Simulated reset failure (test device simulator)"
 
@@ -145,6 +149,7 @@ class _SimulatorState:
             "sel_oem_timestamps": self.cfg.sel_oem_timestamps,
             "missing_fan_reading": self.cfg.missing_fan_reading,
             "drives_without_oem": self.cfg.drives_without_oem,
+            "sel_append": self.cfg.sel_append,
             "failures": dict(self.failures),
             "media_hosts_required": self.cfg.media_hosts_required,
             "media_hosts": list(self.cfg.media_hosts),
@@ -185,6 +190,7 @@ class _SimulatorState:
                         sel_oem_timestamps=self.cfg.sel_oem_timestamps,
                         missing_fan_reading=self.cfg.missing_fan_reading,
                         drives_without_oem=self.cfg.drives_without_oem,
+                        sel_append=self.cfg.sel_append,
                     )
                     self.reset_dynamic()
             elif key == "vendor":
@@ -204,6 +210,11 @@ class _SimulatorState:
                 self.cfg = _replace(self.cfg, task_duration_seconds=float(value))  # type: ignore[arg-type]
             elif key == "absolute_links":
                 self.cfg = _replace(self.cfg, absolute_links=bool(value))  # type: ignore[arg-type]
+            elif key in INT_KNOB_KEYS:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    msg = f"{key} must be a non-negative integer"
+                    raise ValueError(msg)
+                self.cfg = _replace(self.cfg, **{key: int(value)})  # type: ignore[arg-type]
             elif key in SURFACE_KNOB_KEYS:
                 self.cfg = _replace(self.cfg, **{key: bool(value)})  # type: ignore[arg-type]
             elif key == "failures":

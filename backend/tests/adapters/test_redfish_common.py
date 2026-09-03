@@ -555,6 +555,42 @@ class TestCollectLogs:
         # Health observations are still part of a logs run.
         assert obs_map(later)[("health.overall", None, None)].value == "healthy"
 
+    def test_delta_walks_old_pages_to_new_appended_tail(self, sim: SimAccess) -> None:
+        # 150 base entries fill the first pages (20/page); appending 25
+        # strictly-newer entries crosses the page boundary at $skip=150. A
+        # delta cursor after the LAST base entry must still reach the
+        # appended tail — stopping at the first all-old page would silently
+        # return nothing (the regression this test pins).
+        sim.set(profile="slow_paginated")
+        sim.set(sel_append=25)
+        base_newest = SEL_EPOCH + datetime.timedelta(minutes=13 * 149)
+        tail_first = SEL_EPOCH + datetime.timedelta(minutes=13 * 150)
+        cursor = base_newest + datetime.timedelta(minutes=1)
+        assert cursor < tail_first
+        batch = ADAPTER.collect(
+            sim_session(sim),
+            collect_request("logs", last_run_at=cursor),
+        )
+        assert [event.native_event_id for event in batch.events] == [
+            f"SEL{index:06d}" for index in range(151, 176)
+        ]
+        assert batch.events[0].occurred_at == tail_first
+        assert not batch.errors
+
+    def test_nothing_new_on_paged_sel_returns_zero(self, sim: SimAccess) -> None:
+        # The whole 150-entry paged head predates the cursor: the walk must
+        # still complete to the tail and emit nothing (zero events, zero
+        # errors) instead of failing or fabricating entries.
+        sim.set(profile="slow_paginated")
+        batch = ADAPTER.collect(
+            sim_session(sim),
+            collect_request("logs", last_run_at=T0),
+        )
+        assert not batch.events
+        assert not batch.errors
+        # Health observations are still part of a logs run.
+        assert obs_map(batch)[("health.overall", None, None)].value == "healthy"
+
     def test_pagination_over_150_entries_completes(self, sim: SimAccess) -> None:
         sim.set(profile="slow_paginated")
         batch = ADAPTER.collect(

@@ -32,10 +32,14 @@ docs/DEVICE_ADAPTERS.md §4):
 Constructor `SimulatorConfig` (see `app.py`) or the live control endpoint
 (no auth): `GET /warden-sim/control` for state; `POST /warden-sim/control`
 with `{"profile": ...}`, `{"vendor": ...}`, `{"pagination": ...}`,
-`{"task_duration_seconds": ...}`, `{"failures": {...}}`.
+`{"task_duration_seconds": ...}`, `{"sel_append": <int>}`, `{"failures": {...}}`.
 
 - Profiles: `healthy` (default), `critical`, `auth_fail` (login 401),
   `slow_paginated` (150 SEL entries, page size 20).
+- `sel_append`: appends extra SEL entries AFTER the profile's base count
+  (continuing the Id/timestamp sequence — strictly newer than every base
+  entry), for delta-collection tests growing a live SEL past a page
+  boundary. `empty_sel` still wins (zero entries).
 - Vendors: `generic` (default; neutral `Oem.Vendor` blocks) plus
   `dell`/`inspur`/`xfusion`/`lenovo`/`huawei` stubs returning
   vendor-namespaced odata types + OEM keys. These are STUBS — the real

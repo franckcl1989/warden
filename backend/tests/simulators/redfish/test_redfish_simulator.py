@@ -474,6 +474,51 @@ class TestSELPagination:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_sel_append_grows_tail_across_page_boundaries(self, http: httpx.AsyncClient) -> None:
+        await http.post(
+            "/warden-sim/control",
+            json={"profile": "slow_paginated", "sel_append": 25},
+        )
+        token, _ = await login(http)
+        page1 = (await authed_get(http, token, f"{BASE}/Managers/1/LogServices/SEL/Entries")).json()
+        assert page1["Members@odata.count"] == 175
+        assert len(page1["Members"]) == 20
+        # The appended entries live at the tail of the collection, spanning
+        # the page boundary at $skip=150 (SEL000151..SEL000175).
+        boundary = (await authed_get(http, token, f"{BASE}/Managers/1/LogServices/SEL/Entries?$skip=150")).json()
+        assert len(boundary["Members"]) == 20
+        assert boundary["Members"][0]["Id"] == "SEL000151"
+        assert boundary["Members"][-1]["Id"] == "SEL000170"
+        last = (await authed_get(http, token, f"{BASE}/Managers/1/LogServices/SEL/Entries?$skip=170")).json()
+        assert [member["Id"] for member in last["Members"]] == [
+            "SEL000171",
+            "SEL000172",
+            "SEL000173",
+            "SEL000174",
+            "SEL000175",
+        ]
+        # Appended entries are strictly newer than the base tail: the last
+        # base entry (SEL000150, first member of the $skip=149 page) and the
+        # first appended one are 13 min apart on the same clock as the base
+        # entries.
+        base_newest = (
+            (await authed_get(http, token, f"{BASE}/Managers/1/LogServices/SEL/Entries?$skip=149")).json()
+        )["Members"][0]
+        assert base_newest["Id"] == "SEL000150"
+        assert boundary["Members"][0]["Created"] > base_newest["Created"]
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_sel_append_is_rejected_when_not_a_count(self, http: httpx.AsyncClient) -> None:
+        response = await http.post("/warden-sim/control", json={"sel_append": "many"})
+        assert response.status_code == 400
+        response = await http.post("/warden-sim/control", json={"sel_append": True})
+        assert response.status_code == 400
+        response = await http.post("/warden-sim/control", json={"sel_append": -1})
+        assert response.status_code == 400
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sel_entries_carry_event_fields(self, http: httpx.AsyncClient) -> None:
         token, _ = await login(http)
         entries = (await authed_get(http, token, f"{BASE}/Managers/1/LogServices/SEL/Entries")).json()

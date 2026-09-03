@@ -77,6 +77,11 @@ class SimulatorConfig:
     #   members.
     missing_fan_reading: bool = False
     drives_without_oem: bool = False
+    # - sel_append: extra SEL entries appended AFTER the profile's base count
+    #   (continuing the Id/timestamp sequence, so they are strictly newer
+    #   than every base entry) — lets tests grow a live SEL past the delta
+    #   cursor across page boundaries.
+    sel_append: int = 0
 
     def __post_init__(self) -> None:
         if self.profile not in PROFILES:
@@ -104,12 +109,13 @@ class _View:
     def sel_count(self) -> int:
         if self.cfg.empty_sel:
             return 0
-        return {  # type: ignore[no-any-return]
+        base = {  # type: ignore[no-any-return]
             "healthy": 4,
             "critical": 25,
             "slow_paginated": self.cfg.sel_total,
             "auth_fail": 4,
         }[self.profile]
+        return base + self.cfg.sel_append
 
     @property
     def sel_page_size(self) -> int:
