@@ -1,0 +1,35 @@
+{
+  "success": true,
+  "data": {
+    "SYNO.API.Info": {
+      "path": "query.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    },
+    "SYNO.API.Auth": {
+      "path": "auth.cgi",
+      "minVersion": 1,
+      "maxVersion": 6
+    },
+    "SYNO.Core.System": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 2
+    },
+    "SYNO.Core.UPS": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    },
+    "SYNO.Core.System.Log": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    },
+    "SYNO.Core.Upgrade": {
+      "path": "entry.cgi",
+      "minVersion": 1,
+      "maxVersion": 1
+    }
+  }
+}

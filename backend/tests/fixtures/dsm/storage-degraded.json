@@ -1,0 +1,39 @@
+{
+  "success": true,
+  "data": {
+    "disk": [
+      {
+        "id": "sata1",
+        "name": "Disk 1",
+        "status": "Healthy",
+        "smart": "Normal",
+        "bad_sectors": 0
+      },
+      {
+        "id": "sata2",
+        "name": "Disk 2",
+        "status": "Broken",
+        "smart": "Fail",
+        "bad_sectors": 512
+      }
+    ],
+    "pool": [
+      {
+        "id": "pool1",
+        "name": "Pool 1",
+        "status": "Degraded",
+        "raid_type": "SHR-1",
+        "rebuild_progress": 0
+      }
+    ],
+    "volume": [
+      {
+        "id": "vol1",
+        "name": "Volume 1",
+        "status": "Normal",
+        "used_bytes": 3912318193664,
+        "total_bytes": 4000000000000
+      }
+    ]
+  }
+}
