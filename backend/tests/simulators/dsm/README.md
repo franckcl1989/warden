@@ -25,6 +25,7 @@ of every API name it advertises:
 | `SYNO.API.Auth` | auth.cgi | 6 | DSM Login Web API guide (documented) |
 | `SYNO.Core.System` | entry.cgi | 2 | **simulator-invented** placeholder for the DSM Control-Panel system family (not in the Login guide; certification pending) |
 | `SYNO.Storage.CGI.Storage` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM Storage Manager family (not in the Login guide; certification pending) |
+| `SYNO.Core.Share` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM shared-folder quota family (M4T2; the Login guide's SYNO.FileStation.List sample lists shares with name/path only and documents no usage/quota members, so the usage/quota surface stays a simulator-DSL row pending certification) |
 | `SYNO.Core.UPS` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM UPS family (not in the Login guide; certification pending) |
 | `SYNO.Core.System.Log` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM Log Centre family (not in the Login guide; certification pending) |
 | `SYNO.Core.Upgrade` | entry.cgi | 1 | **simulator-invented** placeholder for the DSM Update family (not in the Login guide; certification pending) |
@@ -55,8 +56,11 @@ GET or a form body on POST — both are accepted for every endpoint):
   - `SYNO.Core.System`: info (identity/firmware/temperature/fan/uptime),
     shutdown, restart (side effects end the session);
   - `SYNO.Storage.CGI.Storage`: load_info (disks + SMART + bad sectors,
-    storage pools with rebuild progress, volumes with used/total bytes),
-    smart_test (async taskid: running -> success/failure), smart_task_status;
+    storage pools with status + rebuild progress, volumes with used/total
+    bytes), smart_test (async taskid: running -> success/failure),
+    smart_task_status;
+  - `SYNO.Core.Share`: list (shared folders with id/name/used_bytes/
+    quota_bytes — quota 0 = 无配额, the missing usage-percent denominator);
   - `SYNO.Core.UPS`: get;
   - `SYNO.Core.System.Log`: list (offset/limit pages, `total` + `log`
     entries with id/time/level/message);
@@ -66,22 +70,41 @@ GET or a form body on POST — both are accepted for every endpoint):
 
 Constructor `SimulatorConfig` or the live control endpoint (no auth):
 `GET /warden-sim/control` for state; `POST /warden-sim/control` with
-`{"profile": ...}`, `{"storage_degraded": bool}`, `{"ups_on_battery": bool}`,
-`{"fan_broken": bool}`, `{"missing_apis": ["SYNO.Core.UPS", ...]}`,
+`{"profile": ...}`, `{"storage_degraded": bool}`,
+`{"pool_rebuilding": bool}`, `{"ups_on_battery": bool}`,
+`{"ups_absent": bool}`, `{"fan_broken": bool}`, `{"fan_zero_rpm": bool}`,
+`{"share_no_quota": bool}`, `{"log_append": int}`,
+`{"missing_apis": ["SYNO.Core.UPS", ...]}`,
 `{"storage_max_version": 9}` (inflate the advertised Storage maxVersion to
 prove the client never calls above its certified version),
 `{"task_duration_seconds": ...}`, `{"failures": {...}}`,
-`{"expire_sessions": true}`.
+`{"expire_sessions": true}`. Switching profile resets every knob to the
+profile's preset (repeatable switches).
 
-- Profiles: `healthy` (default), `degraded` (pool 1 Degraded, disk 2
+- Profiles: `healthy` (default), `ds224plus` and `ds225plus` (M4T2
+  vendor-model profiles naming the hardware-targets units
+  nas.synology_ds224plus/nas.synology_ds225plus: identity only — model/
+  serial/DSM version differ, always marked `(simulated)`; the served API
+  map is identical in this DSL), `degraded` (pool 1 Degraded, disk 2
   Broken/SMART Fail/bad sectors, UPS On Battery, fan 1 at 0 rpm Error,
   volume used/total near capacity — usage values are DATA), `auth_fail`
   (login always 401), `api_map_missing` (SYNO.Storage.CGI.Storage absent
   from the map — discovery must report the per-API gap, never guess a
   path), `slow_paginated` (150 log entries, page size 20).
-- Volume/share usage: the payload carries `used_bytes`/`total_bytes` only —
-  no invented thresholds anywhere; percentages are computed by the parser
-  from the bytes (DEVICE_ADAPTERS.md §5.1) or reported missing.
+- Volume/share usage: the payload carries `used_bytes`/`total_bytes` and
+  share `used_bytes`/`quota_bytes` only — no invented thresholds anywhere;
+  percentages are computed by the parser from the bytes
+  (DEVICE_ADAPTERS.md §5.1) or reported missing. `share_no_quota` serves a
+  share whose quota is 0 (无配额): the denominator is missing, so the
+  adapter reports the gap instead of bytes-as-percent (ADR-016).
+- Knob semantics (each exercises one honest adapter edge):
+  `pool_rebuilding` serves pool status `Rebuilding` with a device-reported
+  rebuild_progress (raid.rebuild_progress is only read while rebuilding);
+  `ups_absent` answers `{"ups": null}` — no point and no component for a
+  UPS-less unit; `fan_zero_rpm` reports 0 rpm with status Normal — 0 rpm
+  is DEVICE-REPORTED data, never fabricated, and must not alert by itself;
+  `log_append` appends strictly-newer entries after the base total
+  (deterministic ids/timestamps continue) for delta log reads.
 - Failure injection: `login_reject`, `login_otp`, `reads_500`,
   `error_unknown_2100`, `sessions_reject_106` (bounded re-login must fail
   honestly instead of looping), `smart_test_fails`, `update_fails`.

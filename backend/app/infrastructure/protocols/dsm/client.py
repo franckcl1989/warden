@@ -77,6 +77,7 @@ CERTIFIED_API_VERSIONS: dict[str, int] = {
     AUTH_API_NAME: 6,  # documented at v6 (Login guide)
     "SYNO.Core.System": 2,  # [sim] fixture-certified v2
     "SYNO.Storage.CGI.Storage": 1,  # [sim] fixture-certified v1
+    "SYNO.Core.Share": 1,  # [sim] fixture-certified v1 (M4T2 share usage/quota rows)
     "SYNO.Core.UPS": 1,  # [sim] fixture-certified v1
     "SYNO.Core.System.Log": 1,  # [sim] fixture-certified v1
     "SYNO.Core.Upgrade": 1,  # [sim] fixture-certified v1

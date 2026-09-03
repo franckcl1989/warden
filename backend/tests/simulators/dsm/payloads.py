@@ -22,24 +22,50 @@ API_MAP: dict[str, dict[str, object]] = {
     "SYNO.API.Auth": {"path": "auth.cgi", "minVersion": 1, "maxVersion": 6},
     "SYNO.Core.System": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 2},
     "SYNO.Storage.CGI.Storage": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
+    "SYNO.Core.Share": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
     "SYNO.Core.UPS": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
     "SYNO.Core.System.Log": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
     "SYNO.Core.Upgrade": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 1},
 }
 
-PROFILES = ("healthy", "degraded", "auth_fail", "api_map_missing", "slow_paginated")
+PROFILES = (
+    "healthy",
+    "ds224plus",
+    "ds225plus",
+    "degraded",
+    "auth_fail",
+    "api_map_missing",
+    "slow_paginated",
+)
 
-# Values (readable disk sizes for simulator data; all synthetic).
-_SIM_IDENTITY = {
+# Identity per profile (all synthetic simulator data). "healthy" keeps the
+# M4T1 DS224+ identity so the frozen M4T1 fixtures never drift; ds224plus and
+# ds225plus are the M4T2 vendor-model profiles that name the hardware-targets
+# certification units (nas.synology_ds224plus / nas.synology_ds225plus) and
+# carry "(simulated)" markers so a record can never be mistaken for a real
+# device. The DS225+ model/DSM version rows are simulator DSL placeholders
+# (ADR-018: real-DSM identity certification pending).
+_IDENTITY_DS224PLUS = {
     "model": "DS224+ (simulated)",
     "serial": "SIM-DS224P-0001",
     "firmware": "7.2.1-69057-update5 (simulated)",
+}
+_IDENTITY_DS225PLUS = {
+    "model": "DS225+ (simulated)",
+    "serial": "SIM-DS225P-0001",
+    "firmware": "7.2.2-72806-update1 (simulated)",
 }
 _FAN_COUNT = 2
 
 # Log centre entries start at this instant and advance 1 s per entry so the
 # pagination fixture is deterministic (ids/time strictly increasing).
 LOG_EPOCH = datetime(2026, 9, 3, 0, 0, 0, tzinfo=UTC)
+
+
+def _identity_for(profile: str) -> dict[str, str]:
+    if profile == "ds225plus":
+        return _IDENTITY_DS225PLUS
+    return _IDENTITY_DS224PLUS
 
 
 @dataclass(frozen=True)
@@ -55,13 +81,28 @@ class SimulatorConfig:
     # Knobs — each exercises one honest adapter edge:
     # - storage_degraded: pool 1 Degraded, disk 2 Broken + SMART Fail with
     #   bad-sector data, volume used/total near capacity (usage is DATA);
+    # - pool_rebuilding: pool 1 Rebuilding with a device-reported
+    #   rebuild_progress value (raid.rebuild_progress only while rebuilding);
     # - ups_on_battery: the UPS reports On Battery;
+    # - ups_absent: no UPS is connected (no ups point/component at all);
     # - fan_broken: fan 1 spins at 0 rpm with status Error;
+    # - fan_zero_rpm: every fan reports 0 rpm with status Normal — 0 rpm is
+    #   DEVICE-REPORTED data (never fabricated); it must not alert by itself;
+    # - share_no_quota: one shared folder has quota 0 (无配额) — the
+    #   usage-percent denominator is missing (ADR-016: never bytes-as-percent);
     # - missing_apis: API names dropped from the SYNO.API.Info map (the
-    #   adapter must report the gap instead of guessing a path).
+    #   adapter must report the gap instead of guessing a path);
+    # - log_append: extra log entries appended after the profile's base total
+    #   (ids/timestamps continue the deterministic cadence) so delta log
+    #   reads can see genuinely new entries past a cursor.
     storage_degraded: bool = False
+    pool_rebuilding: bool = False
     ups_on_battery: bool = False
+    ups_absent: bool = False
     fan_broken: bool = False
+    fan_zero_rpm: bool = False
+    share_no_quota: bool = False
+    log_append: int = 0
     missing_apis: tuple[str, ...] = ()
 
     def effective_map(self) -> dict[str, dict[str, object]]:
@@ -102,10 +143,13 @@ class TaskRecord:
 
 
 def _profiled_config(profile: str, cfg: SimulatorConfig) -> SimulatorConfig:
-    """Profile presets over an identity/base config (deterministic).
+    """Profile presets over a base config (deterministic).
 
-    Knobs not owned by the chosen profile keep their base values; knobs the
-    profile owns are forced to the preset so a switch is always repeatable.
+    A profile forces the knobs it OWNS to its preset values; knobs it does
+    not own keep their base values, so constructor combinations such as
+    ``SimulatorConfig(profile="ds224plus", pool_rebuilding=True)`` work.
+    Live control switches go through the same path (the DSM adapter test
+    conftest resets every knob explicitly for repeatable per-test state).
     """
     if profile == "degraded":
         return replace(
@@ -131,6 +175,11 @@ def _profiled_config(profile: str, cfg: SimulatorConfig) -> SimulatorConfig:
             log_page_size=20,
             missing_apis=(),
         )
+    if profile in ("ds224plus", "ds225plus"):
+        # Vendor-model profiles: identity only (model/serial/DSM version); the
+        # served API map is identical across the two certified consumer units
+        # in this DSL (any real difference is certification evidence, ADR-018).
+        return replace(cfg, profile=profile, missing_apis=())
     return replace(cfg, profile="healthy", missing_apis=())
 
 
@@ -169,13 +218,18 @@ def system_info_payload(cfg: SimulatorConfig) -> dict[str, Any]:
     for index in range(1, _FAN_COUNT + 1):
         if cfg.fan_broken and index == 1:
             fans.append({"id": index, "name": f"Fan {index}", "rpm": 0, "status": "Error"})
+        elif cfg.fan_zero_rpm:
+            # 0 rpm is DEVICE-REPORTED data here (status Normal): the fan
+            # control may stop the fans while the device reports them healthy.
+            fans.append({"id": index, "name": f"Fan {index}", "rpm": 0, "status": "Normal"})
         else:
             fans.append({"id": index, "name": f"Fan {index}", "rpm": 2100, "status": "Normal"})
+    identity = _identity_for(cfg.profile)
     return success(
         {
-            "model": _SIM_IDENTITY["model"],
-            "serial": _SIM_IDENTITY["serial"],
-            "firmware": _SIM_IDENTITY["firmware"],
+            "model": identity["model"],
+            "serial": identity["serial"],
+            "firmware": identity["firmware"],
             "temperature": [
                 {"id": "system", "name": "System", "temp_c": 41.0},
                 {"id": "disk", "name": "Disk", "temp_c": 38.0},
@@ -188,7 +242,22 @@ def system_info_payload(cfg: SimulatorConfig) -> dict[str, Any]:
 
 def storage_payload(cfg: SimulatorConfig) -> dict[str, Any]:
     """SYNO.Storage.CGI.Storage method=load_info: disk/pool/volume state."""
-    if cfg.storage_degraded:
+    if cfg.pool_rebuilding:
+        disk = [
+            {"id": "sata1", "name": "Disk 1", "status": "Healthy", "smart": "Normal", "bad_sectors": 0},
+            {"id": "sata2", "name": "Disk 2", "status": "Healthy", "smart": "Normal", "bad_sectors": 0},
+        ]
+        pool = [{"id": "pool1", "name": "Pool 1", "status": "Rebuilding", "raid_type": "SHR-1", "rebuild_progress": 45}]
+        volume = [
+            {
+                "id": "vol1",
+                "name": "Volume 1",
+                "status": "Normal",
+                "used_bytes": 1_500_000_000_000,
+                "total_bytes": 4_000_000_000_000,
+            }
+        ]
+    elif cfg.storage_degraded:
         disk = [
             {"id": "sata1", "name": "Disk 1", "status": "Healthy", "smart": "Normal", "bad_sectors": 0},
             {"id": "sata2", "name": "Disk 2", "status": "Broken", "smart": "Fail", "bad_sectors": 512},
@@ -221,8 +290,40 @@ def storage_payload(cfg: SimulatorConfig) -> dict[str, Any]:
     return success({"disk": disk, "pool": pool, "volume": volume})
 
 
+def share_payload(cfg: SimulatorConfig) -> dict[str, Any]:
+    """SYNO.Core.Share method=list: shared folders with usage + quota.
+
+    The quota member is the usage-percent DENOMINATOR (ADR-016 —
+    DEVICE_ADAPTERS.md §5.1: 缺少分母时不以字节数冒充百分比). ``quota_bytes``
+    0 means 无配额 (unlimited): the adapter must report the missing
+    denominator, never a fabricated percent.
+    """
+    shares: list[dict[str, object]] = [
+        {
+            "id": "homes",
+            "name": "homes",
+            "used_bytes": 2_000_000_000_000,
+            "quota_bytes": 4_000_000_000_000,
+        }
+    ]
+    if cfg.share_no_quota:
+        shares.append(
+            {
+                "id": "backup",
+                "name": "backup",
+                "used_bytes": 1_200_000_000_000,
+                "quota_bytes": 0,
+            }
+        )
+    return success({"shares": shares, "total": len(shares)})
+
+
 def ups_payload(cfg: SimulatorConfig) -> dict[str, Any]:
     """SYNO.Core.UPS method=get: UPS state (data, no invented thresholds)."""
+    if cfg.ups_absent:
+        # No UPS unit is connected: the payload says so explicitly (None) —
+        # the adapter emits no ups point and no ups component.
+        return success({"ups": None})
     status = "On Battery" if cfg.ups_on_battery else "Normal"
     return success({"ups": {"id": "ups1", "status": status, "name": "Simulated UPS"}})
 
@@ -231,9 +332,11 @@ def log_entries_payload(cfg: SimulatorConfig, *, offset: int, limit: int) -> dic
     """SYNO.Core.System.Log method=list: paginated log entries.
 
     Entries carry 1-based ``id`` (dedupe key), epoch ``time`` and a level;
-    severity normalization is the parser's job.
+    severity normalization is the parser's job. ``log_append`` adds strictly
+    newer entries AFTER the profile's base total (the deterministic cadence
+    continues) so delta reads can observe genuinely new tail entries.
     """
-    total = cfg.log_total
+    total = cfg.log_total + cfg.log_append
     entries: list[dict[str, object]] = []
     for index in range(offset + 1, min(offset + limit, total) + 1):
         level = "INFO" if index % 5 else "WARNING"

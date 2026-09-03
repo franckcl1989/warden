@@ -1,0 +1,43 @@
+{
+  "success": true,
+  "data": {
+    "total": 24,
+    "log": [
+      {
+        "id": 1,
+        "time": 1788393601,
+        "level": "INFO",
+        "message": "Simulated DSM log entry 1",
+        "user": "system"
+      },
+      {
+        "id": 2,
+        "time": 1788393602,
+        "level": "INFO",
+        "message": "Simulated DSM log entry 2",
+        "user": "system"
+      },
+      {
+        "id": 3,
+        "time": 1788393603,
+        "level": "INFO",
+        "message": "Simulated DSM log entry 3",
+        "user": "system"
+      },
+      {
+        "id": 4,
+        "time": 1788393604,
+        "level": "INFO",
+        "message": "Simulated DSM log entry 4",
+        "user": "system"
+      },
+      {
+        "id": 5,
+        "time": 1788393605,
+        "level": "WARNING",
+        "message": "Simulated DSM log entry 5",
+        "user": "system"
+      }
+    ]
+  }
+}

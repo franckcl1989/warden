@@ -1,0 +1,35 @@
+{
+  "success": true,
+  "data": {
+    "model": "DS225+ (simulated)",
+    "serial": "SIM-DS225P-0001",
+    "firmware": "7.2.2-72806-update1 (simulated)",
+    "temperature": [
+      {
+        "id": "system",
+        "name": "System",
+        "temp_c": 41.0
+      },
+      {
+        "id": "disk",
+        "name": "Disk",
+        "temp_c": 38.0
+      }
+    ],
+    "fan": [
+      {
+        "id": 1,
+        "name": "Fan 1",
+        "rpm": 2100,
+        "status": "Normal"
+      },
+      {
+        "id": 2,
+        "name": "Fan 2",
+        "rpm": 2100,
+        "status": "Normal"
+      }
+    ],
+    "uptime_seconds": 1814400
+  }
+}

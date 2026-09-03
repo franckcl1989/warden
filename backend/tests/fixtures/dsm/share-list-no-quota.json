@@ -1,0 +1,20 @@
+{
+  "success": true,
+  "data": {
+    "shares": [
+      {
+        "id": "homes",
+        "name": "homes",
+        "used_bytes": 2000000000000,
+        "quota_bytes": 4000000000000
+      },
+      {
+        "id": "backup",
+        "name": "backup",
+        "used_bytes": 1200000000000,
+        "quota_bytes": 0
+      }
+    ],
+    "total": 2
+  }
+}

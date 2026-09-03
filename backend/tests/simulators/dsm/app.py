@@ -19,23 +19,30 @@ DSM Login Web API guide; common error codes 100..108 = guide block):
   (login failures: 401 wrong credentials; 403 two-step required);
 - ``/webapi/entry.cgi`` authenticated family APIs: SYNO.Core.System
   (info/shutdown/restart), SYNO.Storage.CGI.Storage (load_info, async
-  SMART test via taskid), SYNO.Core.UPS, SYNO.Core.System.Log (paged),
-  SYNO.Core.Upgrade (async update job via taskid).
+  SMART test via taskid), SYNO.Core.Share (list — shared folders with
+  usage bytes + quota bytes), SYNO.Core.UPS (get), SYNO.Core.System.Log
+  (paged), SYNO.Core.Upgrade (async update job via taskid).
 
 Profiles (constructor ``SimulatorConfig`` or the live control endpoint):
 
-- ``healthy`` (default), ``degraded`` (degraded pool + broken/failed disk,
-  UPS on battery, fan 1 broken at 0 rpm, near-full volume usage data),
-  ``auth_fail`` (login always rejected), ``api_map_missing`` (the
-  monitoring-critical Storage API absent from the map),
-  ``slow_paginated`` (150 log entries, page size 20).
+- ``healthy`` (default), ``ds224plus``/``ds225plus`` (the M4T2 vendor-model
+  profiles naming the hardware-targets units — identity only, model/serial/
+  DSM version differ; always ``(simulated)``-marked),
+  ``degraded`` (degraded pool + broken/failed disk, UPS on battery, fan 1
+  broken at 0 rpm, near-full volume usage data), ``auth_fail`` (login always
+  rejected), ``api_map_missing`` (the monitoring-critical Storage API absent
+  from the map), ``slow_paginated`` (150 log entries, page size 20).
 
 Live control (no auth): ``GET /warden-sim/control`` for state;
 ``POST /warden-sim/control`` with ``{"profile": ...}``,
-``{"storage_degraded": bool}``, ``{"ups_on_battery": bool}``,
-``{"fan_broken": bool}``, ``{"missing_apis": [..]}``,
-``{"storage_max_version": int}``, ``{"task_duration_seconds": ...}``,
-``{"failures": {...}}`` or ``{"expire_sessions": true}``.
+``{"storage_degraded": bool}``, ``{"pool_rebuilding": bool}``,
+``{"ups_on_battery": bool}``, ``{"ups_absent": bool}``,
+``{"fan_broken": bool}``, ``{"fan_zero_rpm": bool}``,
+``{"share_no_quota": bool}``, ``{"log_append": int}``,
+``{"missing_apis": [..]}``, ``{"storage_max_version": int}``,
+``{"task_duration_seconds": ...}``, ``{"failures": {...}}`` or
+``{"expire_sessions": true}``. Profile switches force the profile-owned
+knobs to their presets (constructor knob combinations are preserved).
 
 Failure injection keys: ``login_reject`` (401), ``login_otp`` (403
 two-step), ``reads_500`` (HTTP 500), ``error_unknown_2100`` (unmapped DSM
@@ -78,7 +85,18 @@ FAILURE_KEYS = frozenset(
         "update_fails",
     }
 )
-BOOL_KNOB_KEYS = frozenset({"storage_degraded", "ups_on_battery", "fan_broken"})
+BOOL_KNOB_KEYS = frozenset(
+    {
+        "storage_degraded",
+        "pool_rebuilding",
+        "ups_on_battery",
+        "ups_absent",
+        "fan_broken",
+        "fan_zero_rpm",
+        "share_no_quota",
+    }
+)
+INT_KNOB_KEYS = frozenset({"log_append"})
 
 
 class _SimulatorState:
@@ -108,9 +126,14 @@ class _SimulatorState:
             "task_duration_seconds": self.cfg.task_duration_seconds,
             "log_total": self.cfg.log_total,
             "log_page_size": self.cfg.log_page_size,
+            "log_append": self.cfg.log_append,
             "storage_degraded": self.cfg.storage_degraded,
+            "pool_rebuilding": self.cfg.pool_rebuilding,
             "ups_on_battery": self.cfg.ups_on_battery,
+            "ups_absent": self.cfg.ups_absent,
             "fan_broken": self.cfg.fan_broken,
+            "fan_zero_rpm": self.cfg.fan_zero_rpm,
+            "share_no_quota": self.cfg.share_no_quota,
             "missing_apis": sorted(self.cfg.missing_apis),
             "storage_max_version": self.storage_max_version,
             "failures": dict(self.failures),
@@ -139,6 +162,11 @@ class _SimulatorState:
                 self.cfg = replace(self.cfg, task_duration_seconds=float(value))
             elif key in BOOL_KNOB_KEYS:
                 self.cfg = replace(self.cfg, **{key: bool(value)})
+            elif key in INT_KNOB_KEYS:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    msg = f"{key} must be a non-negative integer"
+                    raise ValueError(msg)
+                self.cfg = replace(self.cfg, **{key: int(value)})
             elif key == "missing_apis":
                 if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                     msg = "missing_apis must be a list of API names"
@@ -317,6 +345,10 @@ class _Dispatcher:
             return self._system(api, method, params)
         if api == "SYNO.Storage.CGI.Storage":
             return self._storage(api, method, params)
+        if api == "SYNO.Core.Share":
+            if method != "list":
+                return 200, payloads.error(103), {}
+            return 200, payloads.share_payload(state.cfg), {}
         if api == "SYNO.Core.UPS":
             if method != "get":
                 return 200, payloads.error(103), {}

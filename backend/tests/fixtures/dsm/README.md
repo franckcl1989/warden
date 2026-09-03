@@ -18,15 +18,27 @@ simulator DSL documented in `tests/simulators/dsm/README.md`.
 | --- | --- | --- | --- |
 | `info-query-all-healthy.json` | `GET /webapi/query.cgi` (SYNO.API.Info.Query query=all API map) | simulator profile `healthy`, uvicorn 127.0.0.1 | 2026-09-03 |
 | `info-query-api-map-missing.json` | `GET /webapi/query.cgi` (API map WITHOUT SYNO.Storage.CGI.Storage) | simulator profile `api_map_missing`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `info-query-ds224plus.json` | `GET /webapi/query.cgi` (SYNO.API.Info.Query query=all API map incl. SYNO.Core.Share) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |
 | `login-otp-required.json` | `GET /webapi/auth.cgi` (SYNO.API.Auth login answer: two-step required, code 403) | simulator failures knob `login_otp`, uvicorn 127.0.0.1 | 2026-09-03 |
 | `system-info-healthy.json` | `GET /webapi/entry.cgi` (SYNO.Core.System method=info, version 2) | simulator profile `healthy`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `system-info-ds224plus.json` | `GET /webapi/entry.cgi` (SYNO.Core.System info, version 2 — ds224plus identity) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `system-info-ds225plus.json` | `GET /webapi/entry.cgi` (SYNO.Core.System info, version 2 — ds225plus identity) | simulator profile `ds225plus`, uvicorn 127.0.0.1 | 2026-09-03 |
 | `storage-degraded.json` | `GET /webapi/entry.cgi` (SYNO.Storage.CGI.Storage load_info: broken/failed disk, degraded pool, near-capacity volume usage bytes) | simulator profile `degraded`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `storage-ds224plus-healthy.json` | `GET /webapi/entry.cgi` (SYNO.Storage.CGI.Storage load_info — ds224plus healthy disks/pool/volume) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `storage-pool-rebuilding.json` | `GET /webapi/entry.cgi` (SYNO.Storage.CGI.Storage load_info — pool 1 Rebuilding with device-reported rebuild_progress 45) | simulator profile `ds224plus` + knob `pool_rebuilding`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `share-list-ds224plus.json` | `GET /webapi/entry.cgi` (SYNO.Core.Share list — homes share with used_bytes/quota_bytes) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `share-list-no-quota.json` | `GET /webapi/entry.cgi` (SYNO.Core.Share list — backup share with quota_bytes 0, the missing usage-percent denominator) | simulator profile `ds224plus` + knob `share_no_quota`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `ups-normal-ds224plus.json` | `GET /webapi/entry.cgi` (SYNO.Core.UPS get — Normal) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `ups-on-battery.json` | `GET /webapi/entry.cgi` (SYNO.Core.UPS get — On Battery) | simulator profile `ds224plus` + knob `ups_on_battery`, uvicorn 127.0.0.1 | 2026-09-03 |
 | `log-page1-healthy.json` | `GET /webapi/entry.cgi` (SYNO.Core.System.Log list, offset 0 limit 5) | simulator profile `healthy`, uvicorn 127.0.0.1 | 2026-09-03 |
+| `log-page1-ds224plus.json` | `GET /webapi/entry.cgi` (SYNO.Core.System.Log list, offset 0 limit 5 — ds224plus profile) | simulator profile `ds224plus`, uvicorn 127.0.0.1 | 2026-09-03 |
 
 All files are synthetic simulator data — no credentials, tokens, serials of
 real devices or other sensitive content (login envelopes are captured with
 the test-only `admin`/`sim-pass-1` account and their sid-bearing bodies were
-NOT snapshotted; only the failure answer without a sid was kept).
+NOT snapshotted; only the failure answer without a sid was kept). The M4T2
+rows were captured with `tests/simulators/dsm/capture_m4t2_fixtures.py`
+(uvicorn 127.0.0.1, profiles/knobs in the table above).
 
 ## Rules for future fixtures (binding)
 

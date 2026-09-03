@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "data": {
+    "shares": [
+      {
+        "id": "homes",
+        "name": "homes",
+        "used_bytes": 2000000000000,
+        "quota_bytes": 4000000000000
+      }
+    ],
+    "total": 1
+  }
+}

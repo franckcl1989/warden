@@ -5,13 +5,17 @@ M1T3 registers the fake CI adapter; M3T2 adds the common Redfish base
 dev/testing flows against the Redfish simulator; NOT a certification target);
 M3T5 registers the five certification-target vendor overlays
 (server.dell_idrac, server.inspur_ibmc, server.xfusion_ibmc,
-server.lenovo_xcc, server.huawei_ibmc) subclassing the common base. The
-device API rejects any adapter_key not present here (422 validation_failed
-field=adapter_key) — unknown drivers are never accepted for onboarding.
+server.lenovo_xcc, server.huawei_ibmc) subclassing the common base; M4T2
+registers ``nas.synology_dsm`` (the certification-target adapter for
+synology_nas — DS224+/DS225+, monitoring probe/discover/collect only until
+the NAS-ACT milestones). The device API rejects any adapter_key not present
+here (422 validation_failed field=adapter_key) — unknown drivers are never
+accepted for onboarding.
 """
 
 from __future__ import annotations
 
+from app.adapters.dsm import SynologyDsmAdapter
 from app.adapters.fake import FakeSimpleAdapter
 from app.adapters.redfish.common import RedfishCommonAdapter
 from app.adapters.redfish.dell import DellIdracAdapter
@@ -65,3 +69,4 @@ register(InspurIbmcAdapter())
 register(XfusionIbmcAdapter())
 register(LenovoXccAdapter())
 register(HuaweiIbmcAdapter())
+register(SynologyDsmAdapter())

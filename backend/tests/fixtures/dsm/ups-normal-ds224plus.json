@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "data": {
+    "ups": {
+      "id": "ups1",
+      "status": "Normal",
+      "name": "Simulated UPS"
+    }
+  }
+}

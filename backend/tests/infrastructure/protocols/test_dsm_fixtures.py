@@ -29,10 +29,20 @@ README = FIXTURES / "README.md"
 FIXTURE_FILES = (
     "info-query-all-healthy.json",
     "info-query-api-map-missing.json",
+    "info-query-ds224plus.json",
     "login-otp-required.json",
     "system-info-healthy.json",
+    "system-info-ds224plus.json",
+    "system-info-ds225plus.json",
     "storage-degraded.json",
+    "storage-ds224plus-healthy.json",
+    "storage-pool-rebuilding.json",
+    "share-list-ds224plus.json",
+    "share-list-no-quota.json",
+    "ups-normal-ds224plus.json",
+    "ups-on-battery.json",
     "log-page1-healthy.json",
+    "log-page1-ds224plus.json",
 )
 
 
@@ -60,16 +70,18 @@ class TestProvenance:
 
 class TestEnvelopes:
     def test_all_fixtures_are_valid_envelopes(self) -> None:
+        # Error-envelope fixtures only (the rest are success envelopes).
+        error_fixtures = {"login-otp-required.json"}
         for name in FIXTURE_FILES:
             body = load(name)
             ok, data, code = envelope_data(body)
             assert isinstance(body, dict)
-            if name.startswith(("info-query", "system", "log-page")) or "storage" in name:
-                assert ok is True
-                assert data is not None
-            else:
+            if name in error_fixtures:
                 assert ok is False
                 assert code is not None
+            else:
+                assert ok is True
+                assert data is not None
 
 
 class TestDiscoveryFixtures:
