@@ -425,7 +425,10 @@ class TestTasksAndActions:
         token, _ = await login(http)
         response = await http.post(
             f"{BASE}/UpdateService/Actions/UpdateService.SimpleUpdate",
-            json={"Target": f"{BASE}/UpdateService/FirmwareInventory/BMC"},
+            json={
+                "Target": f"{BASE}/UpdateService/FirmwareInventory/BMC",
+                "ImageURI": "http://127.0.0.1:1/noop.iso",
+            },
             headers={"X-Auth-Token": token},
         )
         assert response.status_code == 202
@@ -611,3 +614,225 @@ class TestOemVendorStubs:
         block = dimm0["Oem"]["Dell"]
         assert block["@odata.type"].startswith("#Dell.")
         assert "CorrectableECCErrorCount" in block
+
+class TestM3T3OperationSurface:
+    """M3T3 operation semantics: power effects, manager restart, update, media."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_system_reset_graceful_shutdown_powers_off_then_on_restarts(self, http: httpx.AsyncClient) -> None:
+        await http.post(
+            "/warden-sim/control",
+            json={"task_duration_seconds": 0.05, "power_blip_seconds": 0.3},
+        )
+        token, _ = await login(http)
+
+        async def power_state() -> str:
+            system = (await authed_get(http, token, f"{BASE}/Systems/1")).json()
+            return system["PowerState"]
+
+        assert await power_state() == "On"
+        # GracefulShutdown: the reset task completion powers the system off.
+        shutdown = await http.post(
+            f"{BASE}/Systems/1/Actions/ComputerSystem.Reset",
+            json={"ResetType": "GracefulShutdown"},
+            headers={"X-Auth-Token": token},
+        )
+        assert shutdown.status_code == 202
+        task_uri = shutdown.headers["location"]
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            body = (await authed_get(http, token, task_uri)).json()
+            if body["TaskState"] == "Completed":
+                break
+            await asyncio.sleep(0.02)
+        assert await power_state() == "Off"
+        # ForceRestart from Off reboots back On through an Off blip window.
+        restart = await http.post(
+            f"{BASE}/Systems/1/Actions/ComputerSystem.Reset",
+            json={"ResetType": "ForceRestart"},
+            headers={"X-Auth-Token": token},
+        )
+        assert restart.status_code == 202
+        restart_uri = restart.headers["location"]
+        deadline = time.monotonic() + 2.0
+        observed: list[str] = []
+        while time.monotonic() < deadline:
+            state = (await authed_get(http, token, restart_uri)).json()["TaskState"]
+            observed.append(await power_state())
+            if state == "Completed" and observed[-1] == "On":
+                break
+            await asyncio.sleep(0.02)
+        assert "Off" in observed, "the reboot blip window must be observable"
+        assert observed[-1] == "On"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_power_readback_stale_freezes_power_state(self, http: httpx.AsyncClient) -> None:
+        await http.post(
+            "/warden-sim/control",
+            json={"task_duration_seconds": 0.05, "power_readback_stale": True},
+        )
+        token, _ = await login(http)
+        shutdown = await http.post(
+            f"{BASE}/Systems/1/Actions/ComputerSystem.Reset",
+            json={"ResetType": "GracefulShutdown"},
+            headers={"X-Auth-Token": token},
+        )
+        assert shutdown.status_code == 202
+        task_uri = shutdown.headers["location"]
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            body = (await authed_get(http, token, task_uri)).json()
+            if body["TaskState"] == "Completed":
+                break
+            await asyncio.sleep(0.02)
+        system = (await authed_get(http, token, f"{BASE}/Systems/1")).json()
+        assert system["PowerState"] == "On"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_manager_reset_invalidates_sessions_and_503_window(self, http: httpx.AsyncClient) -> None:
+        await http.post("/warden-sim/control", json={"manager_blip_seconds": 0.6})
+        token, _ = await login(http)
+        response = await http.post(
+            f"{BASE}/Managers/1/Actions/Manager.Reset",
+            json={"ResetType": "GracefulRestart"},
+            headers={"X-Auth-Token": token},
+        )
+        assert response.status_code == 202
+        task_uri = response.headers["location"]
+        # During the restart window every Redfish request answers 503.
+        offline = await authed_get(http, token, f"{BASE}/Managers/1")
+        assert offline.status_code == 503
+        gone = await authed_get(http, token, task_uri)
+        assert gone.status_code == 503
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            probe = await authed_get(http, token, f"{BASE}/Managers/1")
+            if probe.status_code != 503:
+                break
+            await asyncio.sleep(0.05)
+        # The manager is back: the old session token died with the reboot and
+        # the reset task record vanished; a fresh session sees the same UUID.
+        assert probe.status_code == 401
+        assert (await authed_get(http, token, task_uri)).status_code == 401
+        fresh_token, _ = await login(http)
+        manager = (await authed_get(http, fresh_token, f"{BASE}/Managers/1")).json()
+        assert manager["UUID"] == "66666666-7777-8888-9999-aaaaaaaaaaaa"
+        assert (await authed_get(http, fresh_token, task_uri)).status_code == 404
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_simple_update_bumps_firmware_version_and_knobs(self, http: httpx.AsyncClient) -> None:
+        await http.post(
+            "/warden-sim/control",
+            json={
+                "task_duration_seconds": 0.05,
+                "firmware_update_version": "SIM-BMC-1.1.0",
+            },
+        )
+        token, _ = await login(http)
+        response = await http.post(
+            f"{BASE}/UpdateService/Actions/UpdateService.SimpleUpdate",
+            json={
+                "Targets": [f"{BASE}/UpdateService/FirmwareInventory/BMC"],
+                "ImageURI": "http://127.0.0.1:1/fw.iso",
+            },
+            headers={"X-Auth-Token": token},
+        )
+        assert response.status_code == 202
+        task_uri = response.headers["location"]
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            body = (await authed_get(http, token, task_uri)).json()
+            if body["TaskState"] == "Completed":
+                break
+            await asyncio.sleep(0.02)
+        inventory = (await authed_get(http, token, f"{BASE}/UpdateService/FirmwareInventory/BMC")).json()
+        assert inventory["Version"] == "SIM-BMC-1.1.0"
+        manager = (await authed_get(http, token, f"{BASE}/Managers/1")).json()
+        assert manager["FirmwareVersion"] == "SIM-BMC-1.1.0"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_update_task_failure_and_never_completes(self, http: httpx.AsyncClient) -> None:
+        await http.post("/warden-sim/control", json={"failures": {"update_task_fails": True}})
+        token, _ = await login(http)
+        response = await http.post(
+            f"{BASE}/UpdateService/Actions/UpdateService.SimpleUpdate",
+            json={"Targets": [], "ImageURI": "http://127.0.0.1:1/x.iso"},
+            headers={"X-Auth-Token": token},
+        )
+        assert response.status_code == 400  # empty Targets -> ActionParameterValueNotInList
+        response = await http.post(
+            f"{BASE}/UpdateService/Actions/UpdateService.SimpleUpdate",
+            json={
+                "Targets": [f"{BASE}/UpdateService/FirmwareInventory/BMC"],
+                "ImageURI": "http://127.0.0.1:1/x.iso",
+            },
+            headers={"X-Auth-Token": token},
+        )
+        assert response.status_code == 202
+        task_uri = response.headers["location"]
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            body = (await authed_get(http, token, task_uri)).json()
+            if body["TaskState"] in ("Exception", "Completed"):
+                break
+            await asyncio.sleep(0.02)
+        assert body["TaskState"] == "Exception"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_update_fetch_required_reads_image_header(self, http: httpx.AsyncClient) -> None:
+        await http.post(
+            "/warden-sim/control",
+            json={"task_duration_seconds": 0.05, "update_fetch_required": True},
+        )
+        token, _ = await login(http)
+        response = await http.post(
+            f"{BASE}/UpdateService/Actions/UpdateService.SimpleUpdate",
+            json={
+                "Targets": [f"{BASE}/UpdateService/FirmwareInventory/BMC"],
+                "ImageURI": "http://not-reachable.invalid/x.iso",
+            },
+            headers={"X-Auth-Token": token},
+        )
+        assert response.status_code == 400
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_media_insert_allowlist_and_state(self, http: httpx.AsyncClient) -> None:
+        await http.post(
+            "/warden-sim/control",
+            json={
+                "media_insert_rejects_foreign_url": True,
+                "media_hosts": ["127.0.0.1"],
+            },
+        )
+        token, _ = await login(http)
+        insert = await http.post(
+            f"{BASE}/Managers/1/VirtualMedia/1/Actions/VirtualMedia.InsertMedia",
+            json={"Image": "http://evil.example.com/iso", "Inserted": True, "WriteProtected": True},
+            headers={"X-Auth-Token": token},
+        )
+        assert insert.status_code == 400
+        slot = (await authed_get(http, token, f"{BASE}/Managers/1/VirtualMedia/1")).json()
+        assert slot["Inserted"] is False
+        ok = await http.post(
+            f"{BASE}/Managers/1/VirtualMedia/1/Actions/VirtualMedia.InsertMedia",
+            json={"Image": "http://127.0.0.1:1/iso.iso", "Inserted": True, "WriteProtected": True},
+            headers={"X-Auth-Token": token},
+        )
+        assert ok.status_code == 204
+        slot = (await authed_get(http, token, f"{BASE}/Managers/1/VirtualMedia/1")).json()
+        assert slot["Inserted"] is True
+        assert slot["Image"] == "http://127.0.0.1:1/iso.iso"
+        eject = await http.post(
+            f"{BASE}/Managers/1/VirtualMedia/1/Actions/VirtualMedia.EjectMedia",
+            headers={"X-Auth-Token": token},
+        )
+        assert eject.status_code == 204
+        slot = (await authed_get(http, token, f"{BASE}/Managers/1/VirtualMedia/1")).json()
+        assert slot["Inserted"] is False

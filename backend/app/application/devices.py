@@ -50,6 +50,7 @@ from app.application.security_events import security_sensitive_config_change
 from app.config import WardenSettings
 from app.domain.adapter import (
     DEFAULT_MANAGEMENT_PORT,
+    OPERATION_APPLIED_COMPONENT_KINDS,
     ConnectionProfile,
     DeviceAdapter,
     DiscoveryResult,
@@ -304,6 +305,10 @@ def _write_components(db: Session, device_id: uuid.UUID, discovery: DiscoveryRes
             row.properties = dict(component.properties)
             row.last_seen_at = now
     for key, row in existing.items():
+        # M3T3: operation-applied kinds (fru/firmware) are outside the
+        # discovery inventory; never retire them as "missing" here.
+        if key[0] in OPERATION_APPLIED_COMPONENT_KINDS:
+            continue
         if key not in seen and row.retired_at is None:
             row.retired_at = now
 

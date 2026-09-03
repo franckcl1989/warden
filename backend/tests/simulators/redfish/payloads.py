@@ -82,6 +82,39 @@ class SimulatorConfig:
     #   than every base entry) — lets tests grow a live SEL past the delta
     #   cursor across page boundaries.
     sel_append: int = 0
+    # M3T3 operation knobs:
+    # - power_blip_seconds: how long the system reports PowerState Off after a
+    #   restart/cycle reset task completes (reboot window);
+    # - manager_blip_seconds: how long every Redfish request 503s after a
+    #   manager reset (the device offline window);
+    # - firmware_update_version: version the firmware inventory bumps to when
+    #   an update task completes without an image fetch (contract tests);
+    # - power_readback_stale: system power effects never apply (read-back can
+    #   never observe the target state);
+    # - media_insert_rejects_foreign_url: InsertMedia checks the Image host
+    #   against ``media_hosts`` (a non-platform URL is rejected with 400);
+    # - media_fetch_required / update_fetch_required: InsertMedia/SimpleUpdate
+    #   emulate the device actually fetching the Image URL (the platform
+    #   ticket route must be live); a failed fetch rejects the action;
+    # - update_reboot_loop: the update task completes but the inventory
+    #   version never bumps and the system reboots (read-back can never match
+    #   the expected version);
+    # - reset_never_completes / update_never_completes: the reset/update task
+    #   never reaches a terminal state (verification times out -> ambiguous).
+    # - no_graceful_shutdown: the ComputerSystem Reset action neither
+    #   advertises nor accepts GracefulShutdown (power.off must fail as
+    #   unsupported — ForceOff fallback is forbidden).
+    power_blip_seconds: float = 0.5
+    manager_blip_seconds: float = 1.2
+    firmware_update_version: str = ""
+    power_readback_stale: bool = False
+    media_insert_rejects_foreign_url: bool = False
+    media_fetch_required: bool = False
+    update_fetch_required: bool = False
+    update_reboot_loop: bool = False
+    reset_never_completes: bool = False
+    update_never_completes: bool = False
+    no_graceful_shutdown: bool = False
 
     def __post_init__(self) -> None:
         if self.profile not in PROFILES:
@@ -182,7 +215,7 @@ def systems_collection() -> dict[str, Any]:
     )
 
 
-def system(view: _View) -> dict[str, Any]:
+def system(view: _View, *, power_state: str = "On", bios_version: str = "SIM-BIOS-2.0") -> dict[str, Any]:
     payload: dict[str, Any] = {
         "Id": "1",
         "Name": "Warden Simulated Server",
@@ -191,8 +224,8 @@ def system(view: _View) -> dict[str, Any]:
         "Model": "Warden SimServer 1U (simulated)",
         "SerialNumber": "WARDEN-SIM-0001",
         "SKU": "SIM-1U",
-        "BiosVersion": "SIM-BIOS-2.0",
-        "PowerState": "On",
+        "BiosVersion": bios_version,
+        "PowerState": power_state,
         "Status": _status(view.health),
         "ProcessorSummary": {
             "Count": 2,
@@ -207,15 +240,28 @@ def system(view: _View) -> dict[str, Any]:
         "Actions": {
             "#ComputerSystem.Reset": {
                 "target": f"{BASE}/Systems/1/Actions/ComputerSystem.Reset",
-                "ResetType@Redfish.AllowableValues": [
-                    "On",
-                    "ForceOff",
-                    "GracefulShutdown",
-                    "GracefulRestart",
-                    "ForceRestart",
-                    "Nmi",
-                    "PushPowerButton",
-                ],
+                "ResetType@Redfish.AllowableValues": (
+                    [
+                        "On",
+                        "ForceOff",
+                        "GracefulRestart",
+                        "ForceRestart",
+                        "PowerCycle",
+                        "Nmi",
+                        "PushPowerButton",
+                    ]
+                    if view.cfg.no_graceful_shutdown
+                    else [
+                        "On",
+                        "ForceOff",
+                        "GracefulShutdown",
+                        "GracefulRestart",
+                        "ForceRestart",
+                        "PowerCycle",
+                        "Nmi",
+                        "PushPowerButton",
+                    ]
+                ),
             }
         },
         "Memory": {"@odata.id": f"{BASE}/Systems/1/Memory"},
@@ -418,6 +464,7 @@ def chassis(view: _View) -> dict[str, Any]:
         "Manufacturer": "Warden Simulator",
         "Model": "SIM-1U-CHASSIS",
         "SerialNumber": "WARDEN-SIM-CH-1",
+        "PartNumber": "SIM-CH-1U-A",
         "PowerState": "On",
         "Status": _status(view.health),
         "IndicatorLED": "Blinking" if view.profile == "critical" else "Off",
@@ -551,14 +598,18 @@ def managers_collection() -> dict[str, Any]:
     )
 
 
-def manager(view: _View, *, date_time: datetime) -> dict[str, Any]:
+def manager(
+    view: _View, *, date_time: datetime, firmware_version: str = "SIM-BMC-1.0.0"
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "Id": "1",
         "Name": "Simulated BMC",
         "ManagerType": "BMC",
         "Manufacturer": "Warden Simulator",
         "Model": "SIM-BMC",
-        "FirmwareVersion": "SIM-BMC-1.0.0",
+        "SerialNumber": "WARDEN-SIM-BMC-SN-1",
+        "PartNumber": "SIM-BMC-CARD-A1",
+        "FirmwareVersion": firmware_version,
         "UUID": MANAGER_UUID,
         "DateTime": date_time.isoformat(),
         "DateTimeLocalOffset": "+00:00",
@@ -727,7 +778,7 @@ def update_service(view: _View) -> dict[str, Any]:
                 "#UpdateService.SimpleUpdate": {
                     "target": f"{BASE}/UpdateService/Actions/UpdateService.SimpleUpdate",
                     "TransferProtocol@Redfish.AllowableValues": ["HTTP", "HTTPS"],
-                    "Target@Redfish.AllowableValues": [
+                    "Targets@Redfish.AllowableValues": [
                         f"{BASE}/UpdateService/FirmwareInventory/BMC",
                         f"{BASE}/UpdateService/FirmwareInventory/BIOS",
                     ],
@@ -753,13 +804,12 @@ def firmware_inventory_collection() -> dict[str, Any]:
     )
 
 
-def firmware_inventory(component_id: str) -> dict[str, Any]:
-    versions = {"BMC": "SIM-BMC-1.0.0", "BIOS": "SIM-BIOS-2.0"}
+def firmware_inventory(component_id: str, *, version: str) -> dict[str, Any]:
     return _odata(
         {
             "Id": component_id,
             "Name": f"{component_id} firmware",
-            "Version": versions[component_id],
+            "Version": version,
             "Updateable": True,
             "Status": _status("OK"),
         },

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.domain.adapter import canonical_json
 from app.domain.contracts import OperationProfile, Requirement
@@ -193,7 +193,15 @@ class OperationRequest:
 
 @dataclass(frozen=True)
 class OperationPlan:
-    """The full plan per DEVICE_ADAPTERS.md §2.4 (mirrors one profile)."""
+    """The full plan per DEVICE_ADAPTERS.md §2.4 (mirrors one profile).
+
+    ``runtime_context`` (M3T3) is platform-assembled execution material that
+    is NEVER part of the plan hash: the worker fills it right before
+    preflight/execute/verify with file rows, platform-issued device-pull
+    ticket URLs, expected package metadata and the task deadline. It never
+    contains credentials, file storage paths or ticket-URL bearer material
+    beyond what the device itself must see.
+    """
 
     requirement_id: str
     capability_key: str
@@ -213,6 +221,7 @@ class OperationPlan:
     parameter_hash: str
     plan_hash: str
     adapter_version: str
+    runtime_context: dict[str, object] = field(default_factory=dict)
 
 
 def _requirement_for(capability_key: str, device_type: str) -> Requirement | None:

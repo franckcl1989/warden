@@ -53,6 +53,8 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import httpx
+
 from tests.simulators.redfish import payloads
 from tests.simulators.redfish.payloads import SimulatorConfig, _View
 
@@ -66,6 +68,7 @@ FAILURE_KEYS = frozenset(
         "reset_rejected_400",
         "reset_forbidden_403",
         "reset_task_fails",
+        "update_task_fails",
     }
 )
 # M3T2 SRV-MON surface knobs (SimulatorConfig booleans switchable via control).
@@ -81,10 +84,30 @@ SURFACE_KNOB_KEYS = frozenset(
         "sel_oem_timestamps",
         "missing_fan_reading",
         "drives_without_oem",
+        # M3T3 operation knobs (booleans).
+        "power_readback_stale",
+        "media_insert_rejects_foreign_url",
+        "media_fetch_required",
+        "update_fetch_required",
+        "update_reboot_loop",
+        "reset_never_completes",
+        "update_never_completes",
+        "no_graceful_shutdown",
     }
 )
 # Integer-valued surface knobs (per-test reset mirrors booleans with 0).
 INT_KNOB_KEYS = frozenset({"sel_append"})
+# Float-valued operation knobs + their pristine defaults (conftest reset).
+FLOAT_KNOB_KEYS = frozenset({"power_blip_seconds", "manager_blip_seconds"})
+FLOAT_KNOB_DEFAULTS: dict[str, float] = {"power_blip_seconds": 0.5, "manager_blip_seconds": 1.2}
+# String-valued operation knobs.
+STRING_KNOB_KEYS = frozenset({"firmware_update_version"})
+STRING_KNOB_DEFAULTS: dict[str, str] = {"firmware_update_version": ""}
+
+_NEVER_COMPLETES_DURATION = 1e9
+
+_IMAGE_HEADER_MARKER = b"WARDEN-SIM-FW "
+_IMAGE_HEADER_MAX = 4096
 
 _FAIL_ACTION_MESSAGE = "Simulated reset failure (test device simulator)"
 
@@ -96,6 +119,10 @@ class TaskRecord:
     created_monotonic: float
     duration_seconds: float
     fails: bool = False
+    effect: str | None = None
+    effect_target: str | None = None
+    effect_version: str | None = None
+    applied: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def state_at(self, now: float) -> tuple[str, str, int]:
@@ -106,6 +133,28 @@ class TaskRecord:
         if self.fails:
             return "Exception", "Exception", 50
         return "Completed", "OK", 100
+
+
+def _image_header_version(content: bytes) -> str | None:
+    """Target firmware version declared in a warden-sim image header.
+
+    The warden-sim firmware image format (test-device convention only) starts
+    with ``WARDEN-SIM-FW <json>`` on its first line; the JSON carries the
+    package's declared ``version`` (plus model/target metadata the platform
+    parses for its preflight checks). Real vendor images are overlay
+    territory (M3T5) — never parsed here.
+    """
+    line, _, _ = content.partition(b"\n")
+    if not line.startswith(_IMAGE_HEADER_MARKER):
+        return None
+    raw = line[len(_IMAGE_HEADER_MARKER) :].strip()
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(decoded, dict) and isinstance(decoded.get("version"), str) and decoded["version"]:
+        return decoded["version"]
+    return None
 
 
 class _SimulatorState:
@@ -119,6 +168,13 @@ class _SimulatorState:
         self.tasks: dict[str, TaskRecord] = {}
         self.task_counter = 0
         self.task_fail_counter = 0
+        # M3T3 runtime operation state (reset/update effects).
+        self.power_target = "On"  # the settled system power state
+        self.power_reboot_until = 0.0  # monotonic: system reports Off during a reboot blip
+        self.manager_restart_until = 0.0  # monotonic: every Redfish request 503s
+        self.versions = {"BMC": "SIM-BMC-1.0.0", "BIOS": "SIM-BIOS-2.0"}
+        self.device_fetches: list[str] = []  # image URLs the "device" fetched
+        self.device_fetch_attempts: list[dict[str, object]] = []
 
     @property
     def view(self) -> _View:
@@ -131,6 +187,40 @@ class _SimulatorState:
         self.media = payloads.media_records()
         self.tasks.clear()
         self.task_counter = 0
+        self.power_target = "On"
+        self.power_reboot_until = 0.0
+        self.manager_restart_until = 0.0
+        self.versions = {"BMC": "SIM-BMC-1.0.0", "BIOS": "SIM-BIOS-2.0"}
+        self.device_fetches = []
+        self.device_fetch_attempts = []
+
+    def power_state_now(self) -> str:
+        """The PowerState a GET observes right now (Off during a reboot blip)."""
+        if time.monotonic() < self.power_reboot_until:
+            return "Off"
+        return self.power_target
+
+    def manager_down(self) -> bool:
+        """True while the manager restart window is active (device offline)."""
+        return time.monotonic() < self.manager_restart_until
+
+    def apply_system_power_effect(self, effect: str) -> None:
+        """Apply a terminal system-reset effect to the runtime power state.
+
+        ``power_readback_stale`` freezes every power transition so read-back
+        verification can never observe the target state (ambiguous outcome).
+        """
+        if self.cfg.power_readback_stale:
+            return
+        if effect == "power_on":
+            self.power_target = "On"
+            self.power_reboot_until = 0.0
+        elif effect == "power_off":
+            self.power_target = "Off"
+            self.power_reboot_until = 0.0
+        elif effect == "power_reboot":
+            self.power_target = "On"
+            self.power_reboot_until = time.monotonic() + self.cfg.power_blip_seconds
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -155,6 +245,22 @@ class _SimulatorState:
             "media_hosts": list(self.cfg.media_hosts),
             "sessions": len(self.sessions),
             "tasks": len(self.tasks),
+            "power_blip_seconds": self.cfg.power_blip_seconds,
+            "manager_blip_seconds": self.cfg.manager_blip_seconds,
+            "firmware_update_version": self.cfg.firmware_update_version,
+            "power_readback_stale": self.cfg.power_readback_stale,
+            "media_insert_rejects_foreign_url": self.cfg.media_insert_rejects_foreign_url,
+            "media_fetch_required": self.cfg.media_fetch_required,
+            "update_fetch_required": self.cfg.update_fetch_required,
+            "update_reboot_loop": self.cfg.update_reboot_loop,
+        "reset_never_completes": self.cfg.reset_never_completes,
+        "update_never_completes": self.cfg.update_never_completes,
+        "no_graceful_shutdown": self.cfg.no_graceful_shutdown,
+            "system_power": self.power_state_now(),
+            "manager_down": self.manager_down(),
+            "versions": dict(self.versions),
+            "device_fetches": list(self.device_fetches),
+            "device_fetch_attempts": [dict(attempt) for attempt in self.device_fetch_attempts],
         }
 
     def apply_control(self, body: object) -> dict[str, object]:
@@ -168,29 +274,9 @@ class _SimulatorState:
                     msg = f"unknown profile {value!r}"
                     raise ValueError(msg)
                 if value != self.cfg.profile:
-                    self.cfg = SimulatorConfig(
-                        username=self.cfg.username,
-                        password=self.cfg.password,
+                    self.cfg = _replace(
+                        self.cfg,
                         profile=value,  # type: ignore[arg-type]
-                        vendor=self.cfg.vendor,
-                        pagination=self.cfg.pagination,
-                        sel_total=self.cfg.sel_total,
-                        sel_page_size=self.cfg.sel_page_size,
-                        task_duration_seconds=self.cfg.task_duration_seconds,
-                        media_hosts_required=self.cfg.media_hosts_required,
-                        media_hosts=self.cfg.media_hosts,
-                        absolute_links=self.cfg.absolute_links,
-                        missing_memory_metrics=self.cfg.missing_memory_metrics,
-                        no_raid_volume=self.cfg.no_raid_volume,
-                        empty_sel=self.cfg.empty_sel,
-                        thermal_missing_context=self.cfg.thermal_missing_context,
-                        no_virtual_media=self.cfg.no_virtual_media,
-                        no_storage=self.cfg.no_storage,
-                        missing_system_status=self.cfg.missing_system_status,
-                        sel_oem_timestamps=self.cfg.sel_oem_timestamps,
-                        missing_fan_reading=self.cfg.missing_fan_reading,
-                        drives_without_oem=self.cfg.drives_without_oem,
-                        sel_append=self.cfg.sel_append,
                     )
                     self.reset_dynamic()
             elif key == "vendor":
@@ -210,6 +296,16 @@ class _SimulatorState:
                 self.cfg = _replace(self.cfg, task_duration_seconds=float(value))  # type: ignore[arg-type]
             elif key == "absolute_links":
                 self.cfg = _replace(self.cfg, absolute_links=bool(value))  # type: ignore[arg-type]
+            elif key in FLOAT_KNOB_KEYS:
+                if not isinstance(value, (int, float)) or value < 0:
+                    msg = f"{key} must be a non-negative number"
+                    raise ValueError(msg)
+                self.cfg = _replace(self.cfg, **{key: float(value)})  # type: ignore[arg-type]
+            elif key in STRING_KNOB_KEYS:
+                if not isinstance(value, str):
+                    msg = f"{key} must be a string"
+                    raise ValueError(msg)
+                self.cfg = _replace(self.cfg, **{key: value})  # type: ignore[arg-type]
             elif key in INT_KNOB_KEYS:
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     msg = f"{key} must be a non-negative integer"
@@ -217,6 +313,19 @@ class _SimulatorState:
                 self.cfg = _replace(self.cfg, **{key: int(value)})  # type: ignore[arg-type]
             elif key in SURFACE_KNOB_KEYS:
                 self.cfg = _replace(self.cfg, **{key: bool(value)})  # type: ignore[arg-type]
+            elif key == "media_hosts_required":
+                self.cfg = _replace(self.cfg, media_hosts_required=bool(value))  # type: ignore[arg-type]
+            elif key == "media_hosts":
+                if not isinstance(value, list) or not all(isinstance(host, str) for host in value):
+                    msg = "media_hosts must be a list of host names"
+                    raise ValueError(msg)
+                self.cfg = _replace(self.cfg, media_hosts=tuple(value))  # type: ignore[arg-type]
+            elif key == "reset_state":
+                if not isinstance(value, bool):
+                    msg = "reset_state must be a boolean"
+                    raise ValueError(msg)
+                if value:
+                    self.reset_dynamic()
             elif key == "failures":
                 if not isinstance(value, dict):
                     msg = "failures must be an object"
@@ -391,12 +500,15 @@ class _Dispatcher:
                 return 400, _error_body("Base.1.13.GeneralError", str(exc)), {}
             return 200, snapshot, {}
 
+        if not path.startswith(payloads.BASE):
+            return _base_error_response(404)
         # Session login is the only anonymous endpoint under /redfish/v1.
         if path == f"{payloads.BASE}/SessionService/Sessions" and request.method == "POST":
             return self._login(request)
-
-        if not path.startswith(payloads.BASE):
-            return _base_error_response(404)
+        if state.manager_down():
+            # M3T3: the manager is mid-restart — the whole device is offline.
+            # Simulated as a 503 window (the test harness cannot drop TCP).
+            return 503, _error_body("Base.1.13.GeneralError", "Manager is restarting (simulated)."), {}
         user = self._authenticated_user(request)
         if user is None:
             return _base_error_response(401)
@@ -473,7 +585,9 @@ class _Dispatcher:
             f"{payloads.BASE}": payloads.service_root(view, date_time=now),
             f"{payloads.BASE}/": payloads.service_root(view, date_time=now),
             f"{payloads.BASE}/Systems": payloads.systems_collection(),
-            f"{payloads.BASE}/Systems/1": payloads.system(view),
+            f"{payloads.BASE}/Systems/1": payloads.system(
+                view, power_state=state.power_state_now(), bios_version=state.versions["BIOS"]
+            ),
             f"{payloads.BASE}/Systems/1/Memory": payloads.memory_collection(),
             f"{payloads.BASE}/Systems/1/Storage": payloads.storage_collection(),
             f"{payloads.BASE}/Systems/1/Storage/SATA1": payloads.storage_sata1(view),
@@ -484,7 +598,9 @@ class _Dispatcher:
             f"{payloads.BASE}/Chassis/1/Thermal": payloads.thermal(view),
             f"{payloads.BASE}/Chassis/1/Power": payloads.power(view),
             f"{payloads.BASE}/Managers": payloads.managers_collection(),
-            f"{payloads.BASE}/Managers/1": payloads.manager(view, date_time=now),
+            f"{payloads.BASE}/Managers/1": payloads.manager(
+                view, date_time=now, firmware_version=state.versions["BMC"]
+            ),
             f"{payloads.BASE}/Managers/1/LogServices": payloads.log_services_collection(),
             f"{payloads.BASE}/Managers/1/LogServices/SEL": payloads.sel_log_service(view),
             f"{payloads.BASE}/Managers/1/VirtualMedia": payloads.virtual_media_collection(),
@@ -519,7 +635,7 @@ class _Dispatcher:
         # Firmware inventory
         inventory = self._match(f"{payloads.BASE}/UpdateService/FirmwareInventory/", path)
         if inventory is not None and inventory in ("BMC", "BIOS"):
-            return 200, payloads.firmware_inventory(inventory), {}
+            return 200, payloads.firmware_inventory(inventory, version=state.versions[inventory]), {}
 
         # SEL entries (paginated)
         entries_prefix = f"{payloads.BASE}/Managers/1/LogServices/SEL/Entries"
@@ -548,6 +664,12 @@ class _Dispatcher:
             record = state.tasks.get(task_id)
             if record is not None:
                 task_state, task_status, percent = record.state_at(time.monotonic())
+                if task_state == "Completed" and record.effect is not None and not record.applied:
+                    # M3T3: apply the deferred device effect exactly once when
+                    # the task is first observed terminal (never re-applied).
+                    self._apply_task_effect(record)
+                    record.applied = True
+                    task_state, task_status, percent = record.state_at(time.monotonic())
                 if suffix == "":
                     messages = None
                     if task_state == "Exception":
@@ -582,15 +704,28 @@ class _Dispatcher:
 
     # POST dispatch ----------------------------------------------------------
 
-    def _create_task(self, name: str, fails: bool) -> tuple[int, dict[str, Any], dict[str, str]]:
+    def _create_task(
+        self,
+        name: str,
+        fails: bool,
+        *,
+        effect: str | None = None,
+        effect_target: str | None = None,
+        effect_version: str | None = None,
+        never_completes: bool = False,
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         state = self.state
         state.task_counter += 1
+        duration = _NEVER_COMPLETES_DURATION if never_completes else state.cfg.task_duration_seconds
         record = TaskRecord(
             task_id=str(state.task_counter),
             name=name,
             created_monotonic=time.monotonic(),
-            duration_seconds=state.cfg.task_duration_seconds,
+            duration_seconds=duration,
             fails=fails,
+            effect=effect,
+            effect_target=effect_target,
+            effect_version=effect_version,
         )
         state.tasks[record.task_id] = record
         headers = {"Location": f"{payloads.BASE}/TaskService/Tasks/{record.task_id}"}
@@ -617,36 +752,55 @@ class _Dispatcher:
             headers,
         )
 
+    def _apply_task_effect(self, record: TaskRecord) -> None:
+        """Apply a terminal task effect to the runtime state (exactly once)."""
+        state = self.state
+        if record.effect in ("power_on", "power_off", "power_reboot"):
+            state.apply_system_power_effect(record.effect)
+        elif record.effect == "firmware_update":
+            if state.cfg.update_reboot_loop:
+                # The "device" reboots forever after the update task: no
+                # version bump and a fresh reboot blip per completion read.
+                state.power_target = "On"
+                state.power_reboot_until = time.monotonic() + state.cfg.power_blip_seconds
+                return
+            if record.effect_target is not None and record.effect_version is not None:
+                state.versions[record.effect_target] = record.effect_version
+
+    def _fetch_image(self, image_url: str) -> bytes | None:
+        """Emulate the device fetching an image (InsertMedia/SimpleUpdate).
+
+        The platform ticket route must be live and reachable from the
+        simulator (integration slices); a failed fetch returns None and the
+        caller rejects the action — a device that cannot reach the image
+        never claims a successful mount/update. Every attempt is recorded in
+        the control snapshot (``device_fetch_attempts``) for test evidence.
+        """
+        attempt: dict[str, object] = {"url": image_url}
+        try:
+            with httpx.Client(timeout=5.0, follow_redirects=False) as http:
+                response = http.get(image_url)
+        except httpx.HTTPError as exc:
+            attempt["error"] = type(exc).__name__
+            self.state.device_fetch_attempts.append(attempt)
+            return None
+        attempt["status"] = response.status_code
+        self.state.device_fetch_attempts.append(attempt)
+        if response.status_code != 200 or not response.content:
+            return None
+        self.state.device_fetches.append(image_url)
+        return response.content
+
     def _post(self, path: str, request: _Request) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
         state = self.state
         body = request.body if isinstance(request.body, dict) else {}
 
         if path == f"{payloads.BASE}/Systems/1/Actions/ComputerSystem.Reset":
-            return self._reset_action(body, name="Reset System")
+            return self._system_reset_action(body)
         if path == f"{payloads.BASE}/Managers/1/Actions/Manager.Reset":
-            return self._reset_action(body, name="Manager Reset")
+            return self._manager_reset_action(body)
         if path == f"{payloads.BASE}/UpdateService/Actions/UpdateService.SimpleUpdate":
-            target = body.get("Target")
-            allowed = (
-                f"{payloads.BASE}/UpdateService/FirmwareInventory/BMC",
-                f"{payloads.BASE}/UpdateService/FirmwareInventory/BIOS",
-            )
-            if target not in allowed:
-                return (
-                    400,
-                    _error_body(
-                        "Base.1.13.GeneralError",
-                        "A supported Target is required.",
-                        [
-                            {
-                                "MessageId": "Base.1.13.ActionParameterMissing",
-                                "Message": "A supported Target is required.",
-                            }
-                        ],
-                    ),
-                    {},
-                )
-            return self._create_task("Firmware Update", fails=False)
+            return self._simple_update_action(body)
 
         media = self._match(f"{payloads.BASE}/Managers/1/VirtualMedia/", path)
         if media is not None:
@@ -681,7 +835,10 @@ class _Dispatcher:
                             ),
                             {},
                         )
-                    if state.cfg.media_hosts_required and parts.hostname not in state.cfg.media_hosts:
+                    allowlist = (
+                        state.cfg.media_hosts_required or state.cfg.media_insert_rejects_foreign_url
+                    )
+                    if allowlist and parts.hostname not in state.cfg.media_hosts:
                         return (
                             400,
                             _error_body(
@@ -691,6 +848,21 @@ class _Dispatcher:
                                     {
                                         "MessageId": "Base.1.13.ActionParameterValueNotInList",
                                         "Message": "Image host is not allowed.",
+                                    }
+                                ],
+                            ),
+                            {},
+                        )
+                    if state.cfg.media_fetch_required and self._fetch_image(image) is None:
+                        return (
+                            400,
+                            _error_body(
+                                "Base.1.13.GeneralError",
+                                "The image URL is not reachable by the device.",
+                                [
+                                    {
+                                        "MessageId": "Base.1.13.ActionParameterValueFormatError",
+                                        "Message": "Image URL unreachable.",
                                     }
                                 ],
                             ),
@@ -722,12 +894,91 @@ class _Dispatcher:
                     return 204, None, {}
         return _base_error_response(404)
 
-    def _reset_action(self, body: dict[str, Any], *, name: str) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
+    def _system_reset_action(self, body: dict[str, Any]) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
+        """POST ComputerSystem.Reset: validate, then create the reset task.
+
+        The task carries the deferred power effect; the effect is applied
+        exactly once when the task is first observed ``Completed`` (system
+        power On/Off immediately, restart/cycle through a brief Off blip).
+        """
         state = self.state
         reset_type = body.get("ResetType")
-        allowed = ("On", "ForceOff", "GracefulShutdown", "GracefulRestart", "ForceRestart", "Nmi", "PushPowerButton")
-        if name == "Manager Reset":
-            allowed = ("GracefulRestart", "ForceRestart")
+        allowed = (
+            "On",
+            "ForceOff",
+            "GracefulShutdown",
+            "GracefulRestart",
+            "ForceRestart",
+            "PowerCycle",
+            "Nmi",
+            "PushPowerButton",
+        )
+        if reset_type not in allowed:
+            return (
+                400,
+                _error_body(
+                    "Base.1.13.GeneralError",
+                    f"ResetType must be one of {allowed}.",
+                    [
+                        {
+                            "MessageId": "Base.1.13.ActionParameterValueNotInList",
+                            "Message": f"ResetType must be one of {allowed}.",
+                        }
+                    ],
+                ),
+                {},
+            )
+        if state.cfg.no_graceful_shutdown and reset_type == "GracefulShutdown":
+            # power.off prohibition scenario: the graceful action is not
+            # available on this device — the adapter must NOT fall back to
+            # ForceOff.
+            return (
+                400,
+                _error_body(
+                    "Base.1.13.GeneralError",
+                    "GracefulShutdown is not supported on this simulated device.",
+                    [{"MessageId": "Base.1.13.ActionNotSupported", "Message": "GracefulShutdown is not supported."}],
+                ),
+                {},
+            )
+        if state.failures["reset_rejected_400"]:
+            return (
+                400,
+                _error_body(
+                    "Base.1.13.GeneralError",
+                    "The action is not supported on this simulated device.",
+                    [{"MessageId": "Base.1.13.ActionNotSupported", "Message": "The action is not supported."}],
+                ),
+                {},
+            )
+        if state.failures["reset_forbidden_403"]:
+            return _base_error_response(403)
+        effect: str | None
+        if reset_type in ("On",):
+            effect = "power_on"
+        elif reset_type in ("GracefulShutdown", "ForceOff"):
+            effect = "power_off"
+        elif reset_type in ("GracefulRestart", "ForceRestart", "PowerCycle", "PushPowerButton"):
+            effect = "power_reboot"
+        else:  # Nmi
+            effect = None
+        fails = state.failures["reset_task_fails"]
+        return self._create_task(
+            "Reset System", fails=fails, effect=effect, never_completes=state.cfg.reset_never_completes
+        )
+
+    def _manager_reset_action(self, body: dict[str, Any]) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
+        """POST Manager.Reset: cold-manager restart semantics (simulated).
+
+        The reset is accepted as a task, but the manager goes down right away
+        (session invalidation + a full 503 window) and the reset task record
+        vanishes with the reboot — a manager restart wipes its own task list.
+        Read-backs therefore see the device offline, then the task 404, and
+        verify identity over a FRESH session (never a stale one).
+        """
+        state = self.state
+        reset_type = body.get("ResetType")
+        allowed = ("GracefulRestart", "ForceRestart")
         if reset_type not in allowed:
             return (
                 400,
@@ -755,8 +1006,119 @@ class _Dispatcher:
             )
         if state.failures["reset_forbidden_403"]:
             return _base_error_response(403)
-        fails = state.failures["reset_task_fails"]
-        return self._create_task(name, fails=fails)
+        task_response = self._create_task("Manager Reset", fails=False)
+        # The manager restarts immediately: sessions die and the reboot
+        # window starts; the just-created task row is wiped by the reboot.
+        state.sessions.clear()
+        state.manager_restart_until = time.monotonic() + state.cfg.manager_blip_seconds
+        task_id = task_response[1]["Id"] if isinstance(task_response[1], dict) else None
+        if task_id is not None:
+            state.tasks.pop(task_id, None)
+        return task_response
+
+    def _simple_update_action(self, body: dict[str, Any]) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
+        """POST UpdateService.SimpleUpdate: ImageURI + Targets -> update task.
+
+        The device fetch emulation (``update_fetch_required``) downloads the
+        image at accept time and reads the warden-sim image header for the
+        target version; without a fetch the ``firmware_update_version`` knob
+        declares the bump. The task applies the version on completion
+        (``update_task_fails`` -> Exception, ``update_never_completes`` ->
+        Running forever, ``update_reboot_loop`` -> no bump + reboot).
+        """
+        state = self.state
+        image_uri = body.get("ImageURI")
+        if not isinstance(image_uri, str):
+            return (
+                400,
+                _error_body(
+                    "Base.1.13.GeneralError",
+                    "ImageURI is required.",
+                    [{"MessageId": "Base.1.13.ActionParameterMissing", "Message": "ImageURI is required."}],
+                ),
+                {},
+            )
+        parts = urlsplit(image_uri)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return (
+                400,
+                _error_body(
+                    "Base.1.13.GeneralError",
+                    "ImageURI must be an http(s) URL reachable by the device.",
+                    [
+                        {
+                            "MessageId": "Base.1.13.ActionParameterValueFormatError",
+                            "Message": "ImageURI must be an http(s) URL.",
+                        }
+                    ],
+                ),
+                {},
+            )
+        raw_targets = body.get("Targets")
+        if not isinstance(raw_targets, list) or not raw_targets:
+            single = body.get("Target")
+            raw_targets = [single] if isinstance(single, str) else []
+        allowed = (
+            f"{payloads.BASE}/UpdateService/FirmwareInventory/BMC",
+            f"{payloads.BASE}/UpdateService/FirmwareInventory/BIOS",
+        )
+        targets = [target for target in raw_targets if isinstance(target, str) and target in allowed]
+        if not targets or len(targets) != len(raw_targets):
+            return (
+                400,
+                _error_body(
+                    "Base.1.13.GeneralError",
+                    "A supported Target is required.",
+                    [
+                        {
+                            "MessageId": "Base.1.13.ActionParameterValueNotInList",
+                            "Message": "A supported Target is required.",
+                        }
+                    ],
+                ),
+                {},
+            )
+        target = targets[0]
+        effect_target = target.rsplit("/", 1)[-1]
+        effect_version: str | None = state.cfg.firmware_update_version or None
+        if state.cfg.update_fetch_required:
+            content = self._fetch_image(image_uri)
+            if content is None:
+                return (
+                    400,
+                    _error_body(
+                        "Base.1.13.GeneralError",
+                        "The image URL is not reachable by the device.",
+                        [
+                            {
+                                "MessageId": "Base.1.13.ActionParameterValueFormatError",
+                                "Message": "Image URL unreachable.",
+                            }
+                        ],
+                    ),
+                    {},
+                )
+            header_version = _image_header_version(content)
+            if header_version is None:
+                return (
+                    400,
+                    _error_body(
+                        "Base.1.13.GeneralError",
+                        "The image carries no readable warden-sim version header.",
+                        [{"MessageId": "Base.1.13.GeneralError", "Message": "Unreadable image header."}],
+                    ),
+                    {},
+                )
+            effect_version = header_version
+        fails = state.failures["update_task_fails"]
+        return self._create_task(
+            "Firmware Update",
+            fails=fails,
+            effect="firmware_update",
+            effect_target=effect_target,
+            effect_version=effect_version,
+            never_completes=state.cfg.update_never_completes,
+        )
 
 
 def _query_int(query: dict[str, list[str]], key: str) -> int | None:

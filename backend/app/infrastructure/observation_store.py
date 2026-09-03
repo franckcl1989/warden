@@ -36,6 +36,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.domain.adapter import (
+    OPERATION_APPLIED_COMPONENT_KINDS,
     ComponentObserved,
     EventObservation,
     Observation,
@@ -187,6 +188,9 @@ def upsert_components(
     Only components of the batch are refreshed; components absent from a
     NON-EMPTY batch are retired (``retired_at``) — an empty components list
     (adapter did not report inventory this pass) never retires anything.
+    Kinds in ``OPERATION_APPLIED_COMPONENT_KINDS`` (fru/firmware, M3T3) are
+    NOT retired here: the collect/discovery pipelines do not observe them;
+    the operation applier owns their lifecycle.
     """
     existing = {
         (row.kind, row.native_id): row
@@ -224,6 +228,8 @@ def upsert_components(
                 row.retired_at = None
             component_ids[key] = row.id
         for key, row in existing.items():
+            if key[0] in OPERATION_APPLIED_COMPONENT_KINDS:
+                continue
             if key not in seen and row.retired_at is None:
                 row.retired_at = now
     else:

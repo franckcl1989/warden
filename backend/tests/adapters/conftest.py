@@ -15,7 +15,14 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
-from tests.simulators.redfish.app import INT_KNOB_KEYS, SURFACE_KNOB_KEYS, SimulatorConfig
+from tests.simulators.redfish.app import (
+    FAILURE_KEYS,
+    FLOAT_KNOB_DEFAULTS,
+    INT_KNOB_KEYS,
+    STRING_KNOB_DEFAULTS,
+    SURFACE_KNOB_KEYS,
+    SimulatorConfig,
+)
 from tests.simulators.redfish.serving import serve_simulator
 
 pytestmark = [
@@ -43,9 +50,14 @@ class SimAccess:
 
     def reset(self) -> None:
         """Back to the pristine healthy profile with every knob off."""
-        body: dict[str, object] = {"profile": "healthy"}
+        body: dict[str, object] = {"profile": "healthy", "reset_state": True}
         body.update(dict.fromkeys(SURFACE_KNOB_KEYS, False))
         body.update(dict.fromkeys(INT_KNOB_KEYS, 0))
+        body.update(FLOAT_KNOB_DEFAULTS)
+        body.update(STRING_KNOB_DEFAULTS)
+        body["failures"] = dict.fromkeys(FAILURE_KEYS, False)
+        body["media_hosts_required"] = False
+        body["media_hosts"] = []
         response = self.client.post("/warden-sim/control", json=body)
         assert response.status_code == 200, response.text
 

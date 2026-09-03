@@ -308,6 +308,53 @@ class TestBatchPersistence:
         cpu = next(row for row in rows if row.native_id == "cpu-0")
         assert cpu.retired_at is None
 
+    def test_operation_applied_kinds_are_not_retired_by_collect(self, db_session: Session) -> None:
+        """M3T3: fru/firmware rows belong to the operation applier — a collect
+        batch that does not observe them must NOT soft-retire them."""
+        from app.models.devices import Component
+
+        device = make_collection_device(db_session)
+        run = make_collection_run(db_session, device_id=device.id)
+        persist_observation_batch(db_session, device_id=device.id, batch=_normal_batch(), run_id=run.id, now=NOW)
+        db_session.commit()
+        for kind, native_id in (("fru", "chassis-1"), ("firmware", "BMC")):
+            db_session.add(
+                Component(
+                    device_id=device.id,
+                    kind=kind,
+                    native_id=native_id,
+                    name=native_id,
+                    status="ok",
+                    properties={"version": "x"} if kind == "firmware" else {},
+                    first_seen_at=NOW,
+                    last_seen_at=NOW,
+                )
+            )
+        db_session.commit()
+        batch = ObservationBatch(
+            observations=(Observation("health.overall", "healthy", NOW, source="redfish"),),
+            components=(ComponentObserved(kind="processor", native_id="cpu-0", name="CPU", status="ok"),),
+        )
+        persist_observation_batch(db_session, device_id=device.id, batch=batch, run_id=run.id, now=NOW)
+        db_session.commit()
+        rows = db_session.scalars(
+            select(Component).where(
+                Component.device_id == device.id,
+                Component.kind.in_(("fru", "firmware")),
+            )
+        ).all()
+        assert rows and all(row.retired_at is None for row in rows)
+        # Missing pipeline-owned kinds are still retired (the normal batch
+        # created a drive-0 row not present in the cpu-only batch).
+        drive = db_session.scalar(
+            select(Component).where(
+                Component.device_id == device.id,
+                Component.kind == "drive",
+                Component.native_id == "drive-0",
+            )
+        )
+        assert drive is not None and drive.retired_at is not None
+
     def test_empty_components_never_retire(self, db_session: Session) -> None:
         from app.models.devices import Component
 

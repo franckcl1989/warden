@@ -73,6 +73,7 @@ from sqlalchemy.orm import Session
 
 from app.config import WardenSettings
 from app.domain import auth_errors
+from app.domain.adapter import ArtifactDescriptor
 from app.domain.errors import AppError
 from app.domain.file_types import (
     FILE_TYPES,
@@ -197,6 +198,7 @@ def _audit(
     task_id: uuid.UUID | None = None,
     result: str = "success",
     detail: dict[str, object] | None = None,
+    requirement_id: str = PLT_06,
 ) -> None:
     if logger is None:
         return
@@ -207,7 +209,7 @@ def _audit(
         resource_type=resource_type,
         resource_id=resource_id,
         device_id=device_id,
-        requirement_id=PLT_06,
+        requirement_id=requirement_id,
         request_id=audit.request_id,
         task_id=task_id,
         result=result,
@@ -923,6 +925,205 @@ def revoke_device_file_ticket(
             detail={"purpose": ticket.purpose},
         )
     return ticket
+
+
+# --------------------------------------------------------------------------
+# Worker-side operation file flows (M3T3; adapter boundary: the adapter yields
+# bytes/descriptors, the worker persists rows/links — no adapter file paths)
+# --------------------------------------------------------------------------
+
+# file_link purposes for operation inputs/outputs (DATA_MODEL.md §8.2).
+PURPOSE_INPUT_FIRMWARE = "input_firmware"
+PURPOSE_INPUT_VIRTUAL_MEDIA = "input_virtual_media"
+PURPOSE_OUTPUT_SUPPORT_BUNDLE = "output_support_bundle"
+
+# Artifact file types the worker may persist for operation tasks.
+OPERATION_OUTPUT_FILE_TYPES = frozenset({"support_bundle"})
+
+# Ticket TTL for virtual-media pulls (ARCHITECTURE.md §3.6: 虚拟介质 <= 24 h).
+VIRTUAL_MEDIA_TICKET_HOURS = 24
+
+
+def operation_artifact_file_link_purpose(file_type: str) -> str:
+    if file_type == "support_bundle":
+        return PURPOSE_OUTPUT_SUPPORT_BUNDLE
+    raise ValueError(f"unsupported operation artifact type: {file_type}")
+
+
+def input_file_link_purpose(file_type: str) -> str:
+    if file_type == "firmware":
+        return PURPOSE_INPUT_FIRMWARE
+    if file_type == "virtual_media":
+        return PURPOSE_INPUT_VIRTUAL_MEDIA
+    raise ValueError(f"unsupported operation input type: {file_type}")
+
+
+def ticket_url_for(settings: WardenSettings, ticket: DeviceFileTicket) -> str:
+    """The device-pull URL for a ticket (SECURITY.md §7: bound + revocable).
+
+    The base is the operator-declared ``device_access_base_url`` (the URL the
+    DEVICE can reach — NAT/proxy deployments differ from the UI's
+    ``public_url``) or ``public_url``. Ticket URLs never enter logs/evidence;
+    they are handed to the adapter for the device call only.
+    """
+    base = settings.device_access_base_url or settings.public_url
+    return f"{base.rstrip('/')}/api/v1/device-file-access/{ticket.id}"
+
+
+def active_device_file_ticket(
+    db: Session,
+    *,
+    device_id: uuid.UUID,
+    file_id: uuid.UUID,
+    purpose: str,
+) -> DeviceFileTicket | None:
+    """The unrevoked, unexpired ticket for (device, file, purpose), if any."""
+    return db.scalar(
+        select(DeviceFileTicket)
+        .where(
+            DeviceFileTicket.device_id == device_id,
+            DeviceFileTicket.file_id == file_id,
+            DeviceFileTicket.purpose == purpose,
+            DeviceFileTicket.revoked_at.is_(None),
+            DeviceFileTicket.expires_at > utcnow(),
+        )
+        .order_by(DeviceFileTicket.created_at.desc())
+        .limit(1)
+    )
+
+
+def link_input_file(
+    db: Session,
+    *,
+    file_row: File,
+    device_id: uuid.UUID,
+    task_id: uuid.UUID,
+    created_by: uuid.UUID,
+) -> FileLink:
+    """One input file_link row for an operation task (idempotent per task)."""
+    purpose = input_file_link_purpose(file_row.file_type)
+    existing = db.scalar(
+        select(FileLink).where(
+            FileLink.file_id == file_row.id,
+            FileLink.device_id == device_id,
+            FileLink.task_id == task_id,
+            FileLink.purpose == purpose,
+        )
+    )
+    if existing is not None:
+        return existing
+    link = FileLink(
+        file_id=file_row.id,
+        device_id=device_id,
+        task_id=task_id,
+        purpose=purpose,
+        created_by=created_by,
+    )
+    db.add(link)
+    return link
+
+
+def store_operation_artifact(
+    db: Session,
+    *,
+    artifact: ArtifactDescriptor,
+    device_id: uuid.UUID,
+    task_id: uuid.UUID,
+    created_by: uuid.UUID,
+    storage: FileStorage,
+    key_cipher: FileKeyCipher | None,
+    logger: AuditLogger | None = None,
+    audit: FileAuditContext | None = None,
+) -> File:
+    """Persist one worker-produced artifact: content + ready row + file_link.
+
+    The artifact bytes are spooled and finalized through the SAME storage
+    paths as uploads (atomic publish, content-hash naming, AES-GCM envelope
+    for sensitive types). The row becomes ``ready`` only after the bytes are
+    durable (DATA_MODEL.md §11) and the file_link binds device/task/purpose
+    in the same transaction. ``artifact.file_type`` must be an operation
+    output type the platform encrypts (support_bundle) — the adapter never
+    stores files itself.
+    """
+    if artifact.file_type not in OPERATION_OUTPUT_FILE_TYPES:
+        raise auth_errors.validation_failed("artifact", "不支持的产物类型")
+    content = artifact.content_bytes
+    if not content:
+        raise auth_errors.validation_failed("artifact", "产物内容为空")
+    encrypted = file_type_is_sensitive(artifact.file_type)
+    if encrypted and key_cipher is None:
+        raise AppError(
+            "dependency_unavailable",
+            "文件主密钥未配置，无法加密保存操作产物",
+            details={"dependency": "file_keyring"},
+        )
+    upload_id = str(uuid.uuid4())
+    try:
+        row = File(
+            file_type=artifact.file_type,
+            original_filename=artifact.filename[:FILENAME_DISPLAY_MAX],
+            size_bytes=len(content),
+            mime_type=artifact.mime_type,
+            uploaded_by=created_by,
+            status="uploading",
+        )
+        db.add(row)
+        db.flush()  # the row id keys the physical file of encrypted rows
+        with shard_lock_for(upload_id):
+            chunk_size = 1024 * 1024
+            for offset in range(0, len(content), chunk_size):
+                storage.write_upload_chunk(
+                    upload_id, content[offset : offset + chunk_size], declared_size=len(content)
+                )
+            content_hash = storage.upload_digest(upload_id)
+            if content_hash is None:
+                digest = hashlib.sha256()
+                for data in storage.read_upload_chunks(upload_id):
+                    digest.update(data)
+                content_hash = digest.hexdigest()
+            # Encrypted rows are stored under ``sha256-<row id>`` — the exact
+            # key ``storage_key(row)`` later derives for downloads.
+            physical_key = f"{content_hash}-{row.id}" if encrypted else content_hash
+            try:
+                stored = storage.store_final(
+                    upload_id, physical_key, key_cipher=key_cipher if encrypted else None
+                )
+            except FileStorageError as exc:
+                raise storage_unavailable("operation_artifact") from exc
+            row.sha256 = content_hash
+            row.storage_name = content_hash
+            row.encrypted = encrypted
+            row.key_version = stored.key_version if encrypted else None
+            row.status = "ready"
+            link = FileLink(
+                file_id=row.id,
+                device_id=device_id,
+                task_id=task_id,
+                purpose=operation_artifact_file_link_purpose(artifact.file_type),
+                created_by=created_by,
+            )
+            db.add(link)
+    except FileStorageError as exc:
+        raise storage_unavailable("operation_artifact") from exc
+    if logger is not None and audit is not None:
+        _audit(
+            logger,
+            audit,
+            action="file.operation_artifact",
+            resource_type="file",
+            resource_id=str(row.id),
+            device_id=device_id,
+            task_id=task_id,
+            result="success",
+            detail={
+                "file_type": artifact.file_type,
+                "size_bytes": len(content),
+                "sha256": content_hash,
+                "encrypted": encrypted,
+                "mime_type": row.mime_type,
+            },
+        )
+    return row
 
 
 @dataclass(frozen=True)

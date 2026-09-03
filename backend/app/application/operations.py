@@ -54,9 +54,11 @@ from app.adapters import UnknownAdapterError, get_adapter
 from app.config import WardenSettings
 from app.domain import auth_errors
 from app.domain.adapter import (
+    OPERATION_APPLIED_COMPONENT_KINDS,
     AdapterError,
     DeviceAdapter,
     DeviceSession,
+    InventorySnapshot,
     OperationResult,
 )
 from app.domain.errors import AppError
@@ -89,7 +91,7 @@ from app.infrastructure.tasks import ACTIVE_MUTEX_STATES, append_event
 from app.infrastructure.time import utcnow
 from app.models.auth import Session as AuthSession
 from app.models.auth import User
-from app.models.devices import Device, DeviceCapability, DeviceCredential
+from app.models.devices import Component, Device, DeviceCapability, DeviceCredential
 from app.models.operation import OperationTask, OperationTaskEvent, PreviewTokenUse
 
 PLT_05 = "PLT-05"
@@ -211,6 +213,99 @@ def _snapshot(db: Session, device: Device) -> DeviceSnapshot:
 def build_snapshot(db: Session, device: Device) -> DeviceSnapshot:
     """Public snapshot builder (M2T6 worker wiring reuses it)."""
     return _snapshot(db, device)
+
+
+def apply_operation_inventory(
+    db: Session,
+    *,
+    device: Device,
+    inventory: InventorySnapshot,
+) -> dict[str, object]:
+    """Persist one operation inventory result (M3T3, inventory_persisted).
+
+    firmware.query / asset.refresh results update the device identity rows
+    (serial/model/firmware from the snapshot) and upsert the operation-applied
+    components (kind ``fru``/``firmware`` — DATA_MODEL.md §4.4 open kinds,
+    M3T3 decision documented in the report). Only the operation-applied kinds
+    are managed here (no cross-kind retirement: the collect pipeline owns its
+    own kinds; ``OPERATION_APPLIED_COMPONENT_KINDS`` rows are exempt from its
+    sweep). Missing operation-applied members ARE soft-retired when the
+    snapshot observed at least one member of that kind (an explicit partial
+    inventory), never guessed.
+
+    Returns a JSON-safe proof map the executor merges into the verification
+    evidence (observed_at + stored identity + row counts).
+    """
+    from app.domain.adapter import ComponentObserved
+
+    now = inventory.observed_at
+    if inventory.serial_number is not None:
+        device.serial_number = inventory.serial_number
+    if inventory.model is not None:
+        device.model = inventory.model
+    if inventory.firmware_version is not None:
+        device.firmware_version = inventory.firmware_version
+    observed_components: list[ComponentObserved] = list(inventory.components)
+    firmware_items = inventory.firmware_items
+    for item in firmware_items:
+        observed_components.append(
+            ComponentObserved(
+                kind="firmware",
+                native_id=item.target,
+                name=item.name,
+                status="ok",
+                properties={"version": item.version} if item.version is not None else {},
+            )
+        )
+    counts: dict[str, int] = {}
+    if observed_components:
+        existing = {
+            (row.kind, row.native_id): row
+            for row in db.scalars(
+                select(Component).where(Component.device_id == device.id)
+            ).all()
+        }
+        seen: set[tuple[str, str]] = set()
+        kinds_seen: set[str] = set()
+        for component in observed_components:
+            if component.kind not in OPERATION_APPLIED_COMPONENT_KINDS:
+                continue
+            key = (component.kind, component.native_id)
+            seen.add(key)
+            kinds_seen.add(component.kind)
+            row = existing.get(key)
+            if row is None:
+                row = Component(
+                    device_id=device.id,
+                    kind=component.kind,
+                    native_id=component.native_id,
+                    name=component.name,
+                    status=component.status,
+                    properties=dict(component.properties),
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+                db.add(row)
+                db.flush()
+            else:
+                row.name = component.name
+                row.status = component.status
+                row.properties = dict(component.properties)
+                row.last_seen_at = now
+                row.retired_at = None
+        for key, row in existing.items():
+            if key[0] in kinds_seen and key not in seen and row.retired_at is None:
+                row.retired_at = now
+        counts["components"] = len(seen)
+    counts["firmware_items"] = len(firmware_items)
+    return {
+        "observed_at": now.isoformat(),
+        "serial_number": inventory.serial_number,
+        "model": inventory.model,
+        "firmware_version": inventory.firmware_version,
+        "components": counts.get("components", 0),
+        "firmware_items": len(firmware_items),
+    }
 
 
 def _active_mutex_task(

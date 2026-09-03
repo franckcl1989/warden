@@ -47,6 +47,12 @@ DEVICE_TYPES = ("server", "synology_nas", "core_switch", "access_switch")
 SUPPORT_STATES = ("supported", "unsupported", "not_configured")
 # contracts/metrics.json enum_sets.component_status
 COMPONENT_STATUSES = ("unknown", "ok", "warning", "critical", "absent")
+# Component kinds that ONLY operation-side applies maintain (asset.refresh FRU
+# members, firmware.query inventory items). The collect/discovery pipelines
+# never observe them, so their soft-retire sweeps must not retire these rows
+# as "missing" — the operation applier owns their lifecycle (M3T3 decision,
+# documented in the M3T3 report; DATA_MODEL.md §4.4 kinds are open-ended).
+OPERATION_APPLIED_COMPONENT_KINDS = frozenset({"fru", "firmware"})
 
 DEFAULT_MANAGEMENT_PORT = 443
 
@@ -443,6 +449,53 @@ OperationProgress = Callable[[int, str | None], None]
 
 
 @dataclass(frozen=True)
+class ArtifactDescriptor:
+    """One platform-bound artifact the adapter produced (M3T3 decision).
+
+    Boundary rule (DEVICE_ADAPTERS.md §4.2 + M3T3 report): the adapter only
+    ever yields BYTES + a machine-readable manifest inside ``OperationResult``;
+    it never touches file paths or storage. The worker (application layer)
+    persists the artifact through the controlled file service — encrypted for
+    sensitive types (support_bundle) — creates the file row + ``file_link``
+    and records the stored hashes in evidence before verification.
+    """
+
+    file_type: str  # contracts file type the artifact belongs to (support_bundle/...)
+    filename: str  # display hint only; the platform owns the stored name
+    content_bytes: bytes
+    mime_type: str | None = None
+    # Per-source content manifest: every included or explicitly-unavailable
+    # source with its SHA-256 (artifact_manifest verification strategy).
+    manifest: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FirmwareItem:
+    """One normalized firmware inventory entry (SRV-ACT-06 firmware.query)."""
+
+    target: str  # the inventory resource Id (BMC/BIOS/...)
+    name: str
+    version: str | None  # None = the device did not report a parseable version
+
+
+@dataclass(frozen=True)
+class InventorySnapshot:
+    """Read-only inventory an operation returned (firmware.query/asset.refresh).
+
+    The worker persists the device identity fields onto the device row and
+    keeps ``components`` (operation-applied kinds) + ``firmware_items`` in the
+    component surface with the observation time (inventory_persisted strategy).
+    """
+
+    observed_at: datetime
+    serial_number: str | None = None
+    model: str | None = None
+    firmware_version: str | None = None
+    components: tuple[ComponentObserved, ...] = ()
+    firmware_items: tuple[FirmwareItem, ...] = ()
+
+
+@dataclass(frozen=True)
 class PreflightResult:
     """Real-time read-only preflight outcome (DEVICE_ADAPTERS.md §2.4).
 
@@ -469,6 +522,10 @@ class OperationResult:
     result: the worker must verify (or enter verification_required), never
     treat it as terminal success. ``device_job_id`` persists the vendor job for
     later polling (DATA_MODEL.md §7.1: 存在时只查询，不重复创建).
+
+    ``artifacts``/``inventory`` (M3T3) carry platform-bound side outputs; the
+    worker persists them to the file service / device + component rows and
+    merges the stored proof into the evidence it passes to verification.
     """
 
     ok: bool
@@ -477,6 +534,8 @@ class OperationResult:
     error_detail: str | None = None
     device_job_id: str | None = None
     disconnected: bool = False
+    artifacts: tuple[ArtifactDescriptor, ...] = ()
+    inventory: InventorySnapshot | None = None
 
 
 @dataclass(frozen=True)

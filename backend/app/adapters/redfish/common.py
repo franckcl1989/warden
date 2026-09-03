@@ -93,6 +93,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
+from app.adapters.redfish.operations import RedfishOperationsMixin
 from app.domain.adapter import (
     AdapterError,
     CapabilitySupport,
@@ -105,15 +106,10 @@ from app.domain.adapter import (
     Observation,
     ObservationBatch,
     ObservationError,
-    OperationProgress,
-    OperationResult,
-    PreflightResult,
     ProbeResult,
     ProbeStage,
     Quality,
-    VerificationResult,
 )
-from app.domain.operation_plan import DeviceSnapshot, OperationPlan, OperationRequest, plan_operation
 from app.generated.capabilities import REQUIREMENTS
 from app.infrastructure.protocols.redfish.client import DEFAULT_BASE_PATH, RedfishClient, RedfishEndpoint
 from app.infrastructure.protocols.redfish.errors import RedfishError
@@ -1693,13 +1689,18 @@ def _with_skip(url: str, skip: int) -> str:
 # -- adapter ------------------------------------------------------------------
 
 
-class RedfishCommonAdapter:
+class RedfishCommonAdapter(RedfishOperationsMixin):
     """Common Redfish adapter (adapter_key ``server.redfish``).
 
     Registration stance (module docstring): a real generic adapter for
     server-type devices that exercises the M3 probe/discover/collect flows;
     NOT a certification target — the five vendor keys arrive in M3T5 by
     subclassing this base, and hardware-targets.json stays untouched.
+
+    Operation methods (M3T3): preflight/execute/verify per
+    contracts/operations.json profiles SRV-ACT-01/02/04/05/06/07 are
+    implemented by ``RedfishOperationsMixin`` (app/adapters/redfish/
+    operations.py); the plan mirrors the shared domain planner.
     """
 
     adapter_key = "server.redfish"
@@ -1918,47 +1919,6 @@ class RedfishCommonAdapter:
         _add_storage(bundle, read, now=now)
         _add_missing_memory_collection(bundle, read)
         _add_missing_drives(bundle, read)
-
-    # -- operation protocol (M3T5 owns real device-side operation wiring) -----
-
-    def plan_operation(self, snapshot: DeviceSnapshot, request: OperationRequest) -> OperationPlan:
-        """Planning is contract-driven and shared with the domain planner
-        (same as fake.simple): no device I/O, safe for any adapter."""
-        return plan_operation(snapshot, request)
-
-    def preflight_operation(self, session: DeviceSession, plan: OperationPlan) -> PreflightResult:
-        del session, plan
-        return PreflightResult(
-            ok=False,
-            error_code="unsupported_capability",
-            detail="通用 Redfish 适配器尚未实现设备端操作（M3T5 厂商 overlay）",
-        )
-
-    def execute_operation(
-        self,
-        session: DeviceSession,
-        plan: OperationPlan,
-        progress: OperationProgress,
-    ) -> OperationResult:
-        del session, plan, progress
-        raise AdapterError(
-            "unsupported_capability",
-            "通用 Redfish 适配器尚未实现设备端操作（M3T5 厂商 overlay）",
-            stage="execute",
-        )
-
-    def verify_operation(
-        self,
-        session: DeviceSession,
-        plan: OperationPlan,
-        result: OperationResult | None,
-    ) -> VerificationResult:
-        del session, plan, result
-        raise AdapterError(
-            "unsupported_capability",
-            "通用 Redfish 适配器尚未实现设备端操作（M3T5 厂商 overlay）",
-            stage="verify",
-        )
 
 
 def _capability_probe_summary(client: RedfishClient, root: RedfishResource | None) -> str:

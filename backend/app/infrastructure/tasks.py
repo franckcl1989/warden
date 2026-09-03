@@ -348,6 +348,41 @@ def dispatch_fence(
     return task
 
 
+def record_execution_evidence(
+    session: Session,
+    *,
+    task_id: uuid.UUID,
+    owner: str,
+    evidence: dict[str, object],
+) -> OperationTask | None:
+    """Persist the execution-evidence checkpoint under the lease (M3T3).
+
+    After ``execute_operation`` returns (and its platform side-effects —
+    artifacts/inventory — were persisted) the executor writes this checkpoint
+    so a crash before the terminal transition still leaves the read-back
+    evidence (identity_before, slot, artifact hashes, ...) available to the
+    verify-only recovery path (DEVICE_ADAPTERS.md §9). The terminal
+    transition overwrites the evidence with the standard
+    ``{execution, verification}`` shape.
+    """
+    task = _conditional_update(
+        session,
+        task_id=task_id,
+        owner=owner,
+        states=EXECUTING_STATES,
+        values={"evidence": evidence},
+    )
+    if task is None:
+        return None
+    append_event(
+        session,
+        task_id=task.id,
+        state=task.state,
+        message="execution_evidence: 执行证据已持久化（崩溃恢复可只读核验）",
+    )
+    return task
+
+
 def update_progress(
     session: Session,
     *,

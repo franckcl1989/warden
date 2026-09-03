@@ -51,13 +51,25 @@ import json
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace as dataclass_replace
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.adapters import UnknownAdapterError, get_adapter
 from app.application.collection import emit_ui_event
-from app.application.operations import build_snapshot
+from app.application.files import (
+    FileAuditContext,
+    active_device_file_ticket,
+    issue_device_file_ticket,
+    link_input_file,
+    revoke_device_file_ticket,
+    storage_key,
+    store_operation_artifact,
+    ticket_url_for,
+)
+from app.application.operations import apply_operation_inventory, build_snapshot
 from app.config import WardenSettings, get_settings
 from app.domain.adapter import (
     AdapterError,
@@ -81,17 +93,21 @@ from app.infrastructure.crypto import (
     CredentialKeyring,
     DecryptionError,
     EncryptedSecret,
+    FileKeyCipher,
     credential_aad,
 )
+from app.infrastructure.files import FileStorage, FileStorageError, StoredFile
 from app.infrastructure.tasks import (
     dispatch_fence,
     enter_waiting_device,
+    record_execution_evidence,
     renew_lease,
     transition_task,
     update_progress,
 )
 from app.infrastructure.time import utcnow
 from app.models.devices import Device, DeviceCredential
+from app.models.files import File
 from app.models.operation import OperationTask
 
 # An adapter is allowed this many seconds past the plan deadline to return a
@@ -99,6 +115,24 @@ from app.models.operation import OperationTask
 DEADLINE_MARGIN_SECONDS = 0.25
 
 UI_EVENT_TYPE_OPERATION_UPDATED = "operation.updated"
+
+# Virtual-media device-pull tickets live up to 24 h (ARCHITECTURE.md §3.6).
+VIRTUAL_MEDIA_TICKET_HOURS = 24
+
+# Firmware image metadata header: the warden-sim image format (simulator
+# certification shape only — real vendor images are overlay territory, M3T5).
+IMAGE_HEADER_MARKER = b"WARDEN-SIM-FW "
+IMAGE_HEADER_MAX_BYTES = 4096
+
+
+def _replace_plan_runtime(plan: OperationPlan, runtime: dict[str, object]) -> OperationPlan:
+    return dataclass_replace(plan, runtime_context=runtime)
+
+
+def _replace_result_evidence(
+    result: OperationResult, evidence: dict[str, object]
+) -> OperationResult:
+    return dataclass_replace(result, evidence=evidence)
 
 
 def _profile_for(task: OperationTask) -> OperationProfile | None:
@@ -119,6 +153,8 @@ class OperationExecutor:
         audit_logger: AuditLogger | None = None,
         job_poll_interval_seconds: float | None = None,
         progress_min_interval_seconds: float | None = None,
+        file_storage: FileStorage | None = None,
+        file_key_cipher: FileKeyCipher | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._lease_owner = lease_owner
@@ -136,6 +172,8 @@ class OperationExecutor:
             if progress_min_interval_seconds is not None
             else self._settings.operation_progress_min_interval_seconds
         )
+        self._file_storage = file_storage
+        self._file_key_cipher = file_key_cipher
         self._log = structlog.get_logger()
 
     # -- pool handler entry -------------------------------------------------
@@ -203,6 +241,12 @@ class OperationExecutor:
             return
         session_ctx = self._device_session(session, task, device)
         if session_ctx is None:
+            return
+        # M3T3 platform execution material (file rows, tickets, image
+        # metadata) is assembled BEFORE the device-side preflight so that a
+        # bad/missing input fails safely before the dispatch fence.
+        plan = self._operation_context(session, task, device, plan)
+        if plan is None:
             return
         # Step 3 of ARCHITECTURE.md §5.2: live READ-ONLY preflight BEFORE the
         # dispatch fence; any failure fails the task safely, never executes.
@@ -310,6 +354,13 @@ class OperationExecutor:
                 execution_evidence=result.evidence,
             )
             return
+        # Platform side of the M3T3 boundary: artifacts/inventory are
+        # persisted and their proofs merged into the evidence BEFORE
+        # verification (the adapter only ever yields bytes/descriptors).
+        consumed = self._consume_execution_outputs(session, task, device, plan, result)
+        if consumed is None:
+            return
+        result = consumed
         if result.device_job_id is not None:
             self._poll_device_job(session, task, profile, plan, adapter, session_ctx, result)
         else:
@@ -659,6 +710,9 @@ class OperationExecutor:
         if session_ctx is None:
             self._verification_required(session, task, "设备凭据不可用，无法回读核验操作结果")
             return
+        # Verify-only recovery of a file-consuming task rebuilds the platform
+        # context best-effort (tickets/files may still be live).
+        plan = self._operation_context(session, task, device, plan, recovery=True) or plan
         persisted = OperationResult(
             ok=task.error_code is None,
             evidence=dict(task.evidence) if task.evidence else {},
@@ -681,6 +735,463 @@ class OperationExecutor:
             self._poll_device_job(session, task, profile, plan, adapter, session_ctx, persisted)
         else:
             self._verify_once(session, task, profile, plan, adapter, session_ctx, persisted)
+
+    # -- M3T3 platform execution material (files/tickets/artifacts) ----------
+
+    def _file_audit(self, task: OperationTask) -> FileAuditContext:
+        return FileAuditContext(
+            actor_user_id=task.requested_by,
+            session_id=None,
+            source_ip=None,
+            user_agent_summary=None,
+            request_id=f"operation:{task.id}",
+        )
+
+    def _file_services(self) -> tuple[FileStorage, FileKeyCipher | None]:
+        """Lazily-built file-volume services (same root/cipher as the API)."""
+        if self._file_storage is None:
+            self._file_storage = FileStorage(self._settings.resolved_file_store_root)
+        if self._file_key_cipher is None:
+            material = self._settings.file_master_key.get_secret_value().encode("utf-8")
+            if material:
+                self._file_key_cipher = FileKeyCipher(material)
+        return self._file_storage, self._file_key_cipher
+
+    def _input_file_row(
+        self, session: Session, task: OperationTask, file_id: object, *, file_type: str
+    ) -> File | None:
+        """Load and validate an operation input file row (pre-fence, M3T3)."""
+        parsed = uuid.UUID(str(file_id)) if isinstance(file_id, str) else None
+        row = session.get(File, parsed) if parsed is not None else None
+        if row is None:
+            self._fail_task(
+                session,
+                task,
+                error_code="validation_failed",
+                error_detail="任务引用的文件不存在，操作未执行；请重新预览",
+            )
+            return None
+        if row.status != "ready" or row.sha256 is None:
+            self._fail_task(
+                session,
+                task,
+                error_code="validation_failed",
+                error_detail="任务引用的文件未就绪，操作未执行",
+            )
+            return None
+        if row.file_type != file_type:
+            self._fail_task(
+                session,
+                task,
+                error_code="validation_failed",
+                error_detail=f"文件类型与操作不匹配（期望 {file_type}）",
+            )
+            return None
+        return row
+
+    def _firmware_image_metadata(
+        self, storage: FileStorage, file_row: File
+    ) -> dict[str, str] | None:
+        """Parse the warden-sim firmware image header (bounded head read).
+
+        The platform reads ONLY the certified image header (simulator shape;
+        real vendor images are M3T5 overlay territory). An unreadable/absent
+        header returns None — the platform never guesses package metadata.
+        """
+        stored = StoredFile(
+            storage_key=storage_key(file_row),
+            encrypted=False,
+            size_bytes=file_row.size_bytes,
+            key_version=None,
+        )
+        try:
+            limit = min(IMAGE_HEADER_MAX_BYTES, file_row.size_bytes)
+            chunks = storage.open_chunks(
+                stored, key_cipher=None, start=0, limit=limit
+            )
+            head = b"".join(chunks)
+        except (FileStorageError, ValueError):
+            return None
+        line, _, _ = head.partition(b"\n")
+        if not line.startswith(IMAGE_HEADER_MARKER):
+            return None
+        raw = line[len(IMAGE_HEADER_MARKER) :].strip()
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        model = payload.get("model")
+        target = payload.get("target")
+        version = payload.get("version")
+        if not (
+            isinstance(model, str)
+            and model
+            and isinstance(target, str)
+            and target
+            and isinstance(version, str)
+            and version
+        ):
+            return None
+        return {"model": model, "target": target, "version": version}
+
+    def _operation_context(
+        self,
+        session: Session,
+        task: OperationTask,
+        device: Device,
+        plan: OperationPlan,
+        *,
+        recovery: bool = False,
+    ) -> OperationPlan | None:
+        """Assemble the platform runtime context for one operation.
+
+        File-consuming operations (virtual_media.mount, firmware.update)
+        resolve the input file row, link it to the task, and issue (or reuse)
+        the platform device-pull ticket bound to device+file+purpose+expiry;
+        the ticket URL is what the adapter passes to the device — never a
+        user-supplied URL. unmount validates that the slot belongs to a
+        platform-managed mount before anything touches the device. All this
+        happens BEFORE the dispatch fence; in the verify-only recovery path it
+        is best-effort (a missing context degrades verification to ambiguous,
+        never to success).
+        """
+        try:
+            return self._operation_context_or_error(session, task, device, plan)
+        except Exception as exc:  # noqa: BLE001
+            if recovery:
+                self._log.info(
+                    "operation_context_recovery_degraded",
+                    task_id=str(task.id),
+                    error=type(exc).__name__,
+                )
+                runtime = dict(plan.runtime_context)
+                if task.timeout_at is not None:
+                    runtime["task_timeout_at"] = task.timeout_at.isoformat()
+                return _replace_plan_runtime(plan, runtime)
+            raise
+
+    def _operation_context_or_error(
+        self,
+        session: Session,
+        task: OperationTask,
+        device: Device,
+        plan: OperationPlan,
+    ) -> OperationPlan | None:
+        runtime: dict[str, object] = {}
+        if task.timeout_at is not None:
+            runtime["task_timeout_at"] = task.timeout_at.isoformat()
+        key = plan.capability_key
+        audit = self._file_audit(task)
+        if key == "virtual_media.mount":
+            file_row = self._input_file_row(
+                session, task, plan.normalized_parameters.get("file_id"), file_type="virtual_media"
+            )
+            if file_row is None:
+                return None
+            link_input_file(
+                db=session,
+                file_row=file_row,
+                device_id=device.id,
+                task_id=task.id,
+                created_by=task.requested_by,
+            )
+            ticket = active_device_file_ticket(
+                db=session, device_id=device.id, file_id=file_row.id, purpose="virtual_media"
+            )
+            if ticket is None:
+                ticket = issue_device_file_ticket(
+                    db=session,
+                    file_row=file_row,
+                    device=device,
+                    purpose="virtual_media",
+                    expires_at=utcnow() + datetime.timedelta(hours=VIRTUAL_MEDIA_TICKET_HOURS),
+                    task_id=task.id,
+                    logger=self._audit_logger,
+                    audit=audit,
+                )
+                session.flush()
+            runtime["file"] = {
+                "file_id": str(file_row.id),
+                "file_type": file_row.file_type,
+                "sha256": file_row.sha256,
+            }
+            runtime["ticket"] = {
+                "url": ticket_url_for(self._settings, ticket),
+                "id": str(ticket.id),
+            }
+        elif key == "firmware.update":
+            file_row = self._input_file_row(
+                session, task, plan.normalized_parameters.get("file_id"), file_type="firmware"
+            )
+            if file_row is None:
+                return None
+            storage, _cipher = self._file_services()
+            metadata = self._firmware_image_metadata(storage, file_row)
+            target_id = plan.normalized_parameters.get("target_id")
+            if metadata is None:
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="validation_failed",
+                    error_detail="固件包元数据无法解析（缺少 warden-sim 图像头），操作未执行",
+                )
+                return None
+            if metadata["target"] != target_id:
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="validation_failed",
+                    error_detail=f"固件包目标（{metadata['target']}）与操作参数（{target_id}）不一致，操作未执行",
+                )
+                return None
+            if device.model is not None and device.model != metadata["model"]:
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="validation_failed",
+                    error_detail=f"固件包型号（{metadata['model']}）与设备型号（{device.model}）不匹配，操作未执行",
+                )
+                return None
+            link_input_file(
+                db=session,
+                file_row=file_row,
+                device_id=device.id,
+                task_id=task.id,
+                created_by=task.requested_by,
+            )
+            ticket = active_device_file_ticket(
+                db=session, device_id=device.id, file_id=file_row.id, purpose="firmware"
+            )
+            if ticket is None:
+                ticket = issue_device_file_ticket(
+                    db=session,
+                    file_row=file_row,
+                    device=device,
+                    purpose="firmware",
+                    expires_at=utcnow() + datetime.timedelta(seconds=plan.timeout_seconds),
+                    task_id=task.id,
+                    logger=self._audit_logger,
+                    audit=audit,
+                )
+                session.flush()
+            runtime["file"] = {
+                "file_id": str(file_row.id),
+                "file_type": file_row.file_type,
+                "sha256": file_row.sha256,
+                "expected_model": metadata["model"],
+                "expected_target": metadata["target"],
+                "expected_version": metadata["version"],
+            }
+            runtime["ticket"] = {
+                "url": ticket_url_for(self._settings, ticket),
+                "id": str(ticket.id),
+            }
+        elif key == "virtual_media.unmount":
+            slot_id = plan.normalized_parameters.get("slot_id")
+            if isinstance(slot_id, str) and self._mount_task_for_slot(session, task, slot_id) is None:
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="validation_failed",
+                    error_detail="未找到该槽位对应的平台虚拟介质挂载记录，操作未执行",
+                )
+                return None
+        elif key == "logs.support_bundle.collect":
+            storage, _cipher = self._file_services()
+            try:
+                storage.check_available()
+            except FileStorageError:
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="storage_unavailable",
+                    error_detail="文件存储不可用，无法保存支持包产物",
+                )
+                return None
+        return _replace_plan_runtime(plan, runtime)
+
+    def _mount_task_for_slot(
+        self, session: Session, task: OperationTask, slot_id: str
+    ) -> OperationTask | None:
+        """The latest SUCCEEDED mount task whose evidence names ``slot_id``.
+
+        Platform-side knowledge of which slot holds OUR medium comes from the
+        mount task evidence (never from the device alone) — unmount only acts
+        on platform-managed mounts.
+        """
+        candidates = session.scalars(
+            select(OperationTask)
+            .where(
+                OperationTask.device_id == task.device_id,
+                OperationTask.requirement_id == "SRV-ACT-05",
+                OperationTask.capability_key == "virtual_media.mount",
+                OperationTask.state == TaskState.SUCCEEDED.value,
+            )
+            .order_by(OperationTask.created_at.desc())
+            .limit(10)
+        ).all()
+        for candidate in candidates:
+            evidence = dict(candidate.evidence) if candidate.evidence else {}
+            execution = evidence.get("execution")
+            nested = execution if isinstance(execution, dict) else evidence
+            if nested.get("slot_id") == slot_id:
+                return candidate
+        return None
+
+    def _revoke_tickets_of_task(
+        self, session: Session, task: OperationTask, purpose: str
+    ) -> list[str]:
+        """Revoke every (unrevoked) ticket this task created (idempotent)."""
+        from app.models.files import DeviceFileTicket as TicketRow
+
+        rows = session.scalars(
+            select(TicketRow).where(
+                TicketRow.created_by_task_id == task.id,
+                TicketRow.device_id == task.device_id,
+                TicketRow.purpose == purpose,
+                TicketRow.revoked_at.is_(None),
+            )
+        ).all()
+        revoked: list[str] = []
+        audit = self._file_audit(task)
+        for ticket in rows:
+            revoke_device_file_ticket(
+                db=session,
+                ticket_id=str(ticket.id),
+                logger=self._audit_logger,
+                audit=audit,
+                device_id=task.device_id,
+            )
+            revoked.append(str(ticket.id))
+        return revoked
+
+    def _consume_execution_outputs(
+        self,
+        session: Session,
+        task: OperationTask,
+        device: Device,
+        plan: OperationPlan,
+        result: OperationResult,
+    ) -> OperationResult | None:
+        """Persist the execution side outputs and merge their proofs.
+
+        Artifacts -> encrypted file rows + file_links (adapter boundary: the
+        adapter yielded bytes; the platform stores). Inventory -> device row +
+        operation-applied components. unmount -> the platform revokes the
+        mount's ticket right after a successful eject. The merged execution
+        evidence is checkpointed onto the task row so the verify-only recovery
+        can still read back (crash between execute and the terminal
+        transition). Any persistence failure fails the task safely BEFORE
+        verification — never a fabricated success.
+        """
+        storage, cipher = self._file_services()
+        audit = self._file_audit(task)
+        merged_evidence = dict(result.evidence)
+        try:
+            stored_rows: list[dict[str, object]] = []
+            for artifact in result.artifacts:
+                row = store_operation_artifact(
+                    db=session,
+                    artifact=artifact,
+                    device_id=device.id,
+                    task_id=task.id,
+                    created_by=task.requested_by,
+                    storage=storage,
+                    key_cipher=cipher,
+                    logger=self._audit_logger,
+                    audit=audit,
+                )
+                stored_rows.append(
+                    {
+                        "file_id": str(row.id),
+                        "file_type": row.file_type,
+                        "sha256": row.sha256,
+                        "encrypted": row.encrypted,
+                        "size_bytes": row.size_bytes,
+                        "filename": artifact.filename,
+                        "status": row.status,
+                    }
+                )
+            if stored_rows:
+                merged_evidence["artifact_stored"] = stored_rows[0]
+                merged_evidence["artifacts_stored"] = stored_rows
+            if result.inventory is not None:
+                proof = apply_operation_inventory(
+                    session, device=device, inventory=result.inventory
+                )
+                merged_evidence["inventory_persisted"] = proof
+            if plan.capability_key == "virtual_media.unmount":
+                slot_id = plan.normalized_parameters.get("slot_id")
+                mount = (
+                    self._mount_task_for_slot(session, task, slot_id)
+                    if isinstance(slot_id, str)
+                    else None
+                )
+                if mount is not None:
+                    revoked = self._revoke_tickets_of_task(session, mount, "virtual_media")
+                    if revoked:
+                        merged_evidence["ticket_revoked"] = utcnow().isoformat()
+        except AppError as exc:
+            code = (
+                exc.code
+                if exc.code in ("storage_unavailable", "dependency_unavailable", "validation_failed")
+                else "internal_error"
+            )
+            self._fail_task(
+                session,
+                task,
+                error_code=code,
+                error_detail=f"执行产物持久化失败：{exc.message[:200]}",
+            )
+            return None
+        except (FileStorageError, ValueError) as exc:
+            self._fail_task(
+                session,
+                task,
+                error_code="storage_unavailable",
+                error_detail=f"执行产物写入失败：{type(exc).__name__}",
+            )
+            return None
+        consumed = _replace_result_evidence(result, merged_evidence)
+        checkpointed = record_execution_evidence(
+            session,
+            task_id=task.id,
+            owner=self._lease_owner,
+            evidence=merged_evidence,
+        )
+        if checkpointed is None:
+            return None
+        session.commit()
+        return consumed
+
+    def _release_task_resources(
+        self, session: Session, task: OperationTask, outcome: str
+    ) -> None:
+        """Terminal bookkeeping: revoke task-bound tickets that are dead.
+
+        Rules (M3T3): a firmware-update ticket dies on every terminal outcome
+        except verification_required (the job may still be transferring); a
+        mount ticket dies on failed/timed_out (nothing usable was mounted) but
+        SURVIVES success (the medium stays mounted until unmount or expiry)
+        and verification_required (it may be mounted); unmount tickets are
+        revoked right after a successful eject (execute path), never here.
+        Revocation only ever touches tickets this task created (pre-fence
+        context issuance included).
+        """
+        key = task.capability_key
+        try:
+            if key == "firmware.update" and outcome != "verification_required":
+                self._revoke_tickets_of_task(session, task, "firmware")
+            elif key == "virtual_media.mount" and outcome in ("failed", "timed_out"):
+                self._revoke_tickets_of_task(session, task, "virtual_media")
+        except Exception:  # noqa: BLE001
+            self._log.exception(
+                "task_resource_release_failed",
+                task_id=str(task.id),
+                message="ticket revocation failed; expiry/retention sweep is the fallback",
+            )
 
     # -- terminal/holding bookkeeping --------------------------------------
 
@@ -785,6 +1296,7 @@ class OperationExecutor:
     ) -> None:
         """Audit + ui_event in the SAME transaction as the terminal/holding
         transition (DATA_MODEL.md §11)."""
+        self._release_task_resources(session, updated, outcome)
         self._emit_ui_event(session, updated)
         self._audit_finish(session, updated, outcome, error_code=error_code)
         session.commit()
