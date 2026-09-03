@@ -7,9 +7,12 @@ device state commit together), DEVICE_ADAPTERS.md §2.3 (batch semantics).
 
 Flow per run: scheduler writes ``scheduled`` rows -> pool claims with
 FOR UPDATE SKIP LOCKED + lease -> adapter ``collect`` -> ONE transaction
-persists components/metrics/events/errors, recomputes reachability/health,
-derives the run terminal state, runs the alert engine (process_collection_events)
-and writes ui_events -> the caller commits.
+persists components/metrics/events/errors, recomputes reachability and
+refreshes health from batches carrying health evidence
+(``_compute_health``: connectivity-only runs never regress the health
+column, PRODUCT_DESIGN.md §6.2), derives the run terminal state, runs the
+alert engine (process_collection_events) and writes ui_events -> the caller
+commits.
 
 Failure semantics: an ObservationError per metric is batch-partial (successes
 persist, run=partial); an adapter-level failure marks the run failed with a
@@ -323,31 +326,45 @@ def _compute_health(
     batch: ObservationBatch,
     *,
     supported_metric_keys: frozenset[str],
-) -> str:
-    """Health from explicit batch evidence (PRODUCT_DESIGN.md §6.2, ADR-010).
+) -> str | None:
+    """Health from explicit batch health evidence (PRODUCT_DESIGN.md §6.2, ADR-010).
 
-    Evidence = the alert value maps applied to every observed metric with an
-    alert_policy (normal -> healthy, warning -> warning, critical -> critical,
-    no_decision -> no evidence). ``health.overall`` is the key health signal:
-    when the device supports it but this batch produced no good observation,
-    the health stays ``unknown`` (关键采集缺失/部分失败 -> unknown).
+    Health evidence = the alert value maps applied to every observed metric
+    with a health-relevant alert_policy (normal -> healthy, warning ->
+    warning, critical -> critical, no_decision -> no evidence). A metric is
+    health-relevant when its contract alert_policy is a real health/status
+    policy (health/status/detected_is_critical/broken_is_critical/
+    true_is_critical — i.e. any policy other than none and connectivity):
+    ``connectivity.management`` feeds REACHABILITY, not health — §6.2 requires
+    the device to explicitly report health or a certified full health
+    evidence set to be healthy, so a connectivity-only run must never regress
+    the health column.
+
+    Returns ``None`` when the batch carries NO health evidence (for example a
+    NAS reachability/health run emitting only connectivity.management, or an
+    empty batch): the caller then leaves ``devices.health`` unchanged — no
+    evidence is not a recovery signal and must not overwrite the last trusted
+    health. When evidence is present, ``health.overall`` remains the key
+    health signal: if the device supports it but this batch produced no good
+    observation, the health stays ``unknown`` (关键采集缺失/部分失败 -> unknown).
     """
     states: list[str] = []
+    has_health_evidence = False
     for obs in batch.observations:
         if obs.quality not in (Quality.GOOD, Quality.PARTIAL):
             continue
         metric = METRIC_DEFINITIONS.get(obs.metric_key)
-        if metric is None or metric.alert_policy == "none":
+        if metric is None or metric.alert_policy in ("none", "connectivity"):
             continue
-        outcome = outcome_for_metric(
-            metric, obs.value, enum_maps=ENUM_VALUE_MAPS, boolean_maps=BOOLEAN_VALUE_MAPS
-        )
+        has_health_evidence = True
+        outcome = outcome_for_metric(metric, obs.value, enum_maps=ENUM_VALUE_MAPS, boolean_maps=BOOLEAN_VALUE_MAPS)
         state = health_state_from_outcome(outcome)
         if state is not None:
             states.append(state)
+    if not has_health_evidence:
+        return None
     if "health.overall" in supported_metric_keys and not any(
-        obs.metric_key == "health.overall" and obs.quality is Quality.GOOD
-        for obs in batch.observations
+        obs.metric_key == "health.overall" and obs.quality is Quality.GOOD for obs in batch.observations
     ):
         return "unknown"
     return HealthAggregator.aggregate(states)
@@ -709,7 +726,12 @@ def run_collection(
 
     _apply_reachability(device, event="success")
     supported = _supported_metric_keys(db, device_id=device.id)
-    device.health = _compute_health(batch, supported_metric_keys=supported)
+    # Health updates ONLY from batches carrying health evidence (M4T2 review
+    # ruling, PRODUCT_DESIGN.md §6.2): a connectivity-only reachability/health
+    # run returns None and must not regress the last trusted health.
+    health = _compute_health(batch, supported_metric_keys=supported)
+    if health is not None:
+        device.health = health
     device.last_seen_at = now
     if run.state in ("succeeded", "partial"):
         device.last_collected_at = now

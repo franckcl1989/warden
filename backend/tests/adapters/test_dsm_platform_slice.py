@@ -5,7 +5,11 @@ run -> metric_latest -> alerts) with the registered ``nas.synology_dsm``
 adapter talking to the TEST-DEVICE DSM simulator (ds224plus profile): psql
 evidence of metric_latest rows with contract units/enums, the degraded
 knob's status.problem alerts, and the honest fan-rpm-0 rule (device-reported
-0 rpm is data; it never opens an alert — fan.rpm alert_policy=none).
+0 rpm is data; it never opens an alert — fan.rpm alert_policy=none). NAS
+reachability/health and logs runs emit ONLY connectivity observations:
+the slice asserts such runs never regress the devices.health column
+(connectivity is reachability evidence, not health evidence —
+PRODUCT_DESIGN.md §6.2, M4T2 controller ruling).
 
 The simulator runs on 127.0.0.1. The SSRF policy HARD-denies loopback —
 this test's settings declare ``allowed_device_cidrs=127.0.0.1/32`` and
@@ -343,16 +347,38 @@ class TestDsmPlatformSlice:
                         == 14
                     )
 
+                # Connectivity-only health run FIRST (the real 30 s cadence):
+                # NAS health runs emit ONLY connectivity.management, which is
+                # reachability evidence — never health evidence. The seeded
+                # health stays untouched (no healthy-from-connectivity,
+                # PRODUCT_DESIGN.md §6.2 health evidence gate).
+                now = utcnow()
+                connectivity_run = _claim_and_run(
+                    factory,
+                    device_id=device_id,
+                    collection_type="health",
+                    settings=settings,
+                    keyring=keyring,
+                    scheduled_at=now,
+                )
+                assert connectivity_run["state"] == "succeeded", connectivity_run
+                with factory() as session:
+                    device = session.execute(
+                        text("SELECT health FROM devices WHERE id = :id"),
+                        {"id": device_id},
+                    ).one()
+                    assert dict(device._mapping)["health"] == "unknown"
+                    _print_evidence("connectivity-only-health-run", _evidence(session, device_id))
+
                 # Metrics run on the ds224plus HEALTHY surface: latest rows
                 # with contract units + connectivity true, no errors.
-                now = utcnow()
                 healthy_run = _claim_and_run(
                     factory,
                     device_id=device_id,
                     collection_type="metrics",
                     settings=settings,
                     keyring=keyring,
-                    scheduled_at=now,
+                    scheduled_at=now + datetime.timedelta(seconds=1),
                 )
                 assert healthy_run["state"] == "succeeded", healthy_run
                 with factory() as session:
@@ -415,7 +441,7 @@ class TestDsmPlatformSlice:
                     collection_type="metrics",
                     settings=settings,
                     keyring=keyring,
-                    scheduled_at=now + datetime.timedelta(seconds=1),
+                    scheduled_at=now + datetime.timedelta(seconds=2),
                 )
                 assert degraded_run["state"] == "succeeded", degraded_run
                 with factory() as session:
@@ -463,14 +489,17 @@ class TestDsmPlatformSlice:
                     _print_evidence("metrics-degraded", _evidence(session, device_id))
 
                 # Logs run: DSM log import with native ids; a forced full
-                # re-read dedupes on the platform side.
+                # re-read dedupes on the platform side. The logs run also
+                # carries ONLY connectivity observations — while the disk is
+                # still degraded the health column must NOT regress
+                # (health evidence gate, PRODUCT_DESIGN.md §6.2).
                 logs_run = _claim_and_run(
                     factory,
                     device_id=device_id,
                     collection_type="logs",
                     settings=settings,
                     keyring=keyring,
-                    scheduled_at=now + datetime.timedelta(seconds=2),
+                    scheduled_at=now + datetime.timedelta(seconds=3),
                 )
                 assert logs_run["state"] == "succeeded", logs_run
                 with factory() as session:
@@ -481,18 +510,44 @@ class TestDsmPlatformSlice:
                         {"id": device_id},
                     ).one()
                     assert tuple(count) == (24, 24)
+                    device = session.execute(
+                        text("SELECT health FROM devices WHERE id = :id"),
+                        {"id": device_id},
+                    ).one()
+                    assert dict(device._mapping)["health"] == "critical"
                     session.execute(
                         text("UPDATE devices SET collection_state = collection_state::jsonb - 'logs' WHERE id = :id"),
                         {"id": device_id},
                     )
                     session.commit()
+
+                # Connectivity-only health run while STILL degraded: the
+                # regression — connectivity must never refresh health to
+                # healthy between metrics runs (the M4T2 controller ruling).
+                degraded_health_run = _claim_and_run(
+                    factory,
+                    device_id=device_id,
+                    collection_type="health",
+                    settings=settings,
+                    keyring=keyring,
+                    scheduled_at=now + datetime.timedelta(seconds=4),
+                )
+                assert degraded_health_run["state"] == "succeeded", degraded_health_run
+                with factory() as session:
+                    device = session.execute(
+                        text("SELECT health FROM devices WHERE id = :id"),
+                        {"id": device_id},
+                    ).one()
+                    assert dict(device._mapping)["health"] == "critical"
+                    _print_evidence("degraded-health-run-connectivity-only", _evidence(session, device_id))
+
                 logs_run2 = _claim_and_run(
                     factory,
                     device_id=device_id,
                     collection_type="logs",
                     settings=settings,
                     keyring=keyring,
-                    scheduled_at=now + datetime.timedelta(seconds=3),
+                    scheduled_at=now + datetime.timedelta(seconds=5),
                 )
                 assert logs_run2["state"] == "succeeded", logs_run2
                 with factory() as session:
@@ -521,7 +576,7 @@ class TestDsmPlatformSlice:
                         collection_type="metrics",
                         settings=settings,
                         keyring=keyring,
-                        scheduled_at=now + datetime.timedelta(seconds=4 + index),
+                        scheduled_at=now + datetime.timedelta(seconds=6 + index),
                     )
                     assert healthy_again["state"] == "succeeded", healthy_again
                 with factory() as session:

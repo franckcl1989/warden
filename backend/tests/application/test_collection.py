@@ -16,9 +16,11 @@ import pytest
 from app.adapters.fake import FAILURE_MODE_KEY
 from app.application.collection import (
     AUTH_FAILURE_BACKOFF_MULTIPLIER,
+    _compute_health,
     run_collection,
     schedule_due_collections,
 )
+from app.domain.adapter import Observation, ObservationBatch, Quality
 from app.infrastructure.observation_store import claim_collection_run
 from app.models.devices import Device
 from app.models.observation import (
@@ -716,3 +718,128 @@ class TestUnsupportedCapabilityEndToEnd:
         assert all("indicator.led" not in alert.dedupe_key for alert in status)
         assert any("drive.status" in alert.dedupe_key for alert in status)
         assert any(alert.rule_key == "device.health" for alert in active)
+
+
+class TestHealthEvidenceGate:
+    """devices.health refreshes ONLY from batches carrying health evidence
+    (PRODUCT_DESIGN.md §6.2 — the M4T2 NAS health ruling): connectivity.management
+    feeds REACHABILITY, never health, so a NAS reachability/health run
+    (which honestly emits only connectivity) must not regress the column to
+    healthy between metrics runs; an evidence-less batch never overwrites the
+    last trusted health.
+    """
+
+    def test_nas_connectivity_only_run_leaves_health_unchanged(self) -> None:
+        # NAS health/reachability runs emit only connectivity.management
+        # (M4T2 adapter semantics); the NAS registry carries no health.overall.
+        supported = frozenset({"disk.status", "fan.rpm", "connectivity.management"})
+        batch = ObservationBatch(
+            observations=(Observation("connectivity.management", True, T0, source="nas.synology_dsm"),)
+        )
+        assert _compute_health(batch, supported_metric_keys=supported) is None
+
+    def test_connectivity_false_is_reachability_not_health_evidence(self) -> None:
+        # A reachable-but-broken management answer is a reachability datum:
+        # it must never mark the device critical either.
+        supported = frozenset({"disk.status", "connectivity.management"})
+        batch = ObservationBatch(
+            observations=(Observation("connectivity.management", False, T0, source="nas.synology_dsm"),)
+        )
+        assert _compute_health(batch, supported_metric_keys=supported) is None
+
+    def test_server_health_run_with_health_overall_still_aggregates(self) -> None:
+        # health.overall IS health evidence: unchanged behavior.
+        supported = frozenset({"health.overall", "drive.status"})
+        batch = ObservationBatch(
+            observations=(
+                Observation("health.overall", "healthy", T0, source="redfish"),
+                Observation("connectivity.management", True, T0, source="poll"),
+            )
+        )
+        assert _compute_health(batch, supported_metric_keys=supported) == "healthy"
+
+    def test_missing_key_signal_with_other_evidence_stays_unknown(self) -> None:
+        # Regression: when health.overall IS supported but this run produced
+        # no good observation of it, other evidence still yields "unknown"
+        # (关键采集缺失 -> unknown) — unchanged semantics.
+        supported = frozenset({"health.overall", "drive.status"})
+        batch = ObservationBatch(observations=(Observation("drive.status", "ok", T0, source="redfish"),))
+        assert _compute_health(batch, supported_metric_keys=supported) == "unknown"
+
+    def test_nas_metrics_run_evidence_aggregates_by_priority(self) -> None:
+        # Degraded disk + display-only values (fan rpm 0, bad sectors):
+        # numeric display data never decides health; disk.status drives it.
+        supported = frozenset({"disk.status", "fan.rpm", "connectivity.management"})
+        warning_batch = ObservationBatch(
+            observations=(
+                Observation(
+                    "disk.status",
+                    "warning",
+                    T0,
+                    source="nas.synology_dsm",
+                    component_kind="disk",
+                    component_native_id="sata1",
+                ),
+                Observation(
+                    "disk.bad_sectors",
+                    512,
+                    T0,
+                    source="nas.synology_dsm",
+                    component_kind="disk",
+                    component_native_id="sata1",
+                ),
+                Observation("fan.rpm", 0.0, T0, source="nas.synology_dsm"),
+                Observation("connectivity.management", True, T0, source="nas.synology_dsm"),
+            )
+        )
+        assert _compute_health(warning_batch, supported_metric_keys=supported) == "warning"
+        critical_batch = ObservationBatch(
+            observations=(
+                Observation(
+                    "disk.status",
+                    "critical",
+                    T0,
+                    source="nas.synology_dsm",
+                    component_kind="disk",
+                    component_native_id="sata1",
+                ),
+                Observation("fan.rpm", 2100.0, T0, source="nas.synology_dsm"),
+            )
+        )
+        assert _compute_health(critical_batch, supported_metric_keys=supported) == "critical"
+
+    def test_nas_all_healthy_evidence_sets_healthy(self) -> None:
+        # A metrics run with a certified full health evidence set CAN set the
+        # NAS healthy — only connectivity-only runs cannot.
+        supported = frozenset({"disk.status", "storage_pool.status", "fan.status", "ups.status"})
+        batch = ObservationBatch(
+            observations=(
+                Observation("disk.status", "ok", T0, source="nas.synology_dsm"),
+                Observation("storage_pool.status", "optimal", T0, source="nas.synology_dsm"),
+                Observation("fan.status", "ok", T0, source="nas.synology_dsm"),
+                Observation("ups.status", "normal", T0, source="nas.synology_dsm"),
+            )
+        )
+        assert _compute_health(batch, supported_metric_keys=supported) == "healthy"
+
+    def test_partial_quality_evidence_still_counts(self) -> None:
+        # PARTIAL observations of health-relevant metrics were evidence before
+        # the gate and stay evidence (partial readings may still decide health).
+        supported = frozenset({"disk.status"})
+        batch = ObservationBatch(
+            observations=(
+                Observation(
+                    "disk.status",
+                    "ok",
+                    T0,
+                    quality=Quality.PARTIAL,
+                    source="nas.synology_dsm",
+                ),
+            )
+        )
+        assert _compute_health(batch, supported_metric_keys=supported) == "healthy"
+
+    def test_batch_without_any_observation_leaves_health_unchanged(self) -> None:
+        supported = frozenset({"health.overall", "disk.status"})
+        batch = ObservationBatch(observations=())
+        assert _compute_health(batch, supported_metric_keys=supported) is None
