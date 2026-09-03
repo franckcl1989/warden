@@ -493,6 +493,45 @@ class TestSELPagination:
         assert "Critical" in severities
 
 
+class TestAbsoluteLinks:
+    """absolute_links mode: path-only links rewritten to absolute same-origin URIs."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_absolute_links_emits_absolute_same_origin_uris(self) -> None:
+        app = create_simulator(SimulatorConfig(profile="slow_paginated", pagination="next_link", absolute_links=True))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://sim", timeout=5.0) as client:
+            token, location = await login(client)
+            assert location.startswith("http://sim")
+            root = (await authed_get(client, token, f"{BASE}/")).json()
+            systems_href = root["Systems"]["@odata.id"]
+            assert systems_href.startswith("http://sim")
+            systems = (await authed_get(client, token, systems_href)).json()
+            member_href = systems["Members"][0]["@odata.id"]
+            assert member_href.startswith("http://sim")
+            system = (await authed_get(client, token, member_href)).json()
+            assert system["Actions"]["#ComputerSystem.Reset"]["target"].startswith("http://sim")
+            entries = (await authed_get(client, token, f"{BASE}/Managers/1/LogServices/SEL/Entries")).json()
+            assert entries["@odata.nextLink"].startswith("http://sim")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_absolute_links_flag_is_configurable_via_control(self) -> None:
+        transport = httpx.ASGITransport(app=create_simulator(SimulatorConfig()))
+        async with httpx.AsyncClient(transport=transport, base_url="http://sim", timeout=5.0) as client:
+            snapshot = (await client.get("/warden-sim/control")).json()
+            assert snapshot["absolute_links"] is False
+            result = await client.post("/warden-sim/control", json={"absolute_links": True})
+            assert result.status_code == 200
+            snapshot = (await client.get("/warden-sim/control")).json()
+            assert snapshot["absolute_links"] is True
+            token, location = await login(client)
+            assert location.startswith("http://sim")
+            root = (await authed_get(client, token, f"{BASE}/")).json()
+            assert root["Systems"]["@odata.id"].startswith("http://sim")
+
+
 class TestOemVendorStubs:
     @pytest.mark.unit
     @pytest.mark.asyncio

@@ -16,7 +16,7 @@ import httpx
 import pytest
 from app.infrastructure.protocols.redfish.client import RedfishClient
 from app.infrastructure.protocols.redfish.errors import RedfishError
-from app.infrastructure.protocols.redfish.parse import walk_collection
+from app.infrastructure.protocols.redfish.parse import follow, walk_collection
 from app.infrastructure.protocols.redfish.session import RedfishCredentials
 from app.infrastructure.protocols.redfish.tasks import poll_task
 
@@ -207,6 +207,62 @@ class TestActionsAndTasks:
         with client_ctx(sim_url, auth_mode="basic") as client:
             root = client.get(f"{BASE}/")
             assert root is not None
+
+
+class TestAbsoluteLinkMode:
+    """Regression: spec-legal ABSOLUTE same-origin @odata.id links over the REAL client.
+
+    The simulator ``absolute_links`` profile emits absolute same-origin URIs
+    (http://127.0.0.1:<port>/redfish/v1/...) in every link the device serves.
+    parse._absolute_url validates these against the client's base_origin —
+    which must exist on the real RedfishClient (an AttributeError here used to
+    violate the stable-error contract; the fault was visible only with the
+    real client, never with the unit-test fake).
+    """
+
+    @pytest.mark.unit
+    def test_follow_accepts_absolute_same_origin_links(self) -> None:
+        with (
+            serve_simulator(
+                SimulatorConfig(profile="slow_paginated", pagination="next_link", absolute_links=True)
+            ) as url,
+            client_ctx(url) as client,
+        ):
+            root = client.get(f"{BASE}/")
+            assert root is not None
+            systems_href = root["Systems"]["@odata.id"]
+            assert isinstance(systems_href, str)
+            assert systems_href.startswith(f"{url}{BASE}/")
+            systems = follow(client, systems_href)
+            assert systems is not None
+            assert systems.schema_family == "ComputerSystemCollection"
+            member_href = systems["Members"][0]["@odata.id"]
+            assert member_href.startswith(f"{url}{BASE}/")
+            system = follow(client, member_href)
+            assert system is not None
+            assert system.schema_family == "ComputerSystem"
+
+    @pytest.mark.unit
+    def test_walk_collection_accepts_absolute_next_links_and_member_ids(self) -> None:
+        with (
+            serve_simulator(
+                SimulatorConfig(profile="slow_paginated", pagination="next_link", absolute_links=True)
+            ) as url,
+            client_ctx(url) as client,
+        ):
+            root = client.get(f"{BASE}/")
+            assert root is not None
+            # The collection href itself comes from the device payload as
+            # an absolute same-origin URI — exactly what an adapter sees.
+            managers_href = root["Managers"]["@odata.id"]
+            assert isinstance(managers_href, str)
+            entries_href = f"{managers_href}/1/LogServices/SEL/Entries"
+            assert entries_href.startswith(f"{url}{BASE}/")
+            resources, truncated = walk_collection(client, entries_href)
+            assert truncated is False
+            assert len(resources) == 150
+            # Pages and members were served with absolute URIs throughout.
+            assert all(str(resource["@odata.id"]).startswith(f"{url}{BASE}/") for resource in resources)
 
 
 class TestControlAndOem:

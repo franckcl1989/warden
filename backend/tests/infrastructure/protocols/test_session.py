@@ -187,6 +187,97 @@ class TestSessionLogin:
         assert not [r for r in recorder.requests if r["method"] == "DELETE"]
 
     @pytest.mark.unit
+    def test_absolute_same_origin_location_is_deleted_as_a_path(self) -> None:
+        # A spec-legal absolute same-origin Location must never carry the
+        # token off the client's base URL: close() normalizes it to a path.
+        recorder = Recorder(
+            lambda path: (
+                httpx.Response(
+                    201,
+                    headers={
+                        "X-Auth-Token": "tok-12345",
+                        "Location": f"{BMC}{BASE}/SessionService/Sessions/42",
+                    },
+                    json={},
+                )
+                if path.endswith("/Sessions")
+                else httpx.Response(204)
+                if "/Sessions/42" in path
+                else httpx.Response(404)
+            )
+        )
+        auth = SessionAuth(
+            make_http(recorder.handler),
+            base_path=BASE,
+            credentials=RedfishCredentials(username=USER, password=PASSWORD),
+            logger=captured_logger()[0],
+        )
+        auth.prepare()
+        auth.close()
+        delete_calls = [r for r in recorder.requests if r["method"] == "DELETE"]
+        assert len(delete_calls) == 1
+        assert delete_calls[0]["path"] == f"{BASE}/SessionService/Sessions/42"
+        assert delete_calls[0]["headers"].get("x-auth-token") == "tok-12345"
+
+    @pytest.mark.unit
+    def test_foreign_absolute_location_is_never_contacted_with_the_token(self) -> None:
+        # A hostile/broken device Location pointing off-origin must not carry
+        # X-Auth-Token anywhere: the URI is dropped and close() sends no DELETE.
+        recorder = Recorder(
+            lambda path: (
+                httpx.Response(
+                    201,
+                    headers={
+                        "X-Auth-Token": "tok-12345",
+                        "Location": "http://evil.example/redfish/v1/SessionService/Sessions/42",
+                    },
+                    json={},
+                )
+                if path.endswith("/Sessions")
+                else httpx.Response(404)
+            )
+        )
+        auth = SessionAuth(
+            make_http(recorder.handler),
+            base_path=BASE,
+            credentials=RedfishCredentials(username=USER, password=PASSWORD),
+            logger=captured_logger()[0],
+        )
+        auth.prepare()
+        assert auth.headers() == {"X-Auth-Token": "tok-12345"}
+        auth.close()
+        assert not [r for r in recorder.requests if r["method"] == "DELETE"]
+
+    @pytest.mark.unit
+    def test_absolute_same_origin_body_odata_id_is_deleted_as_a_path(self) -> None:
+        # No Location header: the body @odata.id is the session URI and is
+        # normalized the same way.
+        recorder = Recorder(
+            lambda path: (
+                httpx.Response(
+                    201,
+                    headers={"X-Auth-Token": "tok-12345"},
+                    json={"@odata.id": f"{BMC}{BASE}/SessionService/Sessions/42"},
+                )
+                if path.endswith("/Sessions")
+                else httpx.Response(204)
+                if "/Sessions/42" in path
+                else httpx.Response(404)
+            )
+        )
+        auth = SessionAuth(
+            make_http(recorder.handler),
+            base_path=BASE,
+            credentials=RedfishCredentials(username=USER, password=PASSWORD),
+            logger=captured_logger()[0],
+        )
+        auth.prepare()
+        auth.close()
+        delete_calls = [r for r in recorder.requests if r["method"] == "DELETE"]
+        assert len(delete_calls) == 1
+        assert delete_calls[0]["path"] == f"{BASE}/SessionService/Sessions/42"
+
+    @pytest.mark.unit
     def test_login_rejection_maps_authentication_failed(self) -> None:
         body = {
             "error": {

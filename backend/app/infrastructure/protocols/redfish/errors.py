@@ -18,8 +18,9 @@ Mapping notes:
   action -> ``device_busy``.
 - 400 on an action with extended members naming the action itself
   (``ActionNotSupported``/``ActionUnknown``/``PropertyUnknown``) is
-  ``unsupported_capability``; parameter-shaped failures are
-  ``validation_failed``.
+  ``unsupported_capability`` — matched by MessageId NAME within the Base
+  registry family regardless of its version (``Base.1.x``); parameter-shaped
+  failures are ``validation_failed``.
 - A vanished task (404 while polling) is ``ambiguous_result``: the outcome is
   unprovable and must never be replayed.
 """
@@ -52,16 +53,21 @@ ADAPTER_ERROR_CODES: frozenset[str] = frozenset(
 _REQUEST_CONTEXT_CODES = frozenset({"auth", "read", "action", "task"})
 
 # Extended-info MessageIds that mean "the device does not expose this action".
-_UNSUPPORTED_ACTION_IDS = frozenset(
-    {
-        "Base.1.0.ActionNotSupported",
-        "Base.1.13.ActionNotSupported",
-        "Base.1.0.ActionUnknown",
-        "Base.1.13.ActionUnknown",
-        "Base.1.13.PropertyUnknown",
-        "Base.1.0.PropertyUnknown",
-    }
-)
+# Matched by NAME inside the Base registry family: an exact version list would
+# mis-map a device speaking any other Base.1.x version to validation_failed.
+_UNSUPPORTED_ACTION_NAMES = frozenset({"ActionNotSupported", "ActionUnknown", "PropertyUnknown"})
+
+
+def _is_unsupported_action_message(message_id: str) -> bool:
+    """True when a MessageId names an unsupported action in the Base registry.
+
+    ``Base.<any version>.ActionNotSupported`` (e.g. Base.1.5.ActionNotSupported)
+    matches; a vendor's own registry or any other message name does not.
+    """
+    registry, _, name = message_id.partition(".")
+    if registry != "Base":
+        return False
+    return name.rsplit(".", 1)[-1] in _UNSUPPORTED_ACTION_NAMES
 
 
 def _message_ids_from_error(error: dict[str, Any]) -> tuple[str, ...]:
@@ -176,7 +182,7 @@ def _http_mapping(status: int, message_ids: tuple[str, ...], context: str) -> tu
         return "rate_limited", "device rate limited the request"
     if status == 400:
         if context == "action":
-            if any(message_id in _UNSUPPORTED_ACTION_IDS for message_id in message_ids):
+            if any(_is_unsupported_action_message(message_id) for message_id in message_ids):
                 return "unsupported_capability", "device does not support the requested action"
             return "validation_failed", "device rejected the action parameters"
         return "protocol_error", "device answered a read with an unexpected error"

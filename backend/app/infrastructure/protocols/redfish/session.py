@@ -26,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -124,6 +125,11 @@ _SESSION_LOGIN_PATH = "SessionService/Sessions"
 _SESSION_UNSUPPORTED_STATUSES = frozenset({404, 405, 501})
 
 
+def _origin_of(base_url: str) -> str:
+    parts = urlsplit(base_url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 class SessionAuth:
     """Redfish session authentication with bounded reuse and explicit close.
 
@@ -131,6 +137,11 @@ class SessionAuth:
     is reused while ``now - created_at < session_lifetime`` and re-issued
     afterwards. ``http`` must be the SAME ``httpx.Client`` the protocol client
     uses (raw transport access for the anonymous login/logout calls).
+
+    The device-supplied session URI (Location/@odata.id) is normalized to a
+    same-origin absolute path at capture AND again before the DELETE on
+    close: the X-Auth-Token must never leave the client origin (SECURITY.md
+    §7 — a foreign Location is ignored, never contacted).
     """
 
     can_reauth = True
@@ -154,10 +165,26 @@ class SessionAuth:
         self._logger = logger
         self._session_lifetime = session_lifetime
         self._clock = clock if clock is not None else time.monotonic
+        self._base_origin = _origin_of(str(self._http.base_url))
         self._token: str | None = None
         self._session_uri: str | None = None
         self._created_at: float | None = None
         self._closed = False
+
+    def _same_origin_session_path(self, uri: str) -> str | None:
+        """Normalize a device-supplied session URI to a same-origin path.
+
+        Absolute URIs must share the http client origin; the returned form is
+        path+query only so the DELETE always travels through the client's own
+        base URL. Foreign/odd URIs yield None — the token is dropped without
+        any off-origin request.
+        """
+        if uri.startswith("/"):
+            return uri
+        parts = urlsplit(uri)
+        if parts.scheme in ("http", "https") and _origin_of(uri) == self._base_origin:
+            return urlunsplit(("", "", parts.path, parts.query, ""))
+        return None
 
     def _login_path(self) -> str:
         return f"{self._base_path}/{_SESSION_LOGIN_PATH}"
@@ -204,7 +231,8 @@ class SessionAuth:
             )
         self._token = token
         self._created_at = self._clock()
-        self._session_uri = response.headers.get("Location") or _body_odata_id(response)
+        raw_session_uri = response.headers.get("Location") or _body_odata_id(response)
+        self._session_uri = self._same_origin_session_path(raw_session_uri) if raw_session_uri else None
         self._logger.info(
             "redfish.session.created",
             auth_mode="session",
@@ -228,17 +256,18 @@ class SessionAuth:
             return
         self._closed = True
         if self._token is not None and self._session_uri is not None:
-            try:
-                self._http.request(
-                    "DELETE",
-                    self._session_uri,
-                    headers={"Accept": "application/json", "X-Auth-Token": self._token},
-                )
-            except httpx.TransportError:
-                self._logger.info("redfish.session.delete_failed")
-            finally:
-                self._token = None
-                self._session_uri = None
+            # Re-validate at delete time: only a same-origin path may carry
+            # the token (SECURITY.md §7). A foreign/odd URI is never contacted.
+            delete_uri = self._same_origin_session_path(self._session_uri)
+            if delete_uri is not None:
+                try:
+                    self._http.request(
+                        "DELETE",
+                        delete_uri,
+                        headers={"Accept": "application/json", "X-Auth-Token": self._token},
+                    )
+                except httpx.TransportError:
+                    self._logger.info("redfish.session.delete_failed")
         self._token = None
         self._session_uri = None
 

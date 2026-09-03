@@ -26,6 +26,12 @@ Profiles (constructor ``SimulatorConfig`` or the live control endpoint):
 - ``auth_fail``: login is always rejected with 401;
 - ``slow_paginated``: 150 SEL entries served in pages of 20.
 
+``SimulatorConfig.absolute_links`` (control key ``absolute_links``) rewrites
+every path-only link the simulator emits (``@odata.id``, ``@odata.nextLink``,
+action ``target``, ``Location``, ``TaskMonitor``) into absolute same-origin
+URIs built from the request's own origin — a spec-legal style real managers
+use, which the client must accept.
+
 Failure injection (``POST /warden-sim/control {"failures": {...}}``):
 ``login_401``, ``reads_500``, ``reads_429``, ``reset_rejected_400``,
 ``reset_forbidden_403``, ``reset_task_fails``. Control also switches
@@ -113,6 +119,7 @@ class _SimulatorState:
             "vendor": self.cfg.vendor,
             "pagination": self.cfg.pagination,
             "task_duration_seconds": self.cfg.task_duration_seconds,
+            "absolute_links": self.cfg.absolute_links,
             "failures": dict(self.failures),
             "media_hosts_required": self.cfg.media_hosts_required,
             "media_hosts": list(self.cfg.media_hosts),
@@ -142,6 +149,7 @@ class _SimulatorState:
                         task_duration_seconds=self.cfg.task_duration_seconds,
                         media_hosts_required=self.cfg.media_hosts_required,
                         media_hosts=self.cfg.media_hosts,
+                        absolute_links=self.cfg.absolute_links,
                     )
                     self.reset_dynamic()
             elif key == "vendor":
@@ -159,6 +167,8 @@ class _SimulatorState:
                     msg = "task_duration_seconds must be a positive number"
                     raise ValueError(msg)
                 self.cfg = _replace(self.cfg, task_duration_seconds=float(value))  # type: ignore[arg-type]
+            elif key == "absolute_links":
+                self.cfg = _replace(self.cfg, absolute_links=bool(value))  # type: ignore[arg-type]
             elif key == "failures":
                 if not isinstance(value, dict):
                     msg = "failures must be an object"
@@ -182,6 +192,26 @@ def _replace(cfg: SimulatorConfig, **changes: object) -> SimulatorConfig:
 
 
 # -- responses --------------------------------------------------------------
+
+# Payload keys whose values are device-relative URI paths; with
+# ``absolute_links`` these are rewritten into absolute same-origin hrefs.
+_ABSOLUTE_LINK_KEYS = frozenset({"@odata.id", "@odata.nextLink", "target", "TaskMonitor"})
+
+
+def _absolutize_payload(value: object, origin: str) -> object:
+    """Deep-copy ``value`` rewriting path-only link values to absolute URIs."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                f"{origin}{item}"
+                if key in _ABSOLUTE_LINK_KEYS and isinstance(item, str) and item.startswith("/")
+                else _absolutize_payload(item, origin)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_absolutize_payload(item, origin) for item in value]
+    return value
 
 
 def _error_body(code: str, message: str, extended: list[dict[str, str]] | None = None) -> dict[str, Any]:
@@ -243,6 +273,7 @@ class _Request:
     path: str
     query: dict[str, list[str]]
     headers: dict[str, str]
+    scheme: str = "http"
     body: object | None = None
 
 
@@ -278,6 +309,27 @@ class _Dispatcher:
     # routing ----------------------------------------------------------------
 
     def handle(self, request: _Request) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
+        """Route the request, then rewrite links to absolute same-origin URIs when configured."""
+        return self._apply_absolute_links(request, self._route(request))
+
+    def _apply_absolute_links(
+        self,
+        request: _Request,
+        response: tuple[int, dict[str, Any] | None, dict[str, str]],
+    ) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
+        if not self.state.cfg.absolute_links:
+            return response
+        host = request.headers.get("host") or "localhost"
+        origin = f"{request.scheme}://{host}"
+        status, payload, headers = response
+        rewritten_payload = _absolutize_payload(payload, origin) if isinstance(payload, dict) else payload
+        rewritten_headers = {
+            key: (f"{origin}{value}" if key.lower() == "location" and value.startswith("/") else value)
+            for key, value in headers.items()
+        }
+        return status, rewritten_payload, rewritten_headers  # type: ignore[return-value]
+
+    def _route(self, request: _Request) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
         """Return (status, json payload, extra headers) for an HTTP request."""
         path = "/" + request.path.strip("/") if request.path.strip("/") else "/"
         state = self.state
@@ -719,6 +771,7 @@ class SimulatorASGI:
             path=unquote(path),
             query=parse_qs(query_string, keep_blank_values=True),
             headers=headers,
+            scheme=str(scope.get("scheme", "http")),
             body=body,
         )
         status, payload, extra_headers = self._dispatcher.handle(request)

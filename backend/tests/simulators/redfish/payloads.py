@@ -48,6 +48,10 @@ class SimulatorConfig:
     task_duration_seconds: float = 0.15
     media_hosts_required: bool = False
     media_hosts: tuple[str, ...] = ()
+    # Emit absolute same-origin URIs (http://host:port/redfish/v1/...) in
+    # @odata.id/@odata.nextLink/target/Location/TaskMonitor instead of bare
+    # paths — a spec-legal style some real managers use (client must accept).
+    absolute_links: bool = False
 
     def __post_init__(self) -> None:
         if self.profile not in PROFILES:

@@ -101,6 +101,46 @@ class TestHttpMapping:
         assert err.message_ids == ("Base.1.13.ActionNotSupported",)
 
     @pytest.mark.unit
+    def test_action_not_supported_400_matches_any_base_registry_version(self) -> None:
+        # The mapping matches by MessageId NAME inside the Base registry
+        # family: a device speaking any Base.1.x version (here Base.1.0 and
+        # a Base.1.5 never enumerated) must still map — not degrade to
+        # validation_failed.
+        for message_id in (
+            "Base.1.0.ActionNotSupported",
+            "Base.1.13.ActionNotSupported",
+            "Base.1.5.ActionNotSupported",
+        ):
+            err = map_http_error(400, base_error_body(message_ids=(message_id,)), context="action")
+            assert err.code == "unsupported_capability"
+
+    @pytest.mark.unit
+    def test_action_unknown_and_property_unknown_match_any_base_version(self) -> None:
+        for message_id in ("Base.1.11.ActionUnknown", "Base.1.9.PropertyUnknown"):
+            err = map_http_error(400, base_error_body(message_ids=(message_id,)), context="action")
+            assert err.code == "unsupported_capability"
+
+    @pytest.mark.unit
+    def test_non_base_registry_action_name_is_not_mis_mapped(self) -> None:
+        # Base-registry matching is intentional: a vendor registry naming its
+        # own ActionNotSupported is not the Base message and stays validation_failed.
+        err = map_http_error(
+            400,
+            base_error_body(message_ids=("OemVendor.1.0.ActionNotSupported",)),
+            context="action",
+        )
+        assert err.code == "validation_failed"
+
+    @pytest.mark.unit
+    def test_parameter_failure_in_other_base_version_stays_validation_failed(self) -> None:
+        err = map_http_error(
+            400,
+            base_error_body(message_ids=("Base.1.0.ActionParameterMissing",)),
+            context="action",
+        )
+        assert err.code == "validation_failed"
+
+    @pytest.mark.unit
     def test_action_parameter_400_maps_validation_failed(self) -> None:
         body = base_error_body(message_ids=("Base.1.13.ActionParameterMissing",))
         assert map_http_error(400, body, context="action").code == "validation_failed"

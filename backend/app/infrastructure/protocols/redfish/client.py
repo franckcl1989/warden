@@ -15,7 +15,9 @@ Behaviour contract:
   429 honors Retry-After once — never on POST actions (a 401-triggered
   re-login retry is NOT a retry of a failed action: a 401 proves the device
   never executed the request);
-- every URL must share the client origin (SECURITY.md §7);
+- every URL must share the client origin (SECURITY.md §7): ``base_origin``
+  (``scheme://netloc`` derived from the injected http client's base URL) is
+  public so the parser can validate absolute same-origin ``@odata.id`` links;
 - response JSON decode failures are ``protocol_error`` (stage parse);
 - auth headers come from the session/basic/none strategies in ``session.py``;
   tokens, credentials and device body text are never logged.
@@ -99,6 +101,11 @@ def _body_of(response: httpx.Response) -> object | None:
     return decoded
 
 
+def _origin_of(base_url: str) -> str:
+    parts = urlsplit(base_url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 class RedfishClient:
     """Sync Redfish client over an injected, policy-managed httpx client."""
 
@@ -121,6 +128,7 @@ class RedfishClient:
         if endpoint is not None:
             _validate_endpoint_matches(http, endpoint, base_path)
         self._http = http
+        self.base_origin = _origin_of(str(http.base_url))
         self._base_path = base_path
         self._logger = logger if logger is not None else structlog.get_logger("warden.protocols.redfish")
         self._backoff = backoff if backoff is not None else _default_backoff
@@ -236,9 +244,7 @@ class RedfishClient:
 
     def _normalize_href(self, url: str) -> str:
         if url.startswith(("http://", "https://")):
-            parts = urlsplit(url)
-            base = urlsplit(str(self._http.base_url))
-            if (parts.scheme, parts.netloc) != (base.scheme, base.netloc):
+            if _origin_of(url) != self.base_origin:
                 raise RedfishError(
                     "protocol_error",
                     "refusing a device link outside the client origin",

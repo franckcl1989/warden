@@ -166,6 +166,23 @@ class TestConstruction:
             client.get("Systems/1")
 
     @pytest.mark.unit
+    def test_base_origin_is_derived_from_the_http_base_url(self) -> None:
+        builder = Build({})
+        client = builder.client()
+        # The parser (parse.py _absolute_url) relies on this public attribute
+        # to accept spec-legal absolute same-origin @odata.id links.
+        assert client.base_origin == BMC
+
+    @pytest.mark.unit
+    def test_absolute_same_origin_url_is_accepted_and_routed_by_path(self) -> None:
+        builder = Build({("GET", f"{BASE}/Systems/1"): lambda r: system_ok()})
+        client = builder.client()
+        resource = client.get(f"{BMC}{BASE}/Systems/1")
+        assert resource is not None
+        assert resource.schema_family == "ComputerSystem"
+        assert builder.recorder.requests[0]["path"] == f"{BASE}/Systems/1"
+
+    @pytest.mark.unit
     def test_cross_origin_absolute_url_is_rejected(self) -> None:
         builder = Build({})
         client = builder.client()
