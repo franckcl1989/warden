@@ -124,14 +124,20 @@ class TestProbeAndDiscover:
             assert row.discovery_method == ADAPTER_KEY and row.reason_code is None
         # Wired CLI/SSH keys without a declared SSH endpoint are honest
         # not_configured; the M5T4 terminal key (console.ssh.open) likewise;
-        # still-unwired keys (console.web.open) stay unsupported.
+        # M5T5 console.web.open without a declared Web origin is
+        # not_configured (web_console_unconfigured); still-unwired keys
+        # stay unsupported.
         wired = HuaweiVrpAccessAdapter().ssh_operation_keys
         terminal = HuaweiVrpAccessAdapter().terminal_console_keys
+        web_console = HuaweiVrpAccessAdapter().web_console_keys
         for key in ACCESS_OPERATION_KEYS:
             row = rows[key]
             if key in wired or key in terminal:
                 assert row.support_state == "not_configured", (key, row.detail)
                 assert row.reason_code == "ssh_unconfigured", (key, row.detail)
+            elif key in web_console:
+                assert row.support_state == "not_configured", (key, row.detail)
+                assert row.reason_code == "web_console_unconfigured", (key, row.detail)
             else:
                 assert row.support_state == "unsupported" and row.reason_code == "mapping_missing", key
 

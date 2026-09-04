@@ -26,6 +26,8 @@
 - `MetricChart.vue`：ECharts 趋势图（时间范围 1h–180d、实际分辨率、缺口留空、
   最多 8 条序列、无自造参考线、文本摘要无障碍，UI_SPEC §7.3/§12）；
 - `ComponentTable.vue`：组件当前态列表（kind/status/native_id/properties）；
+- `PortTable.vue`（M5T5）：端口/部件行表（名称与关键状态列固定，每行最新
+  指标 chips —— bps 速率带单位 bit/s；观测缺失如实显示“尚无观测”）；
 - `EventTimeline.vue`：设备事件时间线（SEL/DSM 日志/Trap/Syslog）；
 - `OperationTimeline.vue`：任务时间线（平台已接收/已发送设备/等待设备/验证/终态）；
 - `SensitiveFileLink.vue`：敏感文件授权下载链接（无权限显示明确原因）。

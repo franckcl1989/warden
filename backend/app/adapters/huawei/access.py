@@ -41,8 +41,12 @@ class HuaweiVrpAccessAdapter(HuaweiVrpAdapter):
     )
 
     #: M5T4 browser-terminal keys (ADR-007): ACCESS-ACT-04 has SSH + Web —
-    #: only console.ssh.open is a terminal; console.web.open stays unwired.
+    #: only console.ssh.open is a terminal; console.web.open is the M5T5
+    #: Web-management URL descriptor (ADR-006) pinned in ``web_console_keys``.
     terminal_console_keys: frozenset[str] = frozenset({"console.ssh.open"})
+
+    #: M5T5 Web-management console keys (ACCESS-ACT-04, ADR-006).
+    web_console_keys: frozenset[str] = frozenset({"console.web.open"})
 
     family_keys: dict[str, tuple[str, ...]] = {
         "system": ("system.cpu_percent", "system.memory_percent"),

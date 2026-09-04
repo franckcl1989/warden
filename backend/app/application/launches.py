@@ -60,13 +60,16 @@ PLT_09 = "PLT-09"
 
 # Capability key -> row protocol (contracts/operations.json channel=launch
 # profiles). Terminal keys (console.ssh.open / console.telnet.open) issue
-# one-time browser-terminal tickets (M5T4, ADR-007); unknown launch-channel
+# one-time browser-terminal tickets (M5T4, ADR-007); web keys
+# (console.dsm.open, console.web.open) issue one-time URL descriptors that
+# GET /launches/{id} consumes (M4T3 / M5T5, ADR-006); unknown launch-channel
 # keys are refused rather than guessed (AGENTS.md: 不得自行猜测).
 LAUNCH_PROTOCOL_BY_KEY: dict[str, str] = {
     "console.kvm.open": "kvm",
     "console.dsm.open": "web",  # NAS-ACT-02 (M4T3)
     "console.ssh.open": "ssh",  # CORE-ACT-03 / ACCESS-ACT-04 (M5T4)
     "console.telnet.open": "telnet",  # CORE-ACT-03 (M5T4)
+    "console.web.open": "web",  # CORE-ACT-03 / ACCESS-ACT-04 (M5T5, ADR-006)
 }
 
 #: Terminal-ticket protocols: these launches return a WebSocket URL and are

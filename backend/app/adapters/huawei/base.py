@@ -591,6 +591,15 @@ class HuaweiVrpAdapter:
             # ``telnet_port`` is the interactive terminal target port.
             "telnet": {"type": "boolean"},
             "telnet_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            # M5T5 Web-management origin for console.web.open (CORE-ACT-03 /
+            # ACCESS-ACT-04, ADR-006): the operator EXPLICITLY declares the
+            # device web console's scheme + port; the launch descriptor is
+            # built from that origin only — never a guessed default port
+            # (SNMP/SSH tell us nothing about the web surface). HTTP is a
+            # weak protocol: the descriptor carries no credentials and the
+            # UI keeps showing the plaintext risk (SECURITY.md §6).
+            "web_scheme": {"type": "string", "enum": ["https", "http"]},
+            "web_port": {"type": "integer", "minimum": 1, "maximum": 65535},
             "verify_tls": {"type": "boolean"},
             EVENT_SOURCE_IPS_CONFIG_KEY: dict(EVENT_SOURCE_IPS_SCHEMA),
         },
@@ -606,7 +615,9 @@ class HuaweiVrpAdapter:
     # shared domain planner (rows the discovery declared supported), and the
     # not-yet-wired keys stay honest unsupported_capability — never a stub
     # success. The browser-terminal keys (console.ssh.open /
-    # console.telnet.open) are wired since M5T4 (ADR-007).
+    # console.telnet.open) are wired since M5T4 (ADR-007); the Web
+    # management keys (console.web.open) since M5T5 (ADR-006 URL
+    # descriptor).
 
     #: Connection-config keys of the M5T4 Telnet gates (SECURITY.md §6
     #: denylist semantics; the ``telnet`` key change fires the
@@ -615,14 +626,25 @@ class HuaweiVrpAdapter:
     TELNET_PORT_CONFIG_KEY = "telnet_port"
     SSH_PORT_CONFIG_KEY = "ssh_port"
     SSH_FINGERPRINT_CONFIG_KEY = "ssh_host_fingerprint"
+    #: Web-management origin keys of the M5T5 console.web.open gate: the
+    #: operator-declared web console scheme/port (see connection_schema).
+    WEB_SCHEME_CONFIG_KEY = "web_scheme"
+    WEB_PORT_CONFIG_KEY = "web_port"
     #: credentials sections the terminal paths consume.
     SSH_CREDENTIALS_KEY = "ssh"
     TELNET_CREDENTIALS_KEY = "telnet"
 
     #: Browser-terminal console keys of each adapter (M5T4, ADR-007): the
-    #: subclass pins the keys its device type declares; console.web.open is
-    #: NOT in this milestone (honest mapping_missing below).
+    #: subclass pins the keys its device type declares; the Web-console
+    #: keys are pinned separately in ``web_console_keys`` (M5T5).
     terminal_console_keys: frozenset[str] = frozenset()
+
+    #: Web-management console keys of each adapter (M5T5, ADR-006): the
+    #: subclass pins the keys its device type declares. The launch
+    #: descriptor is the operator-declared http(s) origin — never
+    #: credentials, never a guessed port (console.web.open is NOT a
+    #: terminal key: the browser opens the vendor page itself).
+    web_console_keys: frozenset[str] = frozenset()
 
     def plan_operation(self, snapshot: DeviceSnapshot, request: OperationRequest) -> OperationPlan:
         return plan_operation_domain(snapshot, request)
@@ -647,17 +669,24 @@ class HuaweiVrpAdapter:
         return ops.verify_operation_method(session, plan, result, self.certified_models)
 
     def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor:
-        """Terminal launch tickets for the browser terminal (M5T4, ADR-007).
+        """Remote-connection launch descriptors (M5T4 ADR-007 / M5T5 ADR-006).
 
         console.ssh.open / console.telnet.open return a ``kind=terminal``
         descriptor: the platform creates NO vendor URL — the WebSocket
         terminal dials the device itself (SSH with the pinned fingerprint,
-        or Telnet after BOTH gates). The checks here re-verify the device
-        config LIVE at issue time (a capability row alone can be stale):
-        missing endpoint/credentials/fingerprint/opt-in is an honest
-        ``not_configured`` — never a fabricated ticket (operations.json
-        verification.ticket_and_handshake). console.web.open stays a later
-        milestone (honest ``unsupported_capability``).
+        or Telnet after BOTH gates). console.web.open returns a
+        ``kind=url`` descriptor built ONLY from the operator-declared web
+        origin (``connection_config.web_scheme`` + ``web_port``): the
+        browser opens the device's own web management page, never
+        credentials and never a guessed default port (the SNMP/SSH
+        monitoring paths prove nothing about the web surface — a URL is
+        only produced when the operator declares it, DEVICE_ADAPTERS.md
+        §6.1). The checks here re-verify the device config LIVE at issue
+        time (a capability row alone can be stale): missing endpoint /
+        credentials / fingerprint / opt-in / web origin is an honest
+        ``not_configured`` — never a fabricated ticket or URL
+        (operations.json verification.ticket_and_handshake /
+        launch_target_validation).
         """
         if capability == "console.ssh.open":
             self._require_ssh_terminal_config(session)
@@ -673,9 +702,28 @@ class HuaweiVrpAdapter:
                 display_hint="Telnet 终端（弱协议，明文传输）",
                 vendor_session_ref=None,
             )
+        if capability == "console.web.open":
+            scheme, port = self._require_web_console_config(session)
+            default_port = 443 if scheme == "https" else 80
+            authority = (
+                session.management_endpoint
+                if port == default_port
+                else f"{session.management_endpoint}:{port}"
+            )
+            hint = (
+                "设备 Web 管理界面（HTTPS，无凭据注入）"
+                if scheme == "https"
+                else "设备 Web 管理界面（HTTP 明文传输 — 界面持续提示风险，无凭据注入，SECURITY.md §6）"
+            )
+            return LaunchDescriptor(
+                kind="url",
+                url=f"{scheme}://{authority}",
+                display_hint=hint,
+                vendor_session_ref=None,
+            )
         raise AdapterError(
             "unsupported_capability",
-            f"本适配器未实现该能力的启动描述符 {capability}（console.web.open 在后续里程碑交付）",
+            f"本适配器未实现该能力的启动描述符 {capability}",
             stage="launch",
         )
 
@@ -751,6 +799,45 @@ class HuaweiVrpAdapter:
                 "console.telnet.open 需要 Telnet 凭据",
                 stage="launch",
             )
+
+    def _require_web_console_config(self, session: DeviceSession) -> tuple[str, int]:
+        """Live Web-console gate: an EXPLICIT origin (scheme + port).
+
+        The web console URL is built only from this declaration — no
+        default-port guessing (a monitoring SNMP/SSH device config proves
+        nothing about the web surface; a fabricated homepage URL would be a
+        fake success). Raises ``not_configured`` when the origin is
+        missing/unusable; returns ``(scheme, port)`` otherwise.
+        """
+        config = dict(session.connection_config)
+        scheme = config.get(self.WEB_SCHEME_CONFIG_KEY)
+        port = config.get(self.WEB_PORT_CONFIG_KEY)
+        if scheme not in ("https", "http"):
+            raise AdapterError(
+                "not_configured",
+                f"设备未声明 Web 管理协议（connection_config.{self.WEB_SCHEME_CONFIG_KEY}，"
+                "https/http）；console.web.open 需要显式声明 Web 管理入口",
+                stage="launch",
+            )
+        if not isinstance(port, int) or not (1 <= port <= 65535):
+            raise AdapterError(
+                "not_configured",
+                f"设备未声明 Web 管理端口（connection_config.{self.WEB_PORT_CONFIG_KEY}）；"
+                "console.web.open 需要显式声明 Web 管理入口",
+                stage="launch",
+            )
+        endpoint = session.management_endpoint
+        if (
+            not isinstance(endpoint, str)
+            or not endpoint
+            or any(marker in endpoint for marker in ("://", "/", "@", " "))
+        ):
+            raise AdapterError(
+                "validation_failed",
+                "管理地址不是可用的主机名/IP（启动描述符无法构造，不做地址拼接猜测）",
+                stage="launch",
+            )
+        return scheme, port
 
     @property
     def implemented_metric_keys(self) -> frozenset[str]:
@@ -1149,7 +1236,7 @@ class HuaweiVrpAdapter:
         connection_config: Mapping[str, object],
         credentials: Mapping[str, object] | None,
     ) -> tuple[str, str | None, str]:
-        """One operation key row: wired keys follow the SSH/Telnet terminal
+        """One operation key row: wired keys follow the SSH/Telnet/Web
         configuration; unwired keys stay unsupported.
 
         The wired keys carry the [sim] basis in the detail: the simulator
@@ -1158,12 +1245,14 @@ class HuaweiVrpAdapter:
         """
         if key in self.terminal_console_keys:
             return self._terminal_console_capability(requirement_id, key, connection_config, credentials)
+        if key in self.web_console_keys:
+            return self._web_console_capability(requirement_id, key, connection_config)
         if key not in self.ssh_operation_keys:
             return (
                 "unsupported",
                 "mapping_missing",
                 f"{requirement_id} 的操作键 {key} 的适配路径尚未接线"
-                "（transceiver.diagnose 与 console.web.open 等在后续里程碑交付；"
+                "（transceiver.diagnose 等在后续里程碑交付；"
                 "适配器侧缺口，不是设备不支持）",
             )
         ssh = credentials.get(self.SSH_CREDENTIALS_KEY) if credentials is not None else None
@@ -1279,7 +1368,45 @@ class HuaweiVrpAdapter:
             "unsupported",
             "mapping_missing",
             f"{requirement_id} 的连接键 {key} 的适配路径尚未接线"
-            "（console.web.open 在后续里程碑交付；适配器侧缺口，不是设备不支持）",
+            "（适配器侧缺口，不是设备不支持）",
+        )
+
+    def _web_console_capability(
+        self,
+        requirement_id: str,
+        key: str,
+        connection_config: Mapping[str, object],
+    ) -> tuple[str, str | None, str]:
+        """One Web-management console key row (M5T5, ADR-006).
+
+        console.web.open is supported only when the operator EXPLICITLY
+        declared the web origin (``web_scheme`` + ``web_port``): the
+        launch descriptor is built from that declaration alone — the SNMP
+        monitoring path cannot probe the browser-side web surface, so a
+        device answer is never claimed for it. HTTP origins stay allowed
+        with an explicit plaintext-risk note (SECURITY.md §6).
+        """
+        del requirement_id
+        scheme = connection_config.get(self.WEB_SCHEME_CONFIG_KEY)
+        port = connection_config.get(self.WEB_PORT_CONFIG_KEY)
+        if scheme not in ("https", "http") or not isinstance(port, int):
+            return (
+                "not_configured",
+                "web_console_unconfigured",
+                f"console.web.open 未声明 Web 管理入口（connection_config."
+                f"{self.WEB_SCHEME_CONFIG_KEY} + {self.WEB_PORT_CONFIG_KEY}）；"
+                "启动地址只从该声明生成，不猜测设备 Web 端口",
+            )
+        note = (
+            "；HTTP 明文传输 — 打开前界面持续提示风险（SECURITY.md §6）"
+            if scheme == "http"
+            else ""
+        )
+        return (
+            "supported",
+            None,
+            f"console.web.open 的 Web 管理启动描述符已接线（{scheme}://…:{port}，"
+            f"无凭据注入 — ADR-006；型号/VRP 真机认证待补 — ADR-018）{note}",
         )
 
     def _family_answered(self, family: str, evidence: dict[str, object]) -> bool:

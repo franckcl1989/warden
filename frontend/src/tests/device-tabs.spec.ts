@@ -91,22 +91,56 @@ describe('设备详情页签配置（PRODUCT_DESIGN §5）', () => {
     ]);
   });
 
-  it('核心交换机：端口/光模块/二层与日志（PRODUCT_DESIGN §5.4）', () => {
-    const titles = deviceTabsFor('core_switch').map((tab) => tab.title);
+  it('核心交换机：端口/光模块使用端口表视图并承载 §5.4 需求映射（M5T5）', () => {
+    const tabs = deviceTabsFor('core_switch');
+    const titles = tabs.map((tab) => tab.title);
     expect(titles).toContain('端口');
     expect(titles).toContain('光模块');
     expect(titles).toContain('二层与日志');
-    const layer2 = deviceTabsFor('core_switch').find((tab) => tab.id === 'layer2-logs');
-    expect(
-      layer2?.sections.some((section) => section.eventTypes?.includes('event.port_flap')),
-    ).toBe(true);
+    // PRODUCT_DESIGN §5.4 端口：管理/运行状态、流量、CRC、错误和丢包（CORE-MON-02）
+    const ports = tabs.find((tab) => tab.id === 'ports');
+    expect(ports?.sections).toEqual([
+      { kind: 'ports', requirementIds: ['CORE-MON-02'], kinds: ['interface'] },
+    ]);
+    // §5.4 光模块：收发光功率、温度、电压和电流（CORE-MON-03）
+    const transceivers = tabs.find((tab) => tab.id === 'transceivers');
+    expect(transceivers?.sections).toEqual([
+      { kind: 'ports', requirementIds: ['CORE-MON-03'], kinds: ['transceiver'] },
+    ]);
+    // §5.4 二层与日志：环路/广播风暴/STP（CORE-MON-05）+
+    // 端口震荡/重启/认证失败事件（CORE-MON-06）
+    const layer2 = tabs.find((tab) => tab.id === 'layer2-logs');
+    expect(layer2?.sections).toEqual([
+      { kind: 'metric-groups', requirementIds: ['CORE-MON-05'] },
+      {
+        kind: 'events',
+        eventTypes: ['event.port_flap', 'event.device_restart', 'event.auth_failure'],
+      },
+    ]);
   });
 
-  it('接入交换机：端口/PoE/光模块（PRODUCT_DESIGN §5.5）', () => {
-    const titles = deviceTabsFor('access_switch').map((tab) => tab.title);
+  it('接入交换机：端口/PoE/光模块视图与 §5.5 需求映射（M5T5）', () => {
+    const tabs = deviceTabsFor('access_switch');
+    const titles = tabs.map((tab) => tab.title);
     expect(titles).toContain('端口');
     expect(titles).toContain('PoE');
     expect(titles).toContain('光模块');
+    // §5.5 端口：状态、流量和错误（ACCESS-MON-02）
+    const ports = tabs.find((tab) => tab.id === 'ports');
+    expect(ports?.sections).toEqual([
+      { kind: 'ports', requirementIds: ['ACCESS-MON-02'], kinds: ['interface'] },
+    ]);
+    // §5.5 PoE：端口供电、单端口功耗与总功耗（ACCESS-MON-03）——
+    // 设备级摘要 + poe_port 行
+    const poe = tabs.find((tab) => tab.id === 'poe');
+    expect(poe?.sections).toEqual([
+      { kind: 'poe', requirementIds: ['ACCESS-MON-03'], kinds: ['poe_port'] },
+    ]);
+    // §5.5 光模块：上联口光功率（ACCESS-MON-05）
+    const transceivers = tabs.find((tab) => tab.id === 'transceivers');
+    expect(transceivers?.sections).toEqual([
+      { kind: 'ports', requirementIds: ['ACCESS-MON-05'], kinds: ['transceiver'] },
+    ]);
   });
 
   it('监控需求 ID 从生成注册表按类型推导', () => {

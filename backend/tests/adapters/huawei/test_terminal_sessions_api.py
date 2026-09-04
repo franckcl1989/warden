@@ -5,17 +5,19 @@ onboarding + asyncssh SSH server with telnet variant): console.ssh.open /
 console.telnet.open tickets (gates, WS url), the WebSocket lifecycle
 (ticket single-use + expiry + user binding + device-version binding,
 concurrency caps, idle/max bounds, close endpoint, audit, and the
-never-log-content rule with a canary string).
+never-log-content rule with a canary string). ``TestWebConsoleLaunchSlice``
+additionally covers the M5T5 console.web.open URL-descriptor launch
+(declared web origin, single-use consume, audit).
 
 Refusal-delivery contract (M5T4 review fix): the endpoint accepts FIRST
 and refuses ticket/gate/dial failures POST-accept with one machine JSON
 frame ``{"type":"refused","code":..,"reason":..}`` followed by the close
-code �?a real ASGI server cannot deliver close codes before the 101
+code — a real ASGI server cannot deliver close codes before the 101
 upgrade (a pre-accept close is an HTTP 403 handshake denial). The
 TestClient cases here assert the frame + code as the browser sees them;
 ``TestRealAsgiRefusalDelivery`` repeats the refusals over a REAL uvicorn
 server (loopback TCP) to pin the delivery contract at the ASGI boundary.
-The simulators are TEST DEVICES �?never hardware evidence
+The simulators are TEST DEVICES — never hardware evidence
 (tests/simulators/vrp/README.md).
 """
 
@@ -1670,4 +1672,141 @@ class TestRealAsgiRefusalDelivery:
                 ):
                     pass  # pragma: no cover - the handshake must be denied
             assert excinfo.value.response.status_code == 403
+
+
+class TestWebConsoleLaunchSlice:
+    """M5T5 console.web.open end-to-end over the real API + real PostgreSQL.
+
+    The device is onboarded with the operator-declared web origin
+    (web_scheme/web_port in connection_config); the launch issues a
+    one-time URL descriptor that GET /launches/{id} consumes exactly once
+    (ADR-006: browser-side page, no credentials, no guessed port). psql
+    evidence: launch_sessions lifecycle + launch.create / launch.consume
+    audit rows. No web server exists in the rig — the descriptor targets
+    the declared origin and the adapter never claims a device-side web
+    answer it cannot probe over SNMP (honest declaration-driven URL).
+    """
+
+    def test_web_console_launch_issues_consumes_once_and_audits(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        with _rig_env(
+            switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch, telnet_enabled=False
+        ) as (rig, snmp_handle, vrp, http):
+            web_config: dict[str, object] = {
+                "web_scheme": "https",
+                "web_port": 8443,
+            }
+            device_id = _onboarded_id(
+                http,
+                name="web-console",
+                snmp_handle=snmp_handle,
+                vrp_handle=vrp,
+                connection_config=web_config,
+            )
+            # The capability row flipped supported at onboarding (declared
+            # origin) with the honest requirement map.
+            capabilities = http.get(f"{API}/devices/{device_id}/capabilities")
+            assert capabilities.status_code == 200
+            by_key = {item["capability_key"]: item for item in capabilities.json()["items"]}
+            row = by_key["console.web.open"]
+            assert row["support_state"] == "supported", row
+            assert row["requirement_id"] == "CORE-ACT-03"
+
+            csrf = _csrf(http)
+            created = _launch(http, csrf, device_id, "console.web.open")
+            assert created.status_code == 201, created.text
+            body = created.json()
+            launch_id = body["launch_id"]
+            # URL-kind tickets consume through GET /launches/{id} (the SPA
+            # navigates to this single-use same-origin URL) — NOT the
+            # terminal WS path.
+            assert body["url"].endswith(f"/api/v1/launches/{launch_id}")
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(launch_id)
+            ) == "issued"
+            assert rig.scalar(
+                "SELECT protocol FROM launch_sessions WHERE id = :id", id=uuid.UUID(launch_id)
+            ) == "web"
+
+            consumed = http.get(
+                f"{API}/launches/{launch_id}", headers={"Accept": "application/json"}
+            )
+            assert consumed.status_code == 200, consumed.text
+            payload = consumed.json()
+            descriptor = payload["descriptor"]
+            # The declared origin, default-port-free and WITHOUT credentials.
+            assert descriptor["kind"] == "url"
+            assert descriptor["url"] == "https://127.0.0.1:8443"
+            assert "password" not in descriptor["url"]
+            assert payload["capability_key"] == "console.web.open"
+            # Single-use: the second read is a uniform 404.
+            again = http.get(f"{API}/launches/{launch_id}", headers={"Accept": "application/json"})
+            assert again.status_code == 404
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(launch_id)
+            ) == "consumed"
+
+            # A device whose web origin is REMOVED afterwards goes through
+            # the launch gate honestly: re-probe + PATCH the SAME device
+            # without web_scheme/web_port -> the launch is refused
+            # (capability or live adapter gate) and NO new row is created.
+            config_without_web: dict[str, object] = {
+                "snmp_version": "v3",
+                "port": int(snmp_handle.port),
+                "ssh_port": int(vrp.port),
+                "ssh_host_fingerprint": vrp.host_fingerprint,
+            }
+            probe = http.post(
+                f"{API}/device-probes",
+                json={
+                    "device_type": "core_switch",
+                    "adapter_key": CORE_ADAPTER_KEY,
+                    "management_endpoint": SIM_HOST,
+                    "connection_config": config_without_web,
+                    "credentials": _credentials(),
+                },
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert probe.status_code == 200, probe.text
+            probe_body = probe.json()
+            assert probe_body["ok"] is True, probe_body
+            current_version = rig.scalar(
+                "SELECT version FROM devices WHERE id = :id", id=uuid.UUID(device_id)
+            )
+            assert current_version is not None
+            patched = http.patch(
+                f"{API}/devices/{device_id}",
+                json={
+                    "connection_config": config_without_web,
+                    "credentials": _credentials(),
+                    "probe_token": probe_body["probe_token"],
+                },
+                headers={
+                    "X-CSRF-Token": csrf,
+                    "If-Match": str(current_version),
+                },
+            )
+            assert patched.status_code == 200, patched.text
+            refused = _launch(http, csrf, device_id, "console.web.open")
+            assert refused.status_code == 422
+            error = refused.json()["error"]
+            assert error["code"] == "not_configured"
+            assert error["details"]["capability_key"] == "console.web.open"
+            assert (
+                rig.scalar(
+                    "SELECT count(*) FROM launch_sessions WHERE device_id = :id",
+                    id=uuid.UUID(device_id),
+                )
+                == 1
+            )
+
+            # Audit trail: one issue + one consume for the web launch; the
+            # refused launch writes no launch row and no launch audit.
+            issues = rig.audit_rows("launch.create")
+            consumes = rig.audit_rows("launch.consume")
+            assert len(issues) == 1 and len(consumes) == 1
+            assert issues[0]["resource_id"] == launch_id
+            assert consumes[0]["resource_id"] == launch_id
+            assert "console.web.open" in json.dumps(issues[0]["detail_jsonb"], ensure_ascii=False)
 

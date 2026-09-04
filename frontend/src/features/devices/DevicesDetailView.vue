@@ -32,6 +32,8 @@ import EventsPanel from '@/features/devices/panels/EventsPanel.vue';
 import MetricGroupsPanel from '@/features/devices/panels/MetricGroupsPanel.vue';
 import OperationsPanel from '@/features/devices/panels/OperationsPanel.vue';
 import OverviewPanel from '@/features/devices/panels/OverviewPanel.vue';
+import PoePanel from '@/features/devices/panels/PoePanel.vue';
+import PortsPanel from '@/features/devices/panels/PortsPanel.vue';
 import { deviceTabsFor } from '@/features/devices/deviceTabs';
 import type { ApiError } from '@/api/client';
 import { request } from '@/api/client';
@@ -403,6 +405,20 @@ function closeEdit(): void {
                   v-else-if="section.kind === 'components'"
                   :device-id="device.id"
                   :kinds="section.kinds"
+                />
+                <PortsPanel
+                  v-else-if="section.kind === 'ports'"
+                  :device-id="device.id"
+                  :requirement-ids="section.requirementIds ?? []"
+                  :kinds="section.kinds"
+                  :capabilities="capabilities ?? []"
+                />
+                <PoePanel
+                  v-else-if="section.kind === 'poe'"
+                  :device-id="device.id"
+                  :requirement-ids="section.requirementIds ?? []"
+                  :kinds="section.kinds"
+                  :capabilities="capabilities ?? []"
                 />
                 <EventsPanel
                   v-else-if="section.kind === 'events'"

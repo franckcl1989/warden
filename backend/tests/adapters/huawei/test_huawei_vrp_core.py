@@ -226,10 +226,12 @@ class TestDiscover:
             # Wired CLI/SSH keys without a declared SSH endpoint are honest
             # not_configured (ssh_unconfigured); M5T4 terminal console keys
             # without their config are not_configured too (ssh_unconfigured /
-            # telnet_credential_missing); still-unwired keys
-            # (console.web.open, transceiver.diagnose) stay unsupported.
+            # telnet_credential_missing); M5T5 console.web.open without a
+            # declared Web origin is not_configured (web_console_unconfigured);
+            # still-unwired keys (transceiver.diagnose) stay unsupported.
             wired = HuaweiVrpCoreAdapter().ssh_operation_keys
             terminal = HuaweiVrpCoreAdapter().terminal_console_keys
+            web_console = HuaweiVrpCoreAdapter().web_console_keys
             for key in CORE_OPERATION_KEYS:
                 row = rows[key]
                 if key in wired:
@@ -241,6 +243,13 @@ class TestDiscover:
                         "ssh_unconfigured",
                         "telnet_credential_missing",
                     ), (key, row.reason_code, row.detail)
+                elif key in web_console:
+                    assert row.support_state == "not_configured", (key, row.detail)
+                    assert row.reason_code == "web_console_unconfigured", (
+                        key,
+                        row.reason_code,
+                        row.detail,
+                    )
                 else:
                     assert row.support_state == "unsupported", (key, row.detail)
                     assert row.reason_code == "mapping_missing", (key, row.detail)
@@ -699,7 +708,79 @@ class TestCollectBoundary:
         with pytest.raises(AdapterError) as raised:
             adapter.create_launch(session, "console.telnet.open")
         assert raised.value.code == "not_configured"
-        # console.web.open stays a later milestone: honest unsupported.
+        # console.web.open (M5T5 URL descriptor): without a declared Web
+        # origin (web_scheme + web_port) -> honest not_configured, never a
+        # guessed homepage URL.
         with pytest.raises(AdapterError) as raised:
             adapter.create_launch(session, "console.web.open")
+        assert raised.value.code == "not_configured"
+        assert "web_scheme" in raised.value.message or "web_port" in raised.value.message
+        # Unknown launch capabilities stay unsupported_capability.
+        with pytest.raises(AdapterError) as raised:
+            adapter.create_launch(bare_session, "console.kvm.open")
         assert raised.value.code == "unsupported_capability"
+
+    def test_create_launch_web_console_descriptor_from_declared_origin(self) -> None:
+        """M5T5 console.web.open: the descriptor URL is built ONLY from the
+        operator-declared origin (web_scheme + web_port) — never guessed,
+        never carrying credentials (ADR-006); scheme-default ports are
+        omitted from the URL (standard URL formatting)."""
+        from app.adapters.huawei.core import HuaweiVrpCoreAdapter as Adapter
+        from app.domain.adapter import DeviceSession
+
+        adapter = Adapter()
+        base_session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="10.0.0.10",
+            connection_config={"web_scheme": "https", "web_port": 443},
+            credentials={},
+        )
+        descriptor = adapter.create_launch(base_session, "console.web.open")
+        assert descriptor.kind == "url"
+        assert descriptor.url == "https://10.0.0.10"
+        assert "HTTPS" in (descriptor.display_hint or "")
+        # An explicit non-default port stays visible.
+        session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="10.0.0.10",
+            connection_config={"web_scheme": "https", "web_port": 8443},
+            credentials={"ssh": {"username": "u", "password": "SECRET"}},
+        )
+        descriptor = adapter.create_launch(session, "console.web.open")
+        assert descriptor.url == "https://10.0.0.10:8443"
+        # Credentials never enter the descriptor URL.
+        assert "SECRET" not in descriptor.url
+        # HTTP origin stays allowed with an explicit plaintext warning.
+        http_session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="10.0.0.10",
+            connection_config={"web_scheme": "http", "web_port": 80},
+            credentials={},
+        )
+        descriptor = adapter.create_launch(http_session, "console.web.open")
+        assert descriptor.url == "http://10.0.0.10"
+        assert "HTTP" in (descriptor.display_hint or "")
+        assert "明文" in (descriptor.display_hint or "")
+
+    def test_discovery_web_console_rows_flip_supported_with_declared_origin(self, switch_agent) -> None:
+        """console.web.open rows: supported when the probe profile declares
+        the web origin; not_configured (web_console_unconfigured) otherwise
+        — the SNMP path never claims the browser-side web surface."""
+        with switch_agent(profile_key="core_s5732") as h:
+            from dataclasses import replace
+
+            profile = h.profile(adapter_key=ADAPTER_KEY)
+            profile = replace(
+                profile,
+                connection_config={
+                    **dict(profile.connection_config),
+                    "web_scheme": "https",
+                    "web_port": 8443,
+                },
+            )
+            discovery = HuaweiVrpCoreAdapter().discover(profile)
+            rows = {row.capability_key: row for row in discovery.capabilities}
+            row = rows["console.web.open"]
+            assert row.support_state == "supported", row.detail
+            assert row.reason_code is None
+            assert "ADR-006" in (row.detail or "")

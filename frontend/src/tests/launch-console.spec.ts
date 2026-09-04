@@ -289,6 +289,61 @@ describe('KVM 控制台启动流程（M3T4）', () => {
     expect(wrapper.text()).toContain('设备当前未提供可用的 DSM 管理界面');
   });
 
+  it('console.web.open：POST 携带 web 能力键并在新标签页打开（交换机 Web 管理，M5T5）', async () => {
+    const tab = fakeTab();
+    stubWindowOpen(() => tab);
+    const seen: Array<{ url: string; init?: RequestInit }> = [];
+    const { wrapper } = await mountDialog(
+      async (url, init) => {
+        seen.push({ url: String(url), init });
+        if (String(url).endsWith('/devices/d-1/launches')) {
+          return jsonResponse(CREATED, 201);
+        }
+        return jsonResponse({}, 404);
+      },
+      { key: 'console.web.open', requirementId: 'CORE-ACT-03' },
+    );
+
+    // 确认阶段提示 Web 管理界面并注明"不注入密码"。
+    expect(wrapper.text()).toContain('Web 管理界面');
+    expect(wrapper.text()).toContain('不注入密码');
+
+    await wrapper.get('[data-testid="launch-open"]').trigger('click');
+    await flushAll();
+
+    expect(seen).toHaveLength(1);
+    expect(JSON.parse(String(seen[0]!.init?.body))).toEqual({
+      capability_key: 'console.web.open',
+    });
+    expect(tab.location.href).toBe(CREATED.url);
+    expect(wrapper.text()).toContain('已在新标签页打开设备 Web 管理界面');
+    expect(tab.close).not.toHaveBeenCalled();
+  });
+
+  it('console.web.open 的 not_configured 显示指向 Web 管理入口的配置提示', async () => {
+    stubWindowOpen(() => fakeTab());
+    const { wrapper } = await mountDialog(
+      async (url) => {
+        if (String(url).endsWith('/devices/d-1/launches')) {
+          return jsonResponse(
+            errorBody('not_configured', '设备当前缺少必要配置，无法执行', {
+              capability_key: 'console.web.open',
+              missing: 'web_console_unconfigured：未声明 Web 管理入口',
+            }),
+            422,
+          );
+        }
+        return jsonResponse({}, 404);
+      },
+      { key: 'console.web.open', requirementId: 'ACCESS-ACT-04' },
+    );
+
+    await wrapper.get('[data-testid="launch-open"]').trigger('click');
+    await flushAll();
+
+    expect(wrapper.text()).toContain('未声明可用的 Web 管理入口');
+  });
+
   it('设备页签的 console.dsm.open 能力进入 launch 流程（console.* 路由）', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

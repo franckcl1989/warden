@@ -13,6 +13,8 @@ export type TabSectionKind =
   | 'overview'
   | 'metric-groups'
   | 'components'
+  | 'ports'
+  | 'poe'
   | 'events'
   | 'backup-status'
   | 'collection-runs'
@@ -22,7 +24,7 @@ export interface TabSection {
   kind: TabSectionKind;
   /** metric-groups：该分区渲染的 MON 需求 ID 列表。 */
   requirementIds?: string[];
-  /** components：默认按 kind 过滤（可清除）。 */
+  /** components / ports / poe：按 kind 过滤的组件行（端口表视图）。 */
   kinds?: string[];
   /** events：可选事件类型过滤（如交换机关键日志）。 */
   eventTypes?: string[];
@@ -112,16 +114,17 @@ const CORE_EXTRA: DeviceTabDef[] = [
     id: 'ports',
     title: '端口',
     sections: [
-      { kind: 'metric-groups', requirementIds: ['CORE-MON-02'] },
-      { kind: 'components', kinds: ['interface'] },
+      // 端口表视图（M5T5）：按行展示端口组件 + 每行最新指标 chips
+      // （管理/运行状态、流量、CRC、错误、丢包 — CORE-MON-02）。
+      { kind: 'ports', requirementIds: ['CORE-MON-02'], kinds: ['interface'] },
     ],
   },
   {
     id: 'transceivers',
     title: '光模块',
     sections: [
-      { kind: 'metric-groups', requirementIds: ['CORE-MON-03'] },
-      { kind: 'components', kinds: ['transceiver'] },
+      // 光模块表视图（M5T5）：CORE-MON-03（收发功率/温度/电压/电流）。
+      { kind: 'ports', requirementIds: ['CORE-MON-03'], kinds: ['transceiver'] },
     ],
   },
   {
@@ -139,21 +142,25 @@ const ACCESS_EXTRA: DeviceTabDef[] = [
     id: 'ports',
     title: '端口',
     sections: [
-      { kind: 'metric-groups', requirementIds: ['ACCESS-MON-02'] },
-      { kind: 'components', kinds: ['interface'] },
+      // 端口表视图（M5T5）：ACCESS-MON-02（状态/流量/错误）。
+      { kind: 'ports', requirementIds: ['ACCESS-MON-02'], kinds: ['interface'] },
     ],
   },
   {
     id: 'poe',
     title: 'PoE',
-    sections: [{ kind: 'metric-groups', requirementIds: ['ACCESS-MON-03'] }],
+    sections: [
+      // PoE 视图（M5T5）：设备级总功耗/预算/占比/告警摘要 +
+      // 逐端口供电与单端口功耗行（ACCESS-MON-03）。
+      { kind: 'poe', requirementIds: ['ACCESS-MON-03'], kinds: ['poe_port'] },
+    ],
   },
   {
     id: 'transceivers',
     title: '光模块',
     sections: [
-      { kind: 'metric-groups', requirementIds: ['ACCESS-MON-05'] },
-      { kind: 'components', kinds: ['transceiver'] },
+      // 光模块表视图（M5T5）：ACCESS-MON-05（上联口收发功率）。
+      { kind: 'ports', requirementIds: ['ACCESS-MON-05'], kinds: ['transceiver'] },
     ],
   },
 ];

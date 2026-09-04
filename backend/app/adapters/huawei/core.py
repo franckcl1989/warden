@@ -42,12 +42,14 @@ class HuaweiVrpCoreAdapter(HuaweiVrpAdapter):
         }
     )
 
-    #: M5T4 browser-terminal keys (ADR-007): SSH + Telnet terminal tickets;
-    #: console.web.open stays unwired (later milestone, M3T4-style URL
-    #: descriptor per ADR-006).
-    terminal_console_keys: frozenset[str] = frozenset(
-        {"console.ssh.open", "console.telnet.open"}
-    )
+    #: M5T4 browser-terminal keys (ADR-007): SSH + Telnet terminal tickets.
+    #: console.web.open is NOT a terminal: it is the M5T5 Web-management
+    #: URL descriptor (ADR-006) pinned in ``web_console_keys``.
+    terminal_console_keys: frozenset[str] = frozenset({"console.ssh.open", "console.telnet.open"})
+
+    #: M5T5 Web-management console keys (CORE-ACT-03, ADR-006): the launch
+    #: descriptor is the operator-declared http(s) origin, no credentials.
+    web_console_keys: frozenset[str] = frozenset({"console.web.open"})
 
     family_keys: dict[str, tuple[str, ...]] = {
         "system": ("system.cpu_percent", "system.memory_percent"),
