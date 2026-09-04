@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import datetime
 import hashlib
+import ipaddress
 import json
 import time
 import uuid
@@ -26,6 +27,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
+from app.adapters.huawei import ops as huawei_ops
 from app.adapters.huawei.access import HuaweiVrpAccessAdapter
 from app.adapters.huawei.base import AdapterError
 from app.adapters.huawei.core import CERTIFIED_CORE_MODELS, HuaweiVrpCoreAdapter
@@ -242,6 +244,70 @@ class TestRestart:
             assert verdict.succeeded is False and verdict.ambiguous is True
             assert time.monotonic() - started < 30
 
+    def test_restart_uptime_reset_without_offline_window_is_bounded_ambiguous(
+        self, monkeypatch
+    ) -> None:
+        """Regression: the missed-offline-window corner must NOT spin forever.
+
+        The reboot happens with no reachable offline window from the
+        observer's perspective (blip 0: the device is already back and the
+        uptime reset at the first reconnect). The verify loop must stop at
+        its budget and report ambiguous_result — never an unbounded
+        sleep/continue. The reconnect cap is overridden small so the test
+        completes quickly even without a tight task deadline.
+        """
+        monkeypatch.setattr(huawei_ops, "VRP_RECONNECT_CAP_SECONDS", 3.0)
+        with _core_vrp() as handle:
+            handle.device.knobs.restart_blip_seconds = 0.0
+            session = _session(handle)
+            plan = _plan(
+                "switch.huawei_vrp_core",
+                "core_switch",
+                "device.restart",
+                {},
+                _deadline_ctx(60),
+            )
+            pre = CORE_ADAPTER.preflight_operation(session, plan)
+            assert pre.ok is True, pre.detail
+            result = CORE_ADAPTER.execute_operation(session, plan, _progress_listener()[0])
+            assert result.ok and result.disconnected
+            started = time.monotonic()
+            verdict = CORE_ADAPTER.verify_operation(session, plan, result)
+            elapsed = time.monotonic() - started
+            assert verdict.succeeded is False and verdict.ambiguous is True
+            assert verdict.error_code == "ambiguous_result"
+            assert "no offline window" in (verdict.evidence.get("reason") or "")
+            # Bounded by the budget (~3 s), not a hang (the old code never
+            # returned here).
+            assert elapsed < 15
+
+    def test_ssh_target_hostname_without_resolved_ip_is_refused(self) -> None:
+        """SSRF guard parity with the DSM/Redfish boundary: the automation
+        SSH channel must never resolve a hostname inside the adapter. A
+        session whose management endpoint is a hostname and whose
+        ``resolved_ip`` is absent is refused before any connect attempt."""
+        with _core_vrp() as handle:
+            session = _session(handle)
+            session = replace(session, management_endpoint="switch-1.mgmt.example")
+            plan = _plan(
+                "switch.huawei_vrp_core",
+                "core_switch",
+                "device.restart",
+                {},
+                _deadline_ctx(60),
+            )
+            with pytest.raises(AdapterError) as raised:
+                CORE_ADAPTER.preflight_operation(session, plan)
+            assert raised.value.code == "not_configured"
+            assert "resolved_ip" in raised.value.message
+            # A resolved policy IP is the accepted form (same endpoint text,
+            # resolved_ip present): the refusal is about SSRF policy, not
+            # about the endpoint spelling.
+            session = replace(
+                session, resolved_ip=ipaddress.ip_address("127.0.0.1")
+            )
+            assert CORE_ADAPTER.preflight_operation(session, plan).ok is True
+
 
 # ---------------------------------------------------------------------------
 # interface.admin.set
@@ -261,6 +327,8 @@ class TestInterfaceAdmin:
             assert CORE_ADAPTER.preflight_operation(session, plan).ok
             result = CORE_ADAPTER.execute_operation(session, plan, _progress_listener()[0])
             assert result.ok
+            assert result.evidence["model"] == "S5732-H48XUM2CC"
+            assert result.evidence["vrp_version"] == "V200R021C10SPC600"
             verdict = CORE_ADAPTER.verify_operation(session, plan, result)
             assert verdict.succeeded, verdict.evidence
             assert verdict.evidence["admin_state_readback"] == "down"
@@ -273,6 +341,8 @@ class TestInterfaceAdmin:
                 _deadline_ctx(30),
             )
             result = CORE_ADAPTER.execute_operation(session, plan, _progress_listener()[0])
+            assert result.evidence["model"] == "S5732-H48XUM2CC"
+            assert result.evidence["vrp_version"] == "V200R021C10SPC600"
             verdict = CORE_ADAPTER.verify_operation(session, plan, result)
             assert verdict.succeeded
             assert verdict.evidence["admin_state_readback"] == "up"
@@ -314,6 +384,8 @@ class TestPoePortSet:
                 assert adapter.preflight_operation(session, plan).ok
                 result = adapter.execute_operation(session, plan, _progress_listener()[0])
                 assert result.ok
+                assert result.evidence["model"] == "S5735-L48P4S-A1"
+                assert result.evidence["vrp_version"] == "V200R019C10SPC600"
                 verdict = adapter.verify_operation(session, plan, result)
                 assert verdict.succeeded, verdict.evidence
                 assert verdict.evidence["poe_state_readback"] == mode

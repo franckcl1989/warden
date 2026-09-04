@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import re
 from collections.abc import Callable, Coroutine, Iterable, Mapping
 from dataclasses import dataclass
@@ -170,6 +171,22 @@ def _ssh_config_from(source: DeviceSession | ConnectionProfile) -> VrpSshConfig:
     config = dict(source.connection_config)
     credentials = dict(source.credentials)
     ssh = credentials.get("ssh")
+    host = (
+        source.resolved_ip
+        if source.resolved_ip is not None
+        else source.management_endpoint
+    )
+    # No hostname resolution inside the adapter: the platform's SSRF policy
+    # provides the resolved IP; without one the management endpoint ITSELF
+    # must be an IP literal (SECURITY.md §7 — DSM/Redfish boundary rule).
+    try:
+        ipaddress.ip_address(str(host))
+    except ValueError as exc:
+        raise AdapterError(
+            "not_configured",
+            "未提供经 SSRF 策略解析的管理地址（resolved_ip）",
+            stage="connect",
+        ) from exc
     raw_port = config.get("ssh_port")
     if not isinstance(ssh, dict) or not ssh.get("username") or not ssh.get("password"):
         raise AdapterError(
@@ -183,11 +200,6 @@ def _ssh_config_from(source: DeviceSession | ConnectionProfile) -> VrpSshConfig:
             "设备未配置 SSH 端口（connection_config.ssh_port）；CLI 操作需要 SSH 端口",
             stage="connect",
         )
-    host = (
-        source.resolved_ip
-        if source.resolved_ip is not None
-        else source.management_endpoint
-    )
     raw_fingerprint = config.get("ssh_host_fingerprint")
     fingerprint: str | None = None
     if isinstance(raw_fingerprint, str) and raw_fingerprint:
@@ -588,9 +600,9 @@ async def _execute_async(
         if key == "device.restart":
             return await _restart_execute(executor, plan, certified_models, progress)
         if key == "interface.admin.set":
-            return await _interface_execute(executor, plan, progress)
+            return await _interface_execute(executor, plan, certified_models, progress)
         if key == "poe.port.set":
-            return await _poe_execute(executor, plan, progress)
+            return await _poe_execute(executor, plan, certified_models, progress)
         if key in ("logs.diagnostic.collect", "logs.collect"):
             return await _log_execute(executor, plan, certified_models, progress, key)
         if key == "config.backup":
@@ -640,6 +652,7 @@ async def _restart_execute(
 async def _interface_execute(
     executor: VrpCliExecutor,
     plan: OperationPlan,
+    certified_models: tuple[str, ...],
     progress: OperationProgress,
 ) -> OperationResult:
     interface_id = plan.normalized_parameters.get("interface_id")
@@ -649,20 +662,23 @@ async def _interface_execute(
     template_key = "interface.undo_shutdown" if enabled else "interface.shutdown"
     _progress(progress, 40, f"设置接口管理状态（enabled={enabled}）")
     await executor.run_template(template_key, {"interface_id": interface_id})
+    identity = await _read_identity(executor, certified_models)
     _progress(progress, 80, "接口命令已下发")
-    return OperationResult(
-        ok=True,
-        evidence={
-            "interface_id": interface_id,
-            "enabled": enabled,
-            "template": template_evidence_for(template_key),
-        },
-    )
+    evidence: dict[str, object] = {
+        "interface_id": interface_id,
+        "enabled": enabled,
+        "template": template_evidence_for(template_key),
+    }
+    if identity is not None:
+        evidence["model"] = identity.model
+        evidence["vrp_version"] = identity.vrp_version
+    return OperationResult(ok=True, evidence=evidence)
 
 
 async def _poe_execute(
     executor: VrpCliExecutor,
     plan: OperationPlan,
+    certified_models: tuple[str, ...],
     progress: OperationProgress,
 ) -> OperationResult:
     interface_id = plan.normalized_parameters.get("interface_id")
@@ -718,16 +734,18 @@ async def _poe_execute(
         await asyncio.sleep(off_seconds)
         _progress(progress, 70, "cycle：恢复供电")
         await apply_and_read("on")
+    identity = await _read_identity(executor, certified_models)
     _progress(progress, 90, "PoE 状态回读一致")
-    return OperationResult(
-        ok=True,
-        evidence={
-            "interface_id": interface_id,
-            "mode": mode,
-            "off_seconds": off_seconds,
-            "poe_transitions": transitions,
-        },
-    )
+    evidence: dict[str, object] = {
+        "interface_id": interface_id,
+        "mode": mode,
+        "off_seconds": off_seconds,
+        "poe_transitions": transitions,
+    }
+    if identity is not None:
+        evidence["model"] = identity.model
+        evidence["vrp_version"] = identity.vrp_version
+    return OperationResult(ok=True, evidence=evidence)
 
 
 def _artifact_evidence(
@@ -1116,6 +1134,13 @@ async def _restart_verify(
                     and identity.uptime_seconds < VRP_UPTIME_RESET_MAX_SECONDS
                 ):
                     if not saw_offline:
+                        # Uptime already reset but no offline window was
+                        # observed (e.g. the reboot happened while this
+                        # observer could not see the gap): wait for the
+                        # offline proof while the budget lasts, then report
+                        # ambiguous — never an unbounded spin.
+                        if datetime.now(UTC).timestamp() >= deadline:
+                            break
                         await asyncio.sleep(VRP_RETRY_INTERVAL_SECONDS)
                         continue
                     return VerificationResult(
