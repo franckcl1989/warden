@@ -102,6 +102,33 @@ async function mountDetail() {
   return { wrapper, router };
 }
 
+/** 直接以 URL 页签深链打开详情（页签写入 URL query，UI_SPEC §2）。 */
+async function mountDetailAt(path: string) {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const auth = useAuthStore();
+  auth.user = {
+    id: 'u-1',
+    username: 'admin',
+    display_name: '管理员',
+    role: 'admin',
+    status: 'active',
+    must_change_password: false,
+    last_login_at: null,
+    created_at: '2026-09-01T00:00:00Z',
+    updated_at: '2026-09-01T00:00:00Z',
+    version: 1,
+  };
+  auth.permissions = ['device.read', 'device.manage', 'user.manage'];
+  const router = createAppRouter(createMemoryHistory());
+  await router.push(path);
+  await router.isReady();
+  const wrapper = mount(DevicesDetailView, {
+    global: { plugins: [pinia, router] },
+  });
+  return { wrapper, router };
+}
+
 describe('设备详情（PLT-02）', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -141,6 +168,107 @@ describe('设备详情（PLT-02）', () => {
     expect(wrapper.text()).toContain('SRV-ACT-03');
     expect(wrapper.text()).toContain('console.kvm.open');
     expect(wrapper.text()).toContain('不支持');
+  });
+
+  it('概览“当前问题”为空时显示空态，与加载/无权限/错误区分（M6T1）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes('/capabilities')) return jsonResponse(CAPABILITIES);
+        if (u.includes('/metrics/latest')) {
+          return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+        }
+        if (u.includes('/alerts?')) {
+          return jsonResponse({ items: [], page: 1, page_size: 50, total: 0 });
+        }
+        return jsonResponse(deviceView());
+      }),
+    );
+    const { wrapper } = await mountDetail();
+    await flushAll();
+    expect(wrapper.text()).toContain('当前无未恢复问题');
+    // 加载完成态下不出现错误/无权限文案
+    expect(wrapper.text()).not.toContain('无权限查看该页面');
+  });
+
+  it('指标页签区分 unsupported/unknown(尚无观测)/expired（M6T1，UI_SPEC §7.3）', async () => {
+    const caps = {
+      items: [
+        ...CAPABILITIES.items,
+        {
+          capability_key: 'temperature.cpu',
+          requirement_id: 'SRV-MON-02',
+          requirement_title: 'CPU 温度',
+          support_state: 'supported',
+          discovery_method: 'fake.simple',
+          reason_code: null,
+          detail: null,
+          last_checked_at: '2026-09-01T08:00:00Z',
+          adapter_version: '0.1.0',
+        },
+        {
+          capability_key: 'temperature.memory',
+          requirement_id: 'SRV-MON-02',
+          requirement_title: '内存温度',
+          support_state: 'unsupported',
+          discovery_method: 'fake.simple',
+          reason_code: 'model_unsupported',
+          detail: '该型号固件无内存温度读数',
+          last_checked_at: '2026-09-01T08:00:00Z',
+          adapter_version: '0.1.0',
+        },
+      ],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes('/capabilities')) return jsonResponse(caps);
+        if (u.includes('/metrics/latest')) {
+          return jsonResponse({
+            items: [
+              {
+                component: {
+                  id: 'c-1',
+                  kind: 'sensor',
+                  native_id: 'CPU1 Temp',
+                  name: 'CPU1 温度',
+                },
+                metrics: [
+                  {
+                    metric_key: 'temperature.cpu',
+                    value: 55.2,
+                    unit: 'Cel',
+                    quality: 'good',
+                    observed_at: '2026-09-01T08:00:00Z',
+                    source: 'poll',
+                    freshness: 'expired',
+                  },
+                ],
+              },
+            ],
+            page: 1,
+            page_size: 100,
+            total: 1,
+          });
+        }
+        if (u.includes('/alerts?')) {
+          return jsonResponse({ items: [], page: 1, page_size: 50, total: 0 });
+        }
+        return jsonResponse(deviceView());
+      }),
+    );
+    const { wrapper } = await mountDetailAt('/devices/d-1?tab=metrics');
+    await flushAll();
+    const text = wrapper.text();
+    // 过期观测：值 + “已过期”，不清零也不伪装成无数据
+    expect(text).toContain('已过期');
+    expect(text).toContain('55.2');
+    // 受支持但尚无观测：明确“尚无观测数据”，与过期分离
+    expect(text).toContain('尚无观测数据（受支持指标尚未产生一次成功观测）');
+    // 不支持：显示设备原因，不与任何“暂无”混淆
+    expect(text).toContain('该型号固件无内存温度读数');
   });
 
   it('编辑时修改管理地址触发重新探测门禁', async () => {

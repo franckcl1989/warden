@@ -22,7 +22,9 @@ const props = defineProps<{
   overviewRequirementIds: string[];
 }>();
 
-const alertsState = ref<'loading' | 'ready' | 'error' | 'permission_denied'>('loading');
+const alertsState = ref<'loading' | 'ready' | 'empty' | 'error' | 'permission_denied'>(
+  'loading',
+);
 const alertsError = ref<ApiError | null>(null);
 const alerts = ref<AlertListItem[]>([]);
 
@@ -34,7 +36,8 @@ async function loadAlerts(): Promise<void> {
       `/alerts?${listQueryString({ page: 1, page_size: 50, device_id: props.deviceId, status: 'active' })}`,
     );
     alerts.value = result.items ?? [];
-    alertsState.value = 'ready';
+    // 空态必须与加载/错误/无权限区分（UI_SPEC §5 空列表规范）
+    alertsState.value = alerts.value.length === 0 ? 'empty' : 'ready';
   } catch (caught) {
     alertsError.value = caught as ApiError;
     alertsState.value =

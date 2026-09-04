@@ -25,7 +25,6 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => user.value !== null && user.value !== undefined);
   const isAdmin = computed(() => user.value?.role === 'admin');
-  const roleLabel = computed(() => (user.value ? user.value.role : null));
 
   // 变更请求自动携带内存中的 CSRF 票据（client.ts 只对变更方法注入）
   setCsrfTokenProvider(() => csrfToken.value);
@@ -111,7 +110,6 @@ export const useAuthStore = defineStore('auth', () => {
     csrfToken,
     isAuthenticated,
     isAdmin,
-    roleLabel,
     login,
     logout,
     refreshMe,

@@ -92,9 +92,30 @@ const showActions = computed(
   () => detail.value?.state === 'verification_required' && isAdmin.value,
 );
 
+/**
+ * 取消权限门（M6T1 权限统一，SECURITY §3.1）：服务端按任务风险等级要求
+ * operation.execute.<low|medium|high>（后端 application/operations.cancel_task
+ * _enforce_execute_permission）；观察员没有这些权限，即使任务处于 queued/
+ * running 也不显示取消入口（UI_SPEC §12 无权限操作不显示）。
+ */
+function canExecuteRisk(riskLevel: string | null | undefined): boolean {
+  const permission =
+    riskLevel === 'low'
+      ? 'operation.execute.low'
+      : riskLevel === 'medium'
+        ? 'operation.execute.medium'
+        : riskLevel === 'high'
+          ? 'operation.execute.high'
+          : null;
+  return permission !== null && auth.permissions.includes(permission);
+}
+
 function canCancel(): boolean {
   const current = detail.value?.state;
-  return current === 'queued' || current === 'running';
+  if (current !== 'queued' && current !== 'running') {
+    return false;
+  }
+  return canExecuteRisk(detail.value?.risk_level);
 }
 
 async function verifyReadback(): Promise<void> {

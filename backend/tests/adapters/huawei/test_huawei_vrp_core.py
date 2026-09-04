@@ -761,6 +761,34 @@ class TestCollectBoundary:
         assert descriptor.url == "http://10.0.0.10"
         assert "HTTP" in (descriptor.display_hint or "")
         assert "明文" in (descriptor.display_hint or "")
+        # RFC 3986: an IPv6-literal management endpoint must be bracketed —
+        # both with the scheme-default port (brackets still required) and
+        # with an explicit non-default port.
+        v6_session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="2001:db8::10",
+            connection_config={"web_scheme": "https", "web_port": 443},
+            credentials={},
+        )
+        descriptor = adapter.create_launch(v6_session, "console.web.open")
+        assert descriptor.url == "https://[2001:db8::10]"
+        v6_alt_session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="2001:db8::10",
+            connection_config={"web_scheme": "http", "web_port": 8080},
+            credentials={},
+        )
+        descriptor = adapter.create_launch(v6_alt_session, "console.web.open")
+        assert descriptor.url == "http://[2001:db8::10]:8080"
+        # IPv4 literals and hostnames stay unbracketed.
+        v4_session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="10.0.0.10",
+            connection_config={"web_scheme": "http", "web_port": 8080},
+            credentials={},
+        )
+        descriptor = adapter.create_launch(v4_session, "console.web.open")
+        assert descriptor.url == "http://10.0.0.10:8080"
 
     def test_discovery_web_console_rows_flip_supported_with_declared_origin(self, switch_agent) -> None:
         """console.web.open rows: supported when the probe profile declares

@@ -1,8 +1,10 @@
 import { createPinia, setActivePinia } from 'pinia';
 import { mount } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createMemoryHistory } from 'vue-router';
 
 import BackupStatusPanel from '@/features/devices/panels/BackupStatusPanel.vue';
+import { createAppRouter } from '@/router';
 import { useAuthStore } from '@/stores/auth';
 
 /**
@@ -158,6 +160,7 @@ async function mountPanel(
   fetchMock: (url: string, init?: RequestInit) => Promise<Response>,
   permissions: string[],
   capabilities: unknown[] = SUPPORTED_CAPABILITIES,
+  withRouter = false,
 ) {
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -176,15 +179,16 @@ async function mountPanel(
   };
   auth.permissions = permissions;
   vi.stubGlobal('fetch', fetchMock);
+  const router = withRouter ? createAppRouter(createMemoryHistory()) : null;
   const wrapper = mount(BackupStatusPanel, {
     props: {
       deviceId: 'd-1',
       deviceName: 'nas-01',
       capabilities: capabilities as never,
     },
-    global: { plugins: [pinia] },
+    global: { plugins: router ? [pinia, router] : [pinia] },
   });
-  return wrapper;
+  return { wrapper, router };
 }
 
 describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
@@ -193,7 +197,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('无刷新任务时显示"尚未刷新"空态与刷新入口', async () => {
-    const wrapper = await mountPanel(async (url) => {
+    const { wrapper } = await mountPanel(async (url) => {
       if (isListUrl(String(url))) {
         return jsonResponse(listBody([], 0));
       }
@@ -216,7 +220,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('渲染最近一次成功刷新的任务证据：备份任务与功能包清单（不可用如实标注）', async () => {
-    const wrapper = await mountPanel(async (url) => {
+    const { wrapper } = await mountPanel(async (url) => {
       if (isListUrl(String(url))) {
         return jsonResponse(listBody([listItem('succeeded')], 1));
       }
@@ -247,7 +251,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('最近一次刷新未成功时如实显示任务状态，不渲染任何清单', async () => {
-    const wrapper = await mountPanel(async (url) => {
+    const { wrapper } = await mountPanel(async (url) => {
       if (isListUrl(String(url))) {
         return jsonResponse(listBody([listItem('failed')], 1));
       }
@@ -273,7 +277,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('观察员可查看最近结果但没有刷新入口', async () => {
-    const wrapper = await mountPanel(async (url) => {
+    const { wrapper } = await mountPanel(async (url) => {
       if (isListUrl(String(url))) {
         return jsonResponse(listBody([listItem('succeeded')], 1));
       }
@@ -290,7 +294,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('无执行权限时也不显示刷新按钮', async () => {
-    const wrapper = await mountPanel(async (url) => {
+    const { wrapper } = await mountPanel(async (url) => {
       if (isListUrl(String(url))) {
         return jsonResponse(listBody([], 0));
       }
@@ -304,7 +308,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('能力不支持（unsupported）时刷新按钮禁用并显示设备原因', async () => {
-    const wrapper = await mountPanel(async (url) => {
+    const { wrapper } = await mountPanel(async (url) => {
       if (isListUrl(String(url))) {
         return jsonResponse(listBody([], 0));
       }
@@ -342,7 +346,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('任务证据缺失清单结构时提示查看任务详情，不展示推测数据', async () => {
-    const wrapper = await mountPanel(async (url) => {
+    const { wrapper } = await mountPanel(async (url) => {
       if (isListUrl(String(url))) {
         return jsonResponse(listBody([listItem('succeeded')], 1));
       }
@@ -370,7 +374,7 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
   });
 
   it('operations API 返回 permission_denied 时如实显示无权限', async () => {
-    const wrapper = await mountPanel(
+    const { wrapper } = await mountPanel(
       async () => jsonResponse(errorBody('permission_denied', '无权限查看操作任务'), 403),
       [
         'device.read',
@@ -383,6 +387,92 @@ describe('任务与日志：备份/快照状态视图（NAS-ACT-05）', () => {
     await flushAll();
 
     expect(wrapper.text()).toContain('无权限查看');
+    wrapper.unmount();
+  });
+
+  it('最近一次刷新仍在执行（busy）时刷新按钮禁用并显示“刷新中…”，点击不会打开流程', async () => {
+    const { wrapper } = await mountPanel(async (url) => {
+      if (isListUrl(String(url))) {
+        return jsonResponse(listBody([listItem('running')], 1));
+      }
+      if (String(url).endsWith(`/operations/${TASK_ID}`)) {
+        return jsonResponse(detailBody('running'));
+      }
+      return jsonResponse({}, 404);
+    }, [
+      'device.read',
+      'monitor.read',
+      'operation.read',
+      'operation.execute.low',
+      'operation.execute.medium',
+      'operation.execute.high',
+    ]);
+    await flushAll();
+
+    const button = wrapper.get('[data-testid="backup-refresh-button"]');
+    expect(button.attributes('disabled')).toBeDefined();
+    expect(button.text()).toContain('刷新中…');
+    // 任务状态如实展示（执行中），不渲染任何清单
+    expect(wrapper.get('[data-testid="backup-task-not-succeeded"]').text()).toContain('执行中');
+    await button.trigger('click');
+    await flushAll();
+    expect(wrapper.find('[data-testid="flow-requirement"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('点击“刷新备份状态”打开两阶段流程，任务创建后跳转任务详情（click-through）', async () => {
+    const preview = {
+      requirement_id: 'NAS-ACT-05',
+      capability_key: 'backup.status.refresh',
+      risk_level: 'low',
+      target: { id: 'd-1', name: 'nas-01' },
+      normalized_parameters: {},
+      impact: '读取设备备份任务与功能包状态清单',
+      steps: ['读取备份任务列表', '读取功能包信息'],
+      confirmation: { kind: 'type_device_name', expected: 'nas-01' },
+      preview_token: 'preview-token-1',
+      expires_at: '2099-01-01T08:30:00Z',
+    };
+    const { wrapper, router } = await mountPanel(
+      async (url, init) => {
+        const u = String(url);
+        if (isListUrl(u)) {
+          return jsonResponse(listBody([], 0));
+        }
+        if (u.includes('/operation-previews')) {
+          return jsonResponse(preview);
+        }
+        if (u.includes('/devices/d-1/operations') && init?.method === 'POST') {
+          return jsonResponse(listItem('queued'), 202);
+        }
+        return jsonResponse({}, 404);
+      },
+      [
+        'device.read',
+        'monitor.read',
+        'operation.read',
+        'operation.execute.low',
+        'operation.execute.medium',
+        'operation.execute.high',
+      ],
+      SUPPORTED_CAPABILITIES,
+      true,
+    );
+    await flushAll();
+
+    await wrapper.get('[data-testid="backup-refresh-button"]').trigger('click');
+    await flushAll();
+    expect(wrapper.find('[data-testid="flow-requirement"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain('需求编号：NAS-ACT-05');
+
+    await wrapper.get('[data-testid="preview-generate"]').trigger('click');
+    await flushAll();
+    expect(wrapper.text()).toContain('读取设备备份任务与功能包状态清单');
+    await wrapper.get('[data-testid="confirm-name-input"]').setValue('nas-01');
+    await flushAll();
+    await wrapper.get('[data-testid="confirm-submit"]').trigger('click');
+    await flushAll();
+    expect(router?.currentRoute.value.path).toBe(`/operations/${TASK_ID}`);
     wrapper.unmount();
   });
 });

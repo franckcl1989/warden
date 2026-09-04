@@ -217,7 +217,9 @@ describe('PoE 视图 PoePanel（M5T5）', () => {
     expect(wrapper.get('[data-testid="poe-summary-poe.total_power_alarm"]').text()).toContain(
       '尚无观测',
     );
-    expect(wrapper.text()).not.toContain('正常');
+    // 摘要区不得伪造 normal 状态（整页会出现端口行新鲜度“正常”等真实文案，
+    // 断言只针对摘要卡片，M6T1 PortTable 可见观测时间改动）
+    expect(wrapper.get('[data-testid="poe-summary"]').text()).not.toContain('正常');
   });
 
   it('not_configured 能力行显示原因（设备未提供预算分母等）', async () => {

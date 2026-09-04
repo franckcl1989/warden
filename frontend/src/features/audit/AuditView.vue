@@ -55,7 +55,16 @@ const fromFilter = ref<string>(
 const toFilter = ref<string>(
   typeof route.query['to'] === 'string' ? String(route.query['to']) : '',
 );
-const page = ref(1);
+
+/** URL page 参数解析：非正整数一律回落第 1 页（M6T1：audit 的页码与筛选
+ * 一样作为 URL 浏览状态的一部分，刷新/分享链接后保持，UI_SPEC §2）。 */
+function pageFromQuery(value: unknown): number {
+  const raw = typeof value === 'string' ? value : '';
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
+}
+
+const page = ref(pageFromQuery(route.query['page']));
 const pageSize = ref(20);
 
 // 审计资源类型来自后端审计动作词表（device/user/session/operation/file/audit/system）；
@@ -78,6 +87,7 @@ function pushQuery(): void {
     ['device_id', deviceFilter.value.trim() === '' ? null : deviceFilter.value.trim()],
     ['from', fromFilter.value === '' ? null : fromFilter.value],
     ['to', toFilter.value === '' ? null : toFilter.value],
+    ['page', page.value === 1 ? null : String(page.value)],
   ] as const) {
     if (value !== null && value !== undefined) {
       query[key] = value;
@@ -138,13 +148,13 @@ async function load(): Promise<void> {
 
 function onPageChange(next: number): void {
   page.value = next;
-  void load();
+  pushQuery();
 }
 
 function onPageSizeChange(size: number): void {
   pageSize.value = size;
   page.value = 1;
-  void load();
+  pushQuery();
 }
 
 async function openDetail(row: AuditLogListItem): Promise<void> {
@@ -222,14 +232,27 @@ watch(
       route.query['device_id'],
       route.query['from'],
       route.query['to'],
+      route.query['page'],
     ] as const,
-  ([nextActor, nextAction, nextResource, nextDevice, nextFrom, nextTo]) => {
+  ([
+    nextActor,
+    nextAction,
+    nextResource,
+    nextDevice,
+    nextFrom,
+    nextTo,
+    nextPage,
+  ]) => {
     actorFilter.value = typeof nextActor === 'string' ? nextActor : null;
     actionFilter.value = typeof nextAction === 'string' ? nextAction : '';
     resourceTypeFilter.value = typeof nextResource === 'string' ? nextResource : null;
     deviceFilter.value = typeof nextDevice === 'string' ? nextDevice : '';
     fromFilter.value = typeof nextFrom === 'string' ? nextFrom : '';
     toFilter.value = typeof nextTo === 'string' ? nextTo : '';
+    const parsedPage = pageFromQuery(nextPage);
+    if (parsedPage !== page.value) {
+      page.value = parsedPage;
+    }
     void load();
   },
 );

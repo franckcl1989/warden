@@ -170,6 +170,11 @@ describe('端口表视图 PortsPanel（M5T5）', () => {
     );
     expect(text).toContain('端口入向速率');
     expect(text).toContain('端口 CRC 错误');
+    // UI_SPEC §5 不隐藏最近采集时间（M6T1）：状态列的观测时间与新鲜度
+    // 直接可见，不依赖悬停 chips 标题
+    const observedCell = wrapper.get('[data-testid="port-observed-c-1"]');
+    expect(observedCell.text()).toMatch(/观测 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    expect(observedCell.text()).toContain('新鲜度 正常');
     // 服务端分页参数：components 带 kind=interface + page_size=20；
     // latest 一次取全（page_size=100）
     const componentsCall = seen.find((entry) => entry.url.includes('/components'));
@@ -243,5 +248,51 @@ describe('端口表视图 PortsPanel（M5T5）', () => {
     expect(wrapper.text()).toContain('interface.errors');
     expect(wrapper.text()).toContain('设备不支持');
     expect(wrapper.text()).toContain('设备未应答错误计数表');
+  });
+
+  it('状态观测已过期时状态列如实显示观测时间与“已过期”，与未知（尚无观测）区分', async () => {
+    const wrapper = await mountPanel(async (url) => {
+      const target = String(url);
+      if (target.includes('/components')) {
+        return jsonResponse({
+          device_id: 'd-1',
+          items: [PORT_1],
+          page: 1,
+          page_size: 20,
+          total: 1,
+        });
+      }
+      if (target.includes('/metrics/latest')) {
+        return jsonResponse({
+          device_id: 'd-1',
+          items: [
+            group(
+              { id: 'c-1', kind: 'interface', native_id: 'GigabitEthernet0/0/1', name: 'GigabitEthernet0/0/1' },
+              [
+                {
+                  ...metricItem('interface.oper_status', 'up', null),
+                  freshness: 'expired',
+                  observed_at: '2026-09-01T08:00:00Z',
+                },
+                {
+                  ...metricItem('interface.in_bps', 1000, 'bit/s'),
+                  freshness: 'expired',
+                  observed_at: '2026-09-01T08:00:00Z',
+                },
+              ],
+            ),
+          ],
+          page: 1,
+          page_size: 100,
+          total: 1,
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+    const observedCell = wrapper.get('[data-testid="port-observed-c-1"]');
+    expect(observedCell.text()).toMatch(/观测 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    expect(observedCell.text()).toContain('新鲜度 已过期');
+    // 过期仍然展示最后已知值，不伪装成"暂无数据"
+    expect(wrapper.text()).not.toContain('尚无观测（该组件尚无一次成功观测）');
   });
 });

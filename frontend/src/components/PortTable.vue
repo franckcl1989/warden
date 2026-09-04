@@ -88,6 +88,24 @@ function statusDisplay(row: ComponentView): { text: string; tone: Tone } {
   return { text: label(ENUM_VALUE_LABELS, raw), tone };
 }
 
+/** 状态行观测时刻与新鲜度：UI_SPEC §5 不隐藏最近采集时间 —— 状态列的
+ * 观测时间必须直接可见（M6T1），不是 chips 悬停才显示；无观测时为 null。 */
+function statusObservation(row: ComponentView): {
+  observedAt: string | null;
+  freshness: string | null;
+} {
+  const statusKey = statusKeyOf(row.kind);
+  if (statusKey === null) {
+    return { observedAt: row.last_seen_at ?? null, freshness: null };
+  }
+  const group = props.latestByComponent[row.id];
+  const item = group?.metrics.find((metric) => metric.metric_key === statusKey);
+  if (item === undefined || typeof item.value !== 'string') {
+    return { observedAt: null, freshness: null };
+  }
+  return { observedAt: item.observed_at ?? null, freshness: item.freshness ?? null };
+}
+
 function metricOrderIndex(key: string): number {
   const index = METRIC_KEYS.indexOf(key as (typeof METRIC_KEYS)[number]);
   return index === -1 ? METRIC_KEYS.length : index;
@@ -161,15 +179,31 @@ function chipTitle(item: LatestMetricItem): string {
         <div class="port-table__sub">{{ row.kind }} · {{ row.native_id || '—' }}</div>
       </template>
     </el-table-column>
-    <el-table-column label="状态" width="120" fixed="left">
+    <el-table-column label="状态" width="130" fixed="left">
       <template #default="{ row }">
-        <span
-          class="port-table__status"
-          :class="`port-table__status--${statusDisplay(row as ComponentView).tone}`"
-          data-testid="port-status"
-        >
-          {{ statusDisplay(row as ComponentView).text }}
-        </span>
+        <div class="port-table__status-cell">
+          <span
+            class="port-table__status"
+            :class="`port-table__status--${statusDisplay(row as ComponentView).tone}`"
+            data-testid="port-status"
+          >
+            {{ statusDisplay(row as ComponentView).text }}
+          </span>
+          <span
+            v-if="statusObservation(row as ComponentView).observedAt"
+            class="port-table__observed"
+            :data-testid="`port-observed-${(row as ComponentView).id}`"
+          >
+            观测 {{ formatDateTimeSeconds(statusObservation(row as ComponentView).observedAt) }}
+            <span
+              v-if="statusObservation(row as ComponentView).freshness"
+              class="port-table__freshness"
+              :class="`port-table__freshness--${statusObservation(row as ComponentView).freshness}`"
+            >
+              新鲜度 {{ label(FRESHNESS_LABELS, statusObservation(row as ComponentView).freshness) }}
+            </span>
+          </span>
+        </div>
       </template>
     </el-table-column>
     <el-table-column label="最新指标" min-width="560">
@@ -211,6 +245,11 @@ function chipTitle(item: LatestMetricItem): string {
   font-size: 12px;
   font-family: monospace;
 }
+.port-table__status-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .port-table__status {
   display: inline-block;
   padding: 2px 8px;
@@ -218,6 +257,24 @@ function chipTitle(item: LatestMetricItem): string {
   font-size: 12px;
   border: 1px solid transparent;
   white-space: nowrap;
+  align-self: flex-start;
+}
+.port-table__observed {
+  color: var(--warden-status-unknown);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.port-table__freshness {
+  margin-left: 6px;
+}
+.port-table__freshness--fresh {
+  color: var(--warden-status-healthy);
+}
+.port-table__freshness--stale {
+  color: var(--warden-status-warning);
+}
+.port-table__freshness--expired {
+  color: var(--warden-status-critical);
 }
 .port-table__status--success {
   color: var(--warden-status-healthy);

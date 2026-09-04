@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElButton } from 'element-plus';
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 import AsyncState from '@/components/AsyncState.vue';
 import MetricChart from '@/components/MetricChart.vue';
@@ -47,6 +47,11 @@ async function load(): Promise<void> {
     state.value = error.value.code === 'permission_denied' ? 'permission_denied' : 'error';
   }
 }
+
+onMounted(() => {
+  // M6T1：挂载即加载（此前只绑定了重试按钮，页面永远停留在骨架屏）
+  void load();
+});
 
 const requirementGroups = computed(() => {
   return props.requirementIds
@@ -133,7 +138,7 @@ function chartCandidates(key: string) {
       class="metric-groups"
       data-testid="metric-groups"
     >
-      <p v-if="latest.total > latest.items.length" class="metric-groups__truncated">
+      <p v-if="(latest.items ?? []).length > 0 && latest.total > latest.items.length" class="metric-groups__truncated">
         共 {{ latest.total }} 个组件组，仅展示前 {{ latest.items.length }} 组
       </p>
       <section

@@ -6,6 +6,7 @@ import { createMemoryHistory } from 'vue-router';
 import AlertsView from '@/features/alerts/AlertsView.vue';
 import AuditView from '@/features/audit/AuditView.vue';
 import FilesView from '@/features/files/FilesView.vue';
+import OperationsListView from '@/features/operations/OperationsListView.vue';
 import OverviewView from '@/features/overview/OverviewView.vue';
 import { createAppRouter } from '@/router';
 import { useAuthStore } from '@/stores/auth';
@@ -158,6 +159,92 @@ describe('alerts 页（PLT-04）', () => {
     );
     expect(wrapper.text()).toContain('无权限查看该页面');
   });
+
+  it('无未恢复问题且无筛选时显示专属空态文案（M6T1）', async () => {
+    const { wrapper } = await mountPage(AlertsView, '/alerts', async (url) => {
+      if (String(url).includes('/alerts?')) {
+        return jsonResponse(listResponse([], 0));
+      }
+      return jsonResponse({});
+    });
+    expect(wrapper.text()).toContain('当前没有未恢复的问题');
+  });
+
+  it('带严重级别筛选无结果时显示“筛选无结果”而不是默认空态（M6T1）', async () => {
+    const { wrapper } = await mountPage(AlertsView, '/alerts?severity=warning', async (url) => {
+      if (String(url).includes('/alerts?')) {
+        return jsonResponse(listResponse([], 0));
+      }
+      return jsonResponse({});
+    });
+    expect(wrapper.text()).toContain('筛选无结果');
+    expect(wrapper.text()).not.toContain('当前没有未恢复的问题');
+  });
+});
+
+describe('operations 列表状态列（PLT-05，M6T1：八态文案各自独立）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('八种任务状态分别渲染中文标签（不合并歧义文案）', async () => {
+    const states = [
+      'queued',
+      'running',
+      'waiting_device',
+      'succeeded',
+      'failed',
+      'timed_out',
+      'cancelled',
+      'verification_required',
+    ];
+    const rows = states.map((state, index) => ({
+      id: `op-${index}`,
+      requirement_id: 'SRV-ACT-02',
+      capability_key: 'power.on',
+      risk_level: 'high',
+      state,
+      device: { id: 'd-1', name: 'server-01' },
+      requested_by: { id: 'u-1', username: 'admin' },
+      progress_percent: 100,
+      current_step: null,
+      dispatch_started_at: null,
+      device_job_id: null,
+      timeout_at: null,
+      result_summary: state === 'succeeded' ? '已完成' : null,
+      error_code: state === 'failed' ? 'operation_failed' : null,
+      error_detail: state === 'failed' ? '设备拒绝' : null,
+      verification_state: state === 'verification_required' ? 'pending' : null,
+      started_at: '2026-09-01T08:00:01Z',
+      finished_at: null,
+      created_at: '2026-09-01T08:00:00Z',
+      updated_at: '2026-09-01T08:00:02Z',
+      version: 1,
+    }));
+    const { wrapper } = await mountPage(OperationsListView, '/operations', async (url) => {
+      const u = String(url);
+      if (u.includes('/operations?')) {
+        return jsonResponse({ items: rows, page: 1, page_size: 20, total: rows.length });
+      }
+      if (u.includes('/devices?')) {
+        return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+      }
+      return jsonResponse({});
+    });
+    const text = wrapper.text();
+    for (const label of [
+      '已排队',
+      '执行中',
+      '等待设备',
+      '成功',
+      '失败',
+      '超时',
+      '已取消',
+      '结果待核验',
+    ]) {
+      expect(text).toContain(label);
+    }
+  });
 });
 
 describe('overview 页（PLT-03）', () => {
@@ -297,11 +384,32 @@ describe('audit 页 URL query 筛选同步（UI_SPEC §2）', () => {
     vi.unstubAllGlobals();
   });
 
+  function auditRow(id: string) {
+    return {
+      id,
+      occurred_at: '2026-09-01T08:00:00Z',
+      actor_user_id: 'u-1',
+      actor_username: 'admin',
+      action: 'device.create',
+      resource_type: 'device',
+      resource_id: 'd-1',
+      device_id: 'd-1',
+      requirement_id: null,
+      result: 'succeeded',
+      source_ip: '10.0.0.9',
+    };
+  }
+
   function auditFetchMock() {
     return vi.fn(async (url: string) => {
       const u = String(url);
       if (u.includes('/audit-logs?')) {
-        return jsonResponse({ items: [], page: 1, page_size: 20, total: 0 });
+        return jsonResponse({
+          items: [auditRow('log-1')],
+          page: 1,
+          page_size: 20,
+          total: 45,
+        });
       }
       if (u.includes('/users?')) {
         return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
@@ -357,6 +465,47 @@ describe('audit 页 URL query 筛选同步（UI_SPEC §2）', () => {
     expect(router.currentRoute.value.query['resource_type']).toBeUndefined();
     const url = String(fetchMock.mock.calls.at(-1)?.[0] ?? '');
     expect(new URLSearchParams(url.split('?')[1] ?? '').has('resource_type')).toBe(false);
+  });
+
+  it('分页切换写入 URL page 参数并以该页请求（M6T1：页码也是 URL 浏览状态）', async () => {
+    const fetchMock = auditFetchMock();
+    const { wrapper, router } = await mountPage(AuditView, '/audit', fetchMock);
+    const pagination = wrapper.findComponent({ name: 'PaginationBar' });
+    pagination.vm.$emit('update:page', 3);
+    await flushAll();
+    expect(router.currentRoute.value.query['page']).toBe('3');
+    const url = String(fetchMock.mock.calls.at(-1)?.[0] ?? '');
+    expect(new URLSearchParams(url.split('?')[1] ?? '').get('page')).toBe('3');
+  });
+
+  it('带 page 的 URL 深链直接以该页请求；回落到第 1 页时移除 page 参数', async () => {
+    const fetchMock = auditFetchMock();
+    const { wrapper, router } = await mountPage(AuditView, '/audit?page=5', fetchMock);
+    const deepLinkCall = fetchMock.mock.calls.find((call) =>
+      String(call[0]).includes('/audit-logs?'),
+    ) as unknown as [string] | undefined;
+    const deepQuery = new URLSearchParams(String(deepLinkCall?.[0] ?? '').split('?')[1] ?? '');
+    expect(deepQuery.get('page')).toBe('5');
+    const pagination = wrapper.findComponent({ name: 'PaginationBar' });
+    pagination.vm.$emit('update:page', 1);
+    await flushAll();
+    expect(router.currentRoute.value.query['page']).toBeUndefined();
+    const url = String(fetchMock.mock.calls.at(-1)?.[0] ?? '');
+    expect(new URLSearchParams(url.split('?')[1] ?? '').get('page')).toBe('1');
+  });
+
+  it('筛选变更时页码回落第 1 页并移除 URL page 参数', async () => {
+    const fetchMock = auditFetchMock();
+    const { wrapper, router } = await mountPage(AuditView, '/audit?page=7', fetchMock);
+    const resourceSelect = wrapper
+      .get('[data-testid="filter-resource"]')
+      .findComponent({ name: 'ElSelect' });
+    await resourceSelect.vm.$emit('update:modelValue', 'operation');
+    await resourceSelect.vm.$emit('change', 'operation');
+    await flushAll();
+    expect(router.currentRoute.value.query['page']).toBeUndefined();
+    const url = String(fetchMock.mock.calls.at(-1)?.[0] ?? '');
+    expect(new URLSearchParams(url.split('?')[1] ?? '').get('page')).toBe('1');
   });
 });
 
@@ -468,5 +617,59 @@ describe('files 页上传向导（PLT-06）', () => {
     expect(wrapper.text()).toContain('文件上传完成：fw.bin');
     const listCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/files?'));
     expect(listCalls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('files 页权限（PLT-06，UI_SPEC §12：无权限操作不显示）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('观察员只读元数据：无上传/删除入口，下载按钮不出现并显示无下载权限', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    seedAuth('viewer');
+    const fileView = {
+      id: 'f-1',
+      file_type: 'firmware',
+      original_filename: 'fw.bin',
+      size_bytes: 10,
+      mime_type: 'application/octet-stream',
+      sha256: 'a'.repeat(64),
+      storage_backend: 'disk',
+      encrypted: true,
+      key_version: 1,
+      status: 'ready',
+      metadata: {},
+      uploaded_by: { id: 'u-2', username: 'op-1' },
+      links: [],
+      created_at: '2026-09-01T08:00:00Z',
+      updated_at: '2026-09-01T08:00:00Z',
+      version: 1,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes('/files?')) {
+          return jsonResponse({ items: [fileView], page: 1, page_size: 20, total: 1 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const router = createAppRouter(createMemoryHistory());
+    await router.push('/files');
+    await router.isReady();
+    const wrapper = mount(FilesView as never, {
+      global: { plugins: [pinia, router] },
+    });
+    await flushAll();
+    // 文件名单元对无下载权限的用户只显示原因（不出现可点击下载链接）
+    expect(wrapper.text()).toContain('无下载权限');
+    // 观察员看不到任何操作入口（SECURITY §3.1：file.manage.input/file.delete 均无）
+    expect(wrapper.find('[data-testid="open-upload"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('删除');
+    // 文件名不是可点击下载链接
+    expect(wrapper.findAll('a.sensitive-file-link__anchor').length).toBe(0);
   });
 });

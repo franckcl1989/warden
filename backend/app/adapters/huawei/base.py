@@ -466,6 +466,23 @@ class _Bundle:
         )
 
 
+def _bracket_ipv6_host(endpoint: str) -> str:
+    """RFC 3986 §3.2.2: an IPv6-literal host in a web URL must be bracketed.
+
+    Only a detected IPv6 address literal gets ``[ ]`` — an IPv4 literal or a
+    hostname stays unchanged (bracketing a hostname would corrupt the URL).
+    Non-parseable endpoints pass through and are rejected elsewhere by
+    ``_require_web_console_config``'s endpoint shape check.
+    """
+    try:
+        parsed = ipaddress.ip_address(endpoint)
+    except ValueError:
+        return endpoint
+    if parsed.version == 6:
+        return f"[{parsed}]"
+    return endpoint
+
+
 def _not_executed_stages(names: tuple[str, ...]) -> tuple[ProbeStage, ...]:
     return tuple(ProbeStage(stage=name, ok=False, detail_safe="前置阶段失败，未执行") for name in names)
 
@@ -705,11 +722,10 @@ class HuaweiVrpAdapter:
         if capability == "console.web.open":
             scheme, port = self._require_web_console_config(session)
             default_port = 443 if scheme == "https" else 80
-            authority = (
-                session.management_endpoint
-                if port == default_port
-                else f"{session.management_endpoint}:{port}"
-            )
+            # RFC 3986: IPv6-literal management endpoints must be bracketed
+            # (http://[2001:db8::1]:port — an unbracketed literal is invalid).
+            host = _bracket_ipv6_host(session.management_endpoint)
+            authority = host if port == default_port else f"{host}:{port}"
             hint = (
                 "设备 Web 管理界面（HTTPS，无凭据注入）"
                 if scheme == "https"
