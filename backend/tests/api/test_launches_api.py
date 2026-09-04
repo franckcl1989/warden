@@ -32,6 +32,7 @@ from tests.api.auth_helpers import (
     create_user,
     login_csrf,
 )
+from tests.api.rate_limit_helpers import freeze_rate_limit_clock
 from tests.api.test_devices import create_device, probe_and_get_token
 
 API = "/api/v1"
@@ -468,6 +469,12 @@ def test_concurrency_caps_three_per_user_and_one_per_device(
 def test_launch_rate_limit_per_user_per_minute(
     device_client: TestClient, db_session: Session,
 ) -> None:
+    """API_CONTRACT.md §7/§11: launch 10/min/用户 (the DB caps add the real
+    concurrency bound). The fixed 60s window must not roll over during the
+    11-request burst (M6T2): the limiter clock is frozen so the refusal is
+    deterministic at any wall-clock time.
+    """
+    freeze_rate_limit_clock(device_client.app)
     _, csrf = _user_csrf(
         device_client, db_session, username="op-ratelimit", password=OPERATOR_PASSWORD, role="operator"
     )

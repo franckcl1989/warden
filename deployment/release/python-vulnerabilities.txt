@@ -1,0 +1,105 @@
+# Warden 0.1.0 - Python dependency vulnerability record (offline placeholder)
+# Support: docs/SECURITY.md section 10/13, docs/TEST_STRATEGY.md section 4/8
+# Generated (UTC date): 2026-09-04
+# Generator: scripts/generate_python_vulnerabilities.py
+# Interpreter: C:\Users\franck\Documents\ChatGPT\warden\backend\.venv\Scripts\python.exe
+
+Tooling state on the generation host (2026-09-04):
+  - pip-audit:   NOT installed in backend/.venv (checked via importlib.metadata)
+  - pip:         NOT installed in backend/.venv (uv-managed virtual environment)
+  - uv:          NOT on PATH (project CI uses uv; this dev box does not have it)
+  - network:     task forbids installing tools, and advisory DBs (PyPI JSON/OSV)
+                 are a networked resource, so an offline "scan" cannot be truthful.
+
+BLOCKER / honest status:
+  NO vulnerability scan was executed and NO "no vulnerabilities" claim is made.
+  The rows below are the inventory (names+versions of installed distributions)
+  that the networked scan consumes. Vulnerability verdicts require the
+  advisory database at release time and are therefore a release-time networked
+  step (docs/TEST_STRATEGY.md section 4/8: release candidate gate). The result
+  of that run belongs into the M6T4 release artifact set next to this file.
+
+Exact commands for the release-time (networked) scan, run from backend/:
+
+  1. Environment scan (project venv; fetches the advisory DB at run time):
+        uv run --with pip-audit pip-audit
+     pip-audit documentation (https://github.com/pypa/pip-audit) describes how
+     to scope the scan (e.g. --local) for the installed pip-audit version.
+
+  2. Lockfile scan (no project env needed; pip-audit reads uv.lock, supported
+     since pip-audit 2.7.2; if the release host's pip-audit rejects the format,
+     fall back to command 1):
+        uvx pip-audit -r backend/uv.lock
+
+  Air-gapped sites: mirror the advisory database in advance and point pip-audit
+  at the mirror per its documentation; never ship this file as a verdict.
+  Record the output (exit code, findings) in the M6T4 release statement.
+
+# --- installed-distribution inventory (what a networked environment
+#     scan would audit; backend/uv.lock pins these versions) ---
+# lockfile package count: 66; installed distributions: 64
+
+alembic==1.19.1
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+argon2-cffi==25.1.0
+argon2-cffi-bindings==26.1.0
+asyncssh==2.23.1
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+colorama==0.4.6
+coverage==7.16.0
+cryptography==45.0.7
+fastapi==0.141.1
+greenlet==3.5.5
+h11==0.16.0
+h2==4.4.1
+hpack==4.2.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+hyperframe==6.1.0
+idna==3.19
+iniconfig==2.3.0
+Jinja2==3.1.6
+librt==0.15.0
+Mako==1.4.1
+MarkupSafe==3.0.3
+mypy==1.20.2
+mypy_extensions==1.1.0
+orjson==3.12.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+ply==3.11
+psycopg==3.3.5
+psycopg-binary==3.3.5
+pyasn1==0.6.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pydantic_core==2.46.5
+Pygments==2.21.0
+pysmi-lextudio==1.4.3
+pysnmp-lextudio==6.3.0
+pysnmpcrypto==0.0.4
+pytest==8.4.2
+pytest-asyncio==0.26.0
+pytest-cov==4.1.0
+python-dotenv==1.2.3
+PyYAML==6.0.3
+requests==2.34.2
+ruff==0.16.5
+SQLAlchemy==2.0.52
+starlette==1.6.0
+structlog==25.5.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.3
+urllib3==2.7.0
+uvicorn==0.52.4
+watchfiles==1.2.0
+websockets==17.1

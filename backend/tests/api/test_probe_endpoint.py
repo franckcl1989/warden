@@ -20,6 +20,7 @@ from tests.api.auth_helpers import (
     create_user,
     login_csrf,
 )
+from tests.api.rate_limit_helpers import freeze_rate_limit_clock
 
 API = "/api/v1"
 PROBE_PATH = f"{API}/device-probes"
@@ -217,6 +218,10 @@ def test_probe_endpoint_with_credentials_in_url_rejected(
 def test_probe_rate_limited_after_10_per_minute(
     device_client: TestClient, db_session: Session
 ) -> None:
+    """The 10/min per-user probe window must not roll over during the
+    11-request burst (M6T2): freeze the limiter clock so the refusal is
+    deterministic at any wall-clock time."""
+    freeze_rate_limit_clock(device_client.app)
     create_admin(db_session)
     csrf = admin_csrf(device_client)
     headers = {"X-CSRF-Token": csrf}

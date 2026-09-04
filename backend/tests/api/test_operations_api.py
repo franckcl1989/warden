@@ -29,6 +29,7 @@ from tests.api.auth_helpers import (
     create_user,
     login_csrf,
 )
+from tests.api.rate_limit_helpers import freeze_rate_limit_clock
 from tests.api.test_devices import create_device, probe_and_get_token
 from tests.task_factories import make_task
 
@@ -871,7 +872,11 @@ def test_preview_rate_limited_after_30_per_minute(
 ) -> None:
     """API_CONTRACT.md §11: 操作预览 30/min/用户. The limiter runs before the
     device lookup, so failing attempts still count (each returns 404 until
-    the budget is exhausted)."""
+    the budget is exhausted). The fixed 60s window must not roll over during
+    the 31-request burst (M6T2): the limiter clock is frozen so the refusal
+    is deterministic at any wall-clock time.
+    """
+    freeze_rate_limit_clock(device_client.app)
     _, csrf = _user_csrf(
         device_client, db_session, username="op-ratelimit-p", password=OPERATOR_PASSWORD,
         role="operator",
@@ -892,7 +897,8 @@ def test_submit_rate_limited_after_10_per_minute(
     device_client: TestClient, db_session: Session,
 ) -> None:
     """API_CONTRACT.md §11: 操作提交 10/min/用户 (the device mutex adds the
-    real concurrency bound)."""
+    real concurrency bound). Window frozen as in the preview sibling (M6T2)."""
+    freeze_rate_limit_clock(device_client.app)
     _, csrf = _user_csrf(
         device_client, db_session, username="op-ratelimit-s", password=OPERATOR_PASSWORD,
         role="operator",

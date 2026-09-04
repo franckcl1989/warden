@@ -1,0 +1,81 @@
+# Warden 0.1.0 - Python dependency license report (offline)
+# Support: docs/SECURITY.md (section 10/13), docs/TEST_STRATEGY.md section 4 (release gate)
+# Generated (UTC date): 2026-09-04
+# Generator: scripts/generate_python_licenses.py (importlib.metadata of the running interpreter)
+# Interpreter: C:\Users\franck\Documents\ChatGPT\warden\backend\.venv\Scripts\python.exe
+# Lockfile used for runtime/dev scoping: backend/uv.lock
+# Scope: 64 installed distributions in the interpreter above (dev toolchain included;
+#   matches the full backend/uv.lock resolution). runtime = uv.lock runtime closure of
+#   warden-backend (all platform marker edges included; the Linux image installs a subset,
+#   see backend/Dockerfile `uv sync --no-dev --frozen`).
+# License value order: License-Expression -> single-line License -> OSI classifier -> UNKNOWN.
+#   Long License texts are shown truncated as <text>; full text lives in the package metadata.
+# UNKNOWN licenses must be reviewed manually before release; this report asserts nothing about
+#   license compatibility on its own.
+
+64 installed distributions; 0 with UNKNOWN license
+name	version	scope	license
+alembic	1.19.1	runtime	MIT
+annotated-doc	0.0.5	runtime	MIT
+annotated-types	0.8.0	runtime	MIT
+anyio	4.14.2	runtime	MIT
+argon2-cffi	25.1.0	runtime	MIT
+argon2-cffi-bindings	26.1.0	runtime	MIT
+asyncssh	2.23.1	runtime	EPL-2.0 OR GPL-2.0-or-later
+certifi	2026.7.22	runtime	MPL-2.0
+cffi	2.1.1	runtime	MIT-0
+charset-normalizer	3.5.1	runtime	MIT
+click	8.5.0	runtime	BSD-3-Clause
+colorama	0.4.6	runtime	BSD License
+coverage	7.16.0	runtime	Apache-2.0
+cryptography	45.0.7	runtime	Apache-2.0 OR BSD-3-Clause
+fastapi	0.141.1	runtime	MIT
+greenlet	3.5.5	runtime	MIT AND PSF-2.0
+h11	0.16.0	runtime	MIT
+h2	4.4.1	runtime	MIT
+hpack	4.2.0	runtime	MIT
+httpcore	1.0.9	runtime	BSD-3-Clause
+httptools	0.8.0	runtime	MIT
+httpx	0.28.1	runtime	BSD-3-Clause
+hyperframe	6.1.0	runtime	<text> The MIT License (MIT) Copyright (c) 2014... (full text in package metadata)
+idna	3.19	runtime	BSD-3-Clause
+iniconfig	2.3.0	runtime	MIT
+Jinja2	3.1.6	runtime	BSD License
+librt	0.15.0	dev-only	MIT
+Mako	1.4.1	runtime	MIT
+MarkupSafe	3.0.3	runtime	BSD-3-Clause
+mypy	1.20.2	dev-only	MIT
+mypy_extensions	1.1.0	dev-only	MIT
+orjson	3.12.0	runtime	MPL-2.0 AND (Apache-2.0 OR MIT)
+packaging	26.3	runtime	Apache-2.0 OR BSD-2-Clause
+pathspec	1.1.1	dev-only	Mozilla Public License 2.0 (MPL 2.0)
+pluggy	1.6.0	runtime	MIT
+ply	3.11	runtime	BSD
+psycopg	3.3.5	runtime	LGPL-3.0-only
+psycopg-binary	3.3.5	runtime	LGPL-3.0-only
+pyasn1	0.6.0	runtime	BSD-2-Clause
+pycparser	3.0	runtime	BSD-3-Clause
+pydantic	2.13.5	runtime	MIT
+pydantic-settings	2.15.0	runtime	MIT
+pydantic_core	2.46.5	runtime	MIT
+Pygments	2.21.0	runtime	BSD-2-Clause
+pysmi-lextudio	1.4.3	runtime	BSD-2-Clause
+pysnmp-lextudio	6.3.0	runtime	BSD-2-Clause
+pysnmpcrypto	0.0.4	runtime	BSD
+pytest	8.4.2	runtime	MIT
+pytest-asyncio	0.26.0	dev-only	Apache-2.0
+pytest-cov	4.1.0	runtime	MIT
+python-dotenv	1.2.3	runtime	BSD-3-Clause
+PyYAML	6.0.3	runtime	MIT
+requests	2.34.2	runtime	Apache-2.0
+ruff	0.16.5	dev-only	MIT
+SQLAlchemy	2.0.52	runtime	MIT
+starlette	1.6.0	runtime	BSD-3-Clause
+structlog	25.5.0	runtime	MIT OR Apache-2.0
+typing-inspection	0.4.4	runtime	MIT
+typing_extensions	4.16.0	runtime	PSF-2.0
+tzdata	2026.3	runtime	Apache-2.0
+urllib3	2.7.0	runtime	MIT
+uvicorn	0.52.4	runtime	BSD-3-Clause
+watchfiles	1.2.0	runtime	MIT
+websockets	17.1	runtime	BSD-3-Clause

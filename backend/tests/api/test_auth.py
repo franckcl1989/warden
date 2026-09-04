@@ -28,6 +28,7 @@ from tests.api.auth_helpers import (
     login,
     login_csrf,
 )
+from tests.api.rate_limit_helpers import freeze_rate_limit_clock
 
 API = "/api/v1"
 LOCKED_USER = "locked.user"
@@ -96,7 +97,12 @@ def test_login_like_pattern_username_does_not_lock_admin_or_enumerate(
     the distinct account_locked/account_disabled responses also leaked the
     account state. Every wildcard attempt must behave exactly like an unknown
     username (generic invalid_credentials) and leave admin untouched.
+
+    The sixth attempt must be refused by the login rate limiter; the fixed 60s
+    window must not roll over mid-test (M6T2), so the limiter clock is frozen
+    and the refusal is deterministic at any wall-clock time.
     """
+    freeze_rate_limit_clock(db_client.app)
     create_admin(db_session)
     baseline = login(db_client, ADMIN_USERNAME, "Wrong-Pass-2026!")
     assert baseline.status_code == 422
@@ -350,6 +356,12 @@ def test_cross_origin_login_rejected(db_client: TestClient, db_session: Session)
 
 @pytest.mark.integration
 def test_login_rate_limit_returns_429(db_client: TestClient, db_session: Session) -> None:
+    """API_CONTRACT.md §11: login 5/min per source IP (429 on the sixth).
+
+    The limiter window is aligned to the real clock (ADR-024); freeze it so
+    the burst cannot straddle a window boundary under full-suite load (M6T2).
+    """
+    freeze_rate_limit_clock(db_client.app)
     create_admin(db_session)
     for _ in range(5):
         assert login(db_client, ADMIN_USERNAME, "Wrong-Pass-2026!").status_code == 422
