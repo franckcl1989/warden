@@ -122,9 +122,16 @@ class TestProbeAndDiscover:
             row = rows[key]
             assert row.support_state == "supported", (key, row.detail)
             assert row.discovery_method == ADAPTER_KEY and row.reason_code is None
+        # Wired CLI/SSH keys without a declared SSH endpoint are honest
+        # not_configured; unwired keys (console.* launches) stay unsupported.
+        wired = HuaweiVrpAccessAdapter().ssh_operation_keys
         for key in ACCESS_OPERATION_KEYS:
             row = rows[key]
-            assert row.support_state == "unsupported" and row.reason_code == "mapping_missing"
+            if key in wired:
+                assert row.support_state == "not_configured", (key, row.detail)
+                assert row.reason_code == "ssh_unconfigured", (key, row.detail)
+            else:
+                assert row.support_state == "unsupported" and row.reason_code == "mapping_missing", key
 
     def test_discovery_inventory(self, switch_agent) -> None:
         with switch_agent(profile_key="access_s5735") as h:

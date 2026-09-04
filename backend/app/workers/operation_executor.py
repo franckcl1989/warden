@@ -46,11 +46,12 @@ job (bounded by ``attempt_count`` + ``operation_read_max_attempts``).
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace as dataclass_replace
 
 import structlog
@@ -107,7 +108,7 @@ from app.infrastructure.tasks import (
 )
 from app.infrastructure.time import utcnow
 from app.models.devices import Device, DeviceCredential
-from app.models.files import File
+from app.models.files import File, FileLink
 from app.models.operation import OperationTask
 
 # An adapter is allowed this many seconds past the plan deadline to return a
@@ -983,6 +984,56 @@ class OperationExecutor:
             if file_row is None:
                 return None
             storage, _cipher = self._file_services()
+            if plan.requirement_id in ("CORE-ACT-07", "ACCESS-ACT-06"):
+                # Switch firmware (M5T3): the image travels via SFTP from the
+                # Warden host (the switch only SERVES SFTP), so there is no
+                # device-pull ticket — the runtime carries a chunk stream
+                # over the plain firmware file plus the warden-sim header
+                # metadata (model + target version). Anything else fails
+                # BEFORE the dispatch fence.
+                metadata = self._vrp_image_metadata(storage, file_row)
+                if metadata is None:
+                    self._fail_task(
+                        session,
+                        task,
+                        error_code="validation_failed",
+                        error_detail="固件包元数据无法解析（缺少 warden-sim 图像头），操作未执行",
+                    )
+                    return None
+                if device.model is not None and device.model != metadata["model"]:
+                    self._fail_task(
+                        session,
+                        task,
+                        error_code="validation_failed",
+                        error_detail=f"固件包型号（{metadata['model']}）与设备型号（{device.model}）不匹配，操作未执行",
+                    )
+                    return None
+                link_input_file(
+                    db=session,
+                    file_row=file_row,
+                    device_id=device.id,
+                    task_id=task.id,
+                    created_by=task.requested_by,
+                )
+                stored = StoredFile(
+                    storage_key=storage_key(file_row),
+                    encrypted=False,
+                    size_bytes=file_row.size_bytes,
+                    key_version=None,
+                )
+                expected_model = metadata["model"]
+                expected_version = metadata["version"]
+                stream = self._plain_stream_provider(storage, stored)
+                runtime["file"] = {
+                    "file_id": str(file_row.id),
+                    "file_type": file_row.file_type,
+                    "sha256": file_row.sha256,
+                    "size_bytes": file_row.size_bytes,
+                    "expected_model": expected_model,
+                    "expected_version": expected_version,
+                    "stream": stream,
+                }
+                return _replace_plan_runtime(plan, runtime)
             if plan.requirement_id == "NAS-ACT-06":
                 # NAS PAT update (M4T3): the warden-sim PAT header carries
                 # model + version only (no target inventory id). The model
@@ -1068,6 +1119,76 @@ class OperationExecutor:
                 "url": ticket_url_for(self._settings, ticket),
                 "id": str(ticket.id),
             }
+        elif key == "config.restore":
+            # CORE-ACT-05/ACCESS-ACT-05 restore (M5T3): the ONLY input is a
+            # Warden-produced config_backup artifact (origin check via the
+            # output_config_backup link bound to THIS device), whose decrypted
+            # content + model/VRP metadata travel in the runtime context for
+            # the adapter's certified full-replace strategy. The content is
+            # bounded (RESTORE_CONTENT_MAX_BYTES); anything unexpected fails
+            # BEFORE the dispatch fence (validation_failed).
+            file_row = self._input_file_row(
+                session,
+                task,
+                plan.normalized_parameters.get("file_id"),
+                file_type="config_backup",
+            )
+            if file_row is None:
+                return None
+            origin = session.execute(
+                select(FileLink).where(
+                    FileLink.file_id == file_row.id,
+                    FileLink.device_id == device.id,
+                    FileLink.purpose == "output_config_backup",
+                )
+            ).scalar_one_or_none()
+            if origin is None:
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="validation_failed",
+                    error_detail="配置文件不是本设备上由平台产出（缺少 output_config_backup 归属），操作未执行",
+                )
+                return None
+            backup_metadata = file_row.metadata_json or {}
+            model = backup_metadata.get("model")
+            vrp_version = backup_metadata.get("vrp_version")
+            if not (
+                isinstance(model, str)
+                and isinstance(vrp_version, str)
+                and file_row.sha256 is not None
+            ):
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="validation_failed",
+                    error_detail="配置备份缺少模型/VRP 元数据或散列，无法执行恢复",
+                )
+                return None
+            storage, cipher = self._file_services()
+            stored = StoredFile(
+                storage_key=storage_key(file_row),
+                encrypted=file_row.encrypted,
+                size_bytes=file_row.size_bytes,
+                key_version=file_row.key_version,
+            )
+            content = self._decrypt_bounded(storage, cipher, stored)
+            if content is None:
+                self._fail_task(
+                    session,
+                    task,
+                    error_code="validation_failed",
+                    error_detail="配置备份内容不可解密或超过恢复上限，操作未执行",
+                )
+                return None
+            runtime["restore"] = {
+                "file_id": str(file_row.id),
+                "content_b64": base64.b64encode(content).decode("ascii"),
+                "model": model,
+                "vrp_version": vrp_version,
+                "vrp_major": self._vrp_major_of(vrp_version),
+                "sha256": file_row.sha256,
+            }
         elif key == "snmp.configure":
             # The trap receiver address comes ONLY from the deployment
             # configuration (NAS-ACT-06 profile prohibition: 用户不能提供接
@@ -1086,7 +1207,12 @@ class OperationExecutor:
                     error_detail="未找到该槽位对应的平台虚拟介质挂载记录，操作未执行",
                 )
                 return None
-        elif key == "logs.support_bundle.collect":
+        elif key in (
+            "logs.support_bundle.collect",
+            "logs.diagnostic.collect",
+            "logs.collect",
+            "config.backup",
+        ):
             storage, _cipher = self._file_services()
             try:
                 storage.check_available()
@@ -1095,10 +1221,98 @@ class OperationExecutor:
                     session,
                     task,
                     error_code="storage_unavailable",
-                    error_detail="文件存储不可用，无法保存支持包产物",
+                    error_detail="文件存储不可用，无法保存操作产物",
                 )
                 return None
         return _replace_plan_runtime(plan, runtime)
+
+    def _vrp_image_metadata(
+        self, storage: FileStorage, file_row: File
+    ) -> dict[str, str] | None:
+        """Parse the warden-sim switch image header (model + version).
+
+        The VRP switch firmware shape carries NO ``target`` inventory id
+        (CORE-ACT-07/ACCESS-ACT-06 profiles take file_id only) — everything
+        else mirrors the server image parser. An unreadable/absent header
+        returns None — the platform never guesses package metadata.
+        """
+        stored = StoredFile(
+            storage_key=storage_key(file_row),
+            encrypted=False,
+            size_bytes=file_row.size_bytes,
+            key_version=None,
+        )
+        try:
+            limit = min(IMAGE_HEADER_MAX_BYTES, file_row.size_bytes)
+            head = b"".join(
+                storage.open_chunks(stored, key_cipher=None, start=0, limit=limit)
+            )
+        except (FileStorageError, ValueError):
+            return None
+        line, _, _ = head.partition(b"\n")
+        if not line.startswith(IMAGE_HEADER_MARKER):
+            return None
+        raw = line[len(IMAGE_HEADER_MARKER) :].strip()
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        model = payload.get("model")
+        version = payload.get("version")
+        if not (
+            isinstance(model, str)
+            and model
+            and isinstance(version, str)
+            and version
+        ):
+            return None
+        return {"model": model, "version": version}
+
+    def _plain_stream_provider(
+        self, storage: FileStorage, stored: StoredFile
+    ) -> Callable[[], Iterator[bytes]]:
+        """A re-openable chunk stream over a PLAIN stored file.
+
+        The adapter boundary rule (M3T3) keeps adapters away from storage
+        paths; this provider hands the firmware transfer an opaque chunk
+        stream that re-opens the volume on every call — bounded memory, no
+        paths, and the plain firmware file never touches the adapter config.
+        """
+
+        def _stream() -> Iterator[bytes]:
+            yield from storage.open_chunks(stored, key_cipher=None)
+
+        return _stream
+
+    def _decrypt_bounded(
+        self,
+        storage: FileStorage,
+        cipher: FileKeyCipher | None,
+        stored: StoredFile,
+    ) -> bytes | None:
+        """Decrypt a sensitive config_backup artifact (bounded read).
+
+        Restore payloads are small running configs; anything beyond the
+        restore cap is refused (never an unbounded memory copy)."""
+        if stored.encrypted and cipher is None:
+            return None
+        cap = 8 * 1024 * 1024
+        if stored.size_bytes > cap:
+            return None
+        try:
+            return b"".join(storage.open_chunks(stored, key_cipher=cipher, start=0, limit=None))
+        except (FileStorageError, ValueError):
+            return None
+
+    @staticmethod
+    def _vrp_major_of(vrp_version: str) -> str | None:
+        """The VRP major prefix gate (restore identity precondition)."""
+        import re
+
+        match = re.match(r"^(V[0-9]+R[0-9]+C[0-9]+)", vrp_version.strip())
+        return match.group(1) if match is not None else None
 
     def _mount_task_for_slot(
         self, session: Session, task: OperationTask, slot_id: str

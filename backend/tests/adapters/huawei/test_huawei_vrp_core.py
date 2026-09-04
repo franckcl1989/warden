@@ -223,10 +223,18 @@ class TestDiscover:
                 assert row.discovery_method == ADAPTER_KEY
                 assert row.reason_code is None
                 assert row.requirement_id.startswith("CORE-MON-")
+            # Wired CLI/SSH keys without a declared SSH endpoint are honest
+            # not_configured (ssh_unconfigured); unwired keys (console.*
+            # launches, transceiver.diagnose) stay unsupported.
+            wired = HuaweiVrpCoreAdapter().ssh_operation_keys
             for key in CORE_OPERATION_KEYS:
                 row = rows[key]
-                assert row.support_state == "unsupported"
-                assert row.reason_code == "mapping_missing"
+                if key in wired:
+                    assert row.support_state == "not_configured", (key, row.detail)
+                    assert row.reason_code == "ssh_unconfigured", (key, row.detail)
+                else:
+                    assert row.support_state == "unsupported", (key, row.detail)
+                    assert row.reason_code == "mapping_missing", (key, row.detail)
                 assert row.discovery_method == ADAPTER_KEY
 
     def test_event_keys_not_configured_without_attributable_source(self, switch_agent) -> None:
@@ -638,11 +646,39 @@ class TestCollectBoundary:
                 )
             assert raised.value.code == "network_unreachable"
 
-    def test_operation_methods_are_honest_unsupported(self) -> None:
-        adapter = HuaweiVrpCoreAdapter()
+    def test_operation_methods_without_ssh_config_are_honest_not_configured(self) -> None:
+        """M5T3: the wired operation methods refuse without an SSH endpoint
+        config / pinned fingerprint (not_configured — automation never
+        first-connects), and the launch path stays honest unsupported
+        (console.* is a later milestone)."""
+        from app.adapters.huawei.core import HuaweiVrpCoreAdapter as Adapter
+        from app.domain.adapter import DeviceSession
+
+        adapter = Adapter()
+        bare_session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="127.0.0.1",
+            connection_config={},
+            credentials={},
+        )
+        session = DeviceSession(
+            device_id=uuid.uuid4(),
+            management_endpoint="127.0.0.1",
+            connection_config={"ssh_port": 22},
+            credentials={"ssh": {"username": "u", "password": "p"}},
+        )
+        plan = object()  # type: ignore[assignment]
+        # No SSH endpoint/credentials at all.
         with pytest.raises(AdapterError) as raised:
-            adapter.plan_operation(None, None)  # type: ignore[arg-type]
-        assert raised.value.code == "unsupported_capability"
-        assert "M5T3" in raised.value.message
-        with pytest.raises(AdapterError):
-            adapter.create_launch(None, "console.ssh.open")  # type: ignore[arg-type]
+            adapter.preflight_operation(bare_session, plan)  # type: ignore[arg-type]
+        assert raised.value.code == "not_configured"
+        assert "SSH" in raised.value.message
+        # SSH declared but the host-key fingerprint is not pinned.
+        with pytest.raises(AdapterError) as raised:
+            adapter.preflight_operation(session, plan)  # type: ignore[arg-type]
+        assert raised.value.code == "not_configured"
+        assert "指纹" in raised.value.message or "首次信任" in raised.value.message
+        # Launch paths are a later milestone: honest unsupported.
+        with pytest.raises(AdapterError) as launch_raised:
+            adapter.create_launch(session, "console.ssh.open")
+        assert launch_raised.value.code == "unsupported_capability"

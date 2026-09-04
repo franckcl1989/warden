@@ -28,6 +28,20 @@ class HuaweiVrpCoreAdapter(HuaweiVrpAdapter):
     certified_models = CERTIFIED_CORE_MODELS
     event_keys = ("event.port_flap", "event.device_restart", "event.auth_failure")
 
+    #: CORE-ACT keys wired over the VRP SSH executor (DEVICE_ADAPTERS.md
+    #: §6.3; console.* launches and transceiver.diagnose are later
+    #: milestones — capability rows stay honest mapping_missing for them).
+    ssh_operation_keys: frozenset[str] = frozenset(
+        {
+            "device.restart",
+            "interface.admin.set",
+            "logs.diagnostic.collect",
+            "config.backup",
+            "config.restore",
+            "firmware.update",
+        }
+    )
+
     family_keys: dict[str, tuple[str, ...]] = {
         "system": ("system.cpu_percent", "system.memory_percent"),
         "interfaces": (

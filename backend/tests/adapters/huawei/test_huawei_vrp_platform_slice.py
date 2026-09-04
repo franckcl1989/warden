@@ -251,8 +251,8 @@ class TestHuaweiCorePlatformSlice:
             "event.auth_failure",
         ):
             assert by_key[key]["support_state"] == "supported", key
-        assert by_key["device.restart"]["support_state"] == "unsupported"
-        assert by_key["device.restart"]["reason_code"] == "mapping_missing"
+        assert by_key["device.restart"]["support_state"] == "not_configured"
+        assert by_key["device.restart"]["reason_code"] == "ssh_unconfigured"
         return uuid.UUID(saved["id"])
 
     # -- collection runs ----------------------------------------------------

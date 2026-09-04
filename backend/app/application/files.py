@@ -169,6 +169,24 @@ def ticket_not_found() -> AppError:
     return auth_errors.resource_not_found("device_file_ticket")
 
 
+def _safe_manifest(manifest: dict[str, object]) -> dict[str, object]:
+    """JSON-safe manifest copy (nested mappings/lists of scalars only).
+
+    Adapter manifests are flat JSON-shaped; anything else is refused loudly
+    (never silently truncated into the file metadata).
+    """
+    import json as _json
+
+    try:
+        raw = _json.dumps(manifest, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("artifact manifest is not JSON-serializable") from exc
+    parsed = _json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("artifact manifest must be a JSON object")
+    return parsed
+
+
 def storage_key(file_row: File) -> str:
     """Volume key for a row: content sha256, or sha256-<row id> when encrypted.
 
@@ -936,9 +954,16 @@ def revoke_device_file_ticket(
 PURPOSE_INPUT_FIRMWARE = "input_firmware"
 PURPOSE_INPUT_VIRTUAL_MEDIA = "input_virtual_media"
 PURPOSE_OUTPUT_SUPPORT_BUNDLE = "output_support_bundle"
+PURPOSE_OUTPUT_CONFIG_BACKUP = "output_config_backup"
+PURPOSE_OUTPUT_OPERATION_LOG = "output_operation_log"
 
-# Artifact file types the worker may persist for operation tasks.
-OPERATION_OUTPUT_FILE_TYPES = frozenset({"support_bundle"})
+# Artifact file types the worker may persist for operation tasks. All three
+# are sensitive types stored encrypted at rest (SECURITY.md §9); the link
+# purposes below exist since the M2T5 migration (output_config_backup /
+# output_operation_log) — M5T3 wires the switch config/diagnostic artifacts.
+OPERATION_OUTPUT_FILE_TYPES = frozenset(
+    {"support_bundle", "config_backup", "operation_log"}
+)
 
 # Ticket TTL for virtual-media pulls (ARCHITECTURE.md §3.6: 虚拟介质 <= 24 h).
 VIRTUAL_MEDIA_TICKET_HOURS = 24
@@ -947,6 +972,10 @@ VIRTUAL_MEDIA_TICKET_HOURS = 24
 def operation_artifact_file_link_purpose(file_type: str) -> str:
     if file_type == "support_bundle":
         return PURPOSE_OUTPUT_SUPPORT_BUNDLE
+    if file_type == "config_backup":
+        return PURPOSE_OUTPUT_CONFIG_BACKUP
+    if file_type == "operation_log":
+        return PURPOSE_OUTPUT_OPERATION_LOG
     raise ValueError(f"unsupported operation artifact type: {file_type}")
 
 
@@ -1095,6 +1124,13 @@ def store_operation_artifact(
             row.encrypted = encrypted
             row.key_version = stored.key_version if encrypted else None
             row.status = "ready"
+            if artifact.manifest:
+                # The artifact manifest (adapter-declared metadata: model/
+                # VRP + per-source hashes) travels on the file row so later
+                # consumers (e.g. config.restore origin/identity checks)
+                # read it without re-parsing task evidence. JSON-safe: the
+                # adapter manifests are flat JSON-shaped dicts.
+                row.metadata_json = _safe_manifest(artifact.manifest)
             link = FileLink(
                 file_id=row.id,
                 device_id=device_id,

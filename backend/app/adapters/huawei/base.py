@@ -62,6 +62,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
 
+from app.adapters.huawei import ops
 from app.adapters.huawei.oids import (
     COL_CRC_ERRORS,
     COL_ENTITY_NAME,
@@ -108,7 +109,14 @@ from app.domain.adapter import (
     Quality,
     VerificationResult,
 )
-from app.domain.operation_plan import DeviceSnapshot, OperationPlan, OperationRequest
+from app.domain.operation_plan import (
+    DeviceSnapshot,
+    OperationPlan,
+    OperationRequest,
+)
+from app.domain.operation_plan import (
+    plan_operation as plan_operation_domain,
+)
 from app.generated.capabilities import REQUIREMENTS
 from app.generated.metrics import METRIC_DEFINITIONS
 from app.infrastructure.protocols.snmp.client import SnmpClient, SnmpConnection
@@ -554,8 +562,17 @@ class HuaweiVrpAdapter:
                 "type": ["string", "null"],
                 "pattern": "^[0-9a-fA-F]{10,64}$",
             },
-            # M5T3 (SSH) fields declared now; unused in M5T2.
+            # M5T3 SSH fields: automation channel of the CORE-ACT/ACCESS-ACT
+            # operations. ``ssh_host_fingerprint`` is the canonical SHA-256
+            # host-key fingerprint (``SHA256:<base64>``, OpenSSH form) that
+            # the onboarding flow pins — automation NEVER first-connects
+            # (SECURITY.md §8, M5T3 report); probes report the actual key in
+            # the ssh stage detail when a first-connect capture is needed.
             "ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "ssh_host_fingerprint": {
+                "type": ["string", "null"],
+                "pattern": "^(?:SHA256:)?[A-Za-z0-9+/]{43}=?$",
+            },
             "verify_tls": {"type": "boolean"},
             EVENT_SOURCE_IPS_CONFIG_KEY: dict(EVENT_SOURCE_IPS_SCHEMA),
         },
@@ -566,27 +583,17 @@ class HuaweiVrpAdapter:
         self._rate_samples = RateSampleCache()
 
     # -- operation protocol (M5T3) -------------------------------------------
-    # The M5T2 milestone is SNMP monitoring only (CORE-ACT/ACCESS-ACT rows are
-    # discovered unsupported with mapping_missing, so the platform never calls
-    # these). They exist so the adapter still conforms to the DeviceAdapter
-    # protocol; the SSH/CLI implementations arrive in M5T3 — until then every
-    # call is an honest unsupported_capability, never a stub success.
+    # CORE-ACT-01/02/04/05/07 + ACCESS-ACT-01/02/03/05/06 run over the VRP
+    # SSH executor + SFTP (app/adapters/huawei/ops.py); plan mirrors the
+    # shared domain planner (rows the discovery declared supported), and the
+    # not-yet-wired keys (console.* launches, transceiver.diagnose) stay
+    # honest unsupported_capability — never a stub success.
 
     def plan_operation(self, snapshot: DeviceSnapshot, request: OperationRequest) -> OperationPlan:
-        del snapshot, request
-        raise AdapterError(
-            "unsupported_capability",
-            "交换机操作（CORE-ACT/ACCESS-ACT）的 SSH/CLI 适配路径在 M5T3 交付",
-            stage="plan",
-        )
+        return plan_operation_domain(snapshot, request)
 
     def preflight_operation(self, session: DeviceSession, plan: OperationPlan) -> PreflightResult:
-        del session, plan
-        raise AdapterError(
-            "unsupported_capability",
-            "交换机操作（CORE-ACT/ACCESS-ACT）的 SSH/CLI 适配路径在 M5T3 交付",
-            stage="preflight",
-        )
+        return ops.preflight_operation_method(session, plan, self.certified_models)
 
     def execute_operation(
         self,
@@ -594,12 +601,7 @@ class HuaweiVrpAdapter:
         plan: OperationPlan,
         progress: OperationProgress,
     ) -> OperationResult:
-        del session, plan, progress
-        raise AdapterError(
-            "unsupported_capability",
-            "交换机操作（CORE-ACT/ACCESS-ACT）的 SSH/CLI 适配路径在 M5T3 交付",
-            stage="execute",
-        )
+        return ops.execute_operation_method(session, plan, self.certified_models, progress)
 
     def verify_operation(
         self,
@@ -607,18 +609,13 @@ class HuaweiVrpAdapter:
         plan: OperationPlan,
         result: OperationResult | None,
     ) -> VerificationResult:
-        del session, plan, result
-        raise AdapterError(
-            "unsupported_capability",
-            "交换机操作（CORE-ACT/ACCESS-ACT）的 SSH/CLI 适配路径在 M5T3 交付",
-            stage="verify",
-        )
+        return ops.verify_operation_method(session, plan, result, self.certified_models)
 
     def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor:
         del session, capability
         raise AdapterError(
             "unsupported_capability",
-            "交换机连接能力（console.ssh/telnet/web）在 M5T3 交付",
+            "交换机连接能力（console.ssh/telnet/web）的启动描述符在后续里程碑交付",
             stage="launch",
         )
 
@@ -679,19 +676,49 @@ class HuaweiVrpAdapter:
 
     # -- probe --------------------------------------------------------------
 
+    def _ssh_declared(self, profile: ConnectionProfile) -> bool:
+        """The profile declares an SSH automation endpoint (port + creds).
+
+        The capability/ops rows and the probe's ``ssh`` stage only exist
+        for declared SSH endpoints — a monitoring-only device never carries
+        an ssh stage (M5T2 probe shapes unchanged).
+        """
+        credentials = profile.credentials.get("ssh")
+        return isinstance(profile.connection_config.get("ssh_port"), int) and isinstance(
+            credentials, dict
+        ) and bool(credentials.get("username")) and bool(credentials.get("password"))
+
+    def _probe_stage_names(self, *, with_ssh: bool) -> tuple[str, ...]:
+        """The declared probe stage order of this adapter."""
+        if with_ssh:
+            return ("network", "auth", "ssh", "identity", "capabilities")
+        return ("network", "auth", "identity", "capabilities")
+
+    def _probe_not_executed(self, failed_before: str, *, with_ssh: bool) -> tuple[ProbeStage, ...]:
+        """Honest not-executed stages after ``failed_before``."""
+        names = self._probe_stage_names(with_ssh=with_ssh)
+        index = names.index(failed_before) if failed_before in names else 0
+        return _not_executed_stages(names[index + 1 :])
+
     def probe(self, profile: ConnectionProfile) -> ProbeResult:
-        """Staged probe: network -> auth -> identity -> capabilities.
+        """Staged probe: network -> auth [-> ssh] -> identity -> capabilities.
 
         SNMP has no TLS stage (UDP datagrams): ``network`` covers
         reachability and protocol sanity; ``auth`` covers the SNMPv3 USM
         refusal (v2c carries no protocol authentication — the stage passes
         on an answered request with the documented weak-protocol note);
+        ``ssh`` runs ONLY when the profile declares an SSH endpoint (port +
+        credentials): it authenticates over SSH and enforces the pinned
+        host-key fingerprint when one is configured — a first-connect
+        profile (no fingerprint) reports the ACTUAL device key in the stage
+        detail for the operator to pin (automation never first-connects);
         ``identity`` gates the EXACT certified model in sysDescr plus a
         parseable VRP version (cross-model devices are refused here, before
         any capability claim); ``capabilities`` proves the monitoring
         mapping answers. Stages after a failure are not executed (never
         fabricated as ok).
         """
+        with_ssh = self._ssh_declared(profile)
         try:
             client = self._client(profile)
         except ValueError as exc:
@@ -704,7 +731,7 @@ class HuaweiVrpAdapter:
                         detail_safe=f"SNMP 连接配置不一致：{_safe_config_error(exc)}",
                     ),
                 )
-                + _not_executed_stages(("auth", "identity", "capabilities"))
+                + self._probe_not_executed("network", with_ssh=with_ssh)
             )
         try:
             sys_descr = self._sys_descr(client)
@@ -719,7 +746,7 @@ class HuaweiVrpAdapter:
                         detail_safe=exc.message,
                     ),
                 )
-                + _not_executed_stages(("identity", "capabilities"))
+                + self._probe_not_executed("auth", with_ssh=with_ssh)
             )
         except SnmpError as exc:
             if exc.code == "authentication_failed":
@@ -733,7 +760,7 @@ class HuaweiVrpAdapter:
                             detail_safe="SNMPv3 USM 拒绝凭据（v2c 社区不匹配表现为静默超时）",
                         ),
                     )
-                    + _not_executed_stages(("identity", "capabilities"))
+                    + self._probe_not_executed("auth", with_ssh=with_ssh)
                 )
             return ProbeResult(
                 stages=(
@@ -744,18 +771,25 @@ class HuaweiVrpAdapter:
                         detail_safe=_safe_snmp_exc(exc),
                     ),
                 )
-                + _not_executed_stages(("auth", "identity", "capabilities"))
+                + self._probe_not_executed("network", with_ssh=with_ssh)
             )
         version_note = ""
         if str(profile.connection_config.get("snmp_version", "v3")) == "v2c":
             version_note = "（v2c 无协议认证 — 管理员显式选择；弱安全警告见界面）"
         auth = ProbeStage(stage="auth", ok=True, detail_safe=f"SNMP 请求被接受{version_note}")
+        stages: list[ProbeStage] = [ProbeStage(stage="network", ok=True), auth]
+        if with_ssh:
+            ssh_stage = ops.ssh_probe_stage(profile)
+            stages.append(ssh_stage)
+            if not ssh_stage.ok:
+                return ProbeResult(
+                    stages=tuple(stages) + self._probe_not_executed("ssh", with_ssh=True)
+                )
         model, vrp_version, failures = parse_sys_descr(sys_descr, self.certified_models)
         if model is None or vrp_version is None:
             return ProbeResult(
-                stages=(
-                    ProbeStage(stage="network", ok=True),
-                    auth,
+                stages=tuple(stages)
+                + (
                     ProbeStage(
                         stage="identity",
                         ok=False,
@@ -772,7 +806,7 @@ class HuaweiVrpAdapter:
         )
         capabilities = self._probe_capabilities(client)
         return ProbeResult(
-            stages=(ProbeStage(stage="network", ok=True), auth, identity, capabilities),
+            stages=tuple(stages) + (identity, capabilities),
             identity_hint=_identity_hint(model),
         )
 
@@ -825,6 +859,7 @@ class HuaweiVrpAdapter:
                 evidence,
                 source_endpoint=profile.management_endpoint,
                 connection_config=profile.connection_config,
+                credentials=profile.credentials,
             ),
             components=self._inventory_components(evidence),
             secrets_schema=self.secret_schema,
@@ -857,12 +892,23 @@ class HuaweiVrpAdapter:
         return evidence
 
     def _capability_rows(
-        self, evidence: dict[str, object], *, source_endpoint: str, connection_config: Mapping[str, object]
+        self,
+        evidence: dict[str, object],
+        *,
+        source_endpoint: str,
+        connection_config: Mapping[str, object],
+        credentials: Mapping[str, object] | None = None,
     ) -> tuple[CapabilitySupport, ...]:
         rows: list[CapabilitySupport] = []
         for requirement_id, key, kind in _device_type_keys(next(iter(self.supported_device_types))):
             state, reason_code, detail = self._capability_decision(
-                requirement_id, key, kind, evidence, source_endpoint, connection_config
+                requirement_id,
+                key,
+                kind,
+                evidence,
+                source_endpoint,
+                connection_config,
+                credentials,
             )
             rows.append(
                 CapabilitySupport(
@@ -903,6 +949,7 @@ class HuaweiVrpAdapter:
         evidence: dict[str, object],
         source_endpoint: str,
         connection_config: Mapping[str, object],
+        credentials: Mapping[str, object] | None = None,
     ) -> tuple[str, str | None, str]:
         """(support_state, reason_code, detail) for one capability key.
 
@@ -912,16 +959,14 @@ class HuaweiVrpAdapter:
         - event keys: supported when event sources can be attributed (the
           ingest path itself is wired since M5T1; the device-side push
           channel cannot be verified over SNMP and is a runtime matter);
-        - operation keys: unsupported adapter-side gap — the SSH/CLI paths
-          arrive in M5T3 (never a device claim).
+        - operation keys (M5T3): the SSH/CLI keys this adapter wires are
+          supported only when the SSH endpoint AND the pinned host-key
+          fingerprint are configured (no first-connect automation);
+          ``not_configured`` otherwise; keys without a wired path stay
+          ``unsupported``/``mapping_missing`` (never a device claim).
         """
         if kind == "operation":
-            return (
-                "unsupported",
-                "mapping_missing",
-                f"{requirement_id} 的操作键 {key} 的 SSH/CLI 适配路径在 M5T3 交付"
-                "（适配器侧缺口，不是设备不支持；本适配器未接线）",
-            )
+            return self._operation_capability(requirement_id, key, connection_config, credentials)
         if kind == "event":
             if key not in self.event_keys:
                 return (
@@ -958,6 +1003,59 @@ class HuaweiVrpAdapter:
             "unsupported",
             "device_source_missing",
             f"设备未应答 {self._family_table_label(family)}（无该表/无数据行）— 能力行保持不支持，不臆测设备能力",
+        )
+
+    #: operation keys with a WIRED SSH/CLI path (subclasses pin their set;
+    #: the CORE/ACCESS sets follow DEVICE_ADAPTERS.md §6.3/§6.4).
+    ssh_operation_keys: frozenset[str] = frozenset()
+
+    def _operation_capability(
+        self,
+        requirement_id: str,
+        key: str,
+        connection_config: Mapping[str, object],
+        credentials: Mapping[str, object] | None,
+    ) -> tuple[str, str | None, str]:
+        """One operation key row: wired keys follow the SSH configuration
+        (endpoint + pinned fingerprint); unwired keys stay unsupported.
+
+        The wired keys carry the [sim] template basis in the detail: the
+        simulator DSL supports them today, formal per-model/VRP certification
+        is pending (ADR-018) — the row never claims real-hardware proof.
+        """
+        if key not in self.ssh_operation_keys:
+            return (
+                "unsupported",
+                "mapping_missing",
+                f"{requirement_id} 的操作键 {key} 的适配路径尚未接线"
+                "（console.* 连接与 transceiver.diagnose 等在后续里程碑交付；适配器侧缺口，不是设备不支持）",
+            )
+        ssh = credentials.get("ssh") if credentials is not None else None
+        has_ssh_creds = (
+            isinstance(ssh, dict)
+            and bool(ssh.get("username"))
+            and bool(ssh.get("password"))
+        )
+        if not isinstance(connection_config.get("ssh_port"), int) or not has_ssh_creds:
+            return (
+                "not_configured",
+                "ssh_unconfigured",
+                f"{key} 的 SSH 通道未配置（connection_config.ssh_port + credentials.ssh）；"
+                "适配路径已接线，配置 SSH 后可用",
+            )
+        fingerprint = connection_config.get("ssh_host_fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return (
+                "not_configured",
+                "ssh_host_fingerprint_missing",
+                f"{key} 的 SSH 主机指纹未固定（ssh_host_fingerprint）；"
+                "自动化连接拒绝首次信任 — 先在探测/向导中固定指纹",
+            )
+        return (
+            "supported",
+            None,
+            f"{key} 的 SSH/CLI 适配路径已接线（命令模板 [sim] vrp-cli-sim-1；"
+            "模拟器 DSL 基础，型号/VRP 真机认证待补 — ADR-018）；指纹已固定，可执行",
         )
 
     def _family_answered(self, family: str, evidence: dict[str, object]) -> bool:

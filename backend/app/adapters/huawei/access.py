@@ -26,6 +26,21 @@ class HuaweiVrpAccessAdapter(HuaweiVrpAdapter):
     supported_device_types: frozenset[str] = frozenset({"access_switch"})
     certified_models = CERTIFIED_ACCESS_MODELS
 
+    #: ACCESS-ACT keys wired over the VRP SSH executor (DEVICE_ADAPTERS.md
+    #: §6.4; console.* launches are a later milestone — capability rows
+    #: stay honest mapping_missing for them).
+    ssh_operation_keys: frozenset[str] = frozenset(
+        {
+            "device.restart",
+            "interface.admin.set",
+            "poe.port.set",
+            "logs.collect",
+            "config.backup",
+            "config.restore",
+            "firmware.update",
+        }
+    )
+
     family_keys: dict[str, tuple[str, ...]] = {
         "system": ("system.cpu_percent", "system.memory_percent"),
         "interfaces": (
