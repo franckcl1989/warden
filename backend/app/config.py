@@ -55,6 +55,19 @@ class WardenSettings(BaseSettings):
     # （application/launches.py 活动票据计数 + 事务级 advisory lock）。
     launch_rate_limit_per_minute: int = Field(default=10, ge=1)
 
+    # Browser terminal (M5T4, docs/ARCHITECTURE.md §5.4, SECURITY.md §8):
+    # session bounded at 2h total / 15min idle by default; the units are
+    # seconds so tests can inject short windows. Deployment configuration,
+    # never a product page (ARCHITECTURE.md §5.4 / ADR-026).
+    terminal_session_idle_seconds: int = Field(default=900, ge=1)
+    terminal_session_max_seconds: int = Field(default=7200, ge=1)
+    # SECURITY.md §6 / ADR-007: Telnet is GLOBALLY disabled by default; a
+    # deployment enables it explicitly (admin confirmation) and ONLY for the
+    # interactive browser terminal — automation never uses Telnet
+    # (DEVICE_ADAPTERS.md §6). Per-device opt-in happens through the device
+    # connection_config ``telnet`` flag (weak-protocol audit denylist, M1T4).
+    telnet_enabled: bool = Field(default=False)
+
     # Database
     postgres_dsn_file: Path | None = Field(default=None)
     postgres_dsn: str = Field(default="")

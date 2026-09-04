@@ -14,6 +14,7 @@ import { DevicesDetailView, DevicesListView, DevicesNewView } from '@/features/d
 import { FilesView } from '@/features/files';
 import { ChangePasswordPage, LoginView } from '@/features/login';
 import { OperationsDetailView, OperationsView } from '@/features/operations';
+import { TerminalPage } from '@/features/terminal';
 import { OverviewView } from '@/features/overview';
 import { SystemView } from '@/features/system';
 import { UsersView } from '@/features/users';
@@ -62,6 +63,12 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: '任务详情' },
   },
   { path: '/files', name: 'files', component: FilesView, meta: { title: '文件' } },
+  {
+    path: '/terminal/sessions/:ticket',
+    name: 'terminal-sessions',
+    component: TerminalPage,
+    meta: { title: '远程终端' },
+  },
   {
     path: '/audit',
     name: 'audit',

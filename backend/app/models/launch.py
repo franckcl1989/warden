@@ -66,6 +66,12 @@ class LaunchSession(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="issued", server_default="issued"
     )
+    # The device configuration version at issue time (API_CONTRACT.md §7:
+    # 票据绑定…设备版本; migration 0014). The terminal WebSocket connect
+    # refuses a ticket whose device was re-configured afterwards — the
+    # operator must re-probe and issue a new launch. Nullable: rows created
+    # before 0014 carry no binding (always historical).
+    device_version: Mapped[int | None] = mapped_column(Integer)
     consumed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))

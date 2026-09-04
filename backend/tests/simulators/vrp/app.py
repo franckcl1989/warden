@@ -112,11 +112,29 @@ async def _cli_session(process: SSHServerProcess, device: VrpDevice) -> None:
         return f"<{device.sysname}> "
 
     async def read_line(wait_seconds: float = 15.0) -> str | None:
+        """One console line; any of \n / \r / \r\n ends the line.
+
+        Scripted SSH (the executor) sends \n-terminated lines; the
+        interactive browser terminal sends \r (Enter) like a real console —
+        both must execute. The process stdin is UTF-8-decoded by asyncssh
+        (channel default); bytes are re-encoded lossily (content is a test
+        fixture; nothing here is a real device payload).
+        """
+        raw = bytearray()
         try:
-            line = await asyncio.wait_for(stdin.readline(), timeout=wait_seconds)
+            while True:
+                chunk = await asyncio.wait_for(stdin.read(1), timeout=wait_seconds)
+                if not chunk:
+                    return None if not raw else raw.decode("utf-8", "replace").strip()
+                if isinstance(chunk, str):
+                    raw.extend(chunk.encode("utf-8"))
+                else:
+                    raw.extend(chunk)
+                if raw and raw[-1:] in (b"\n", b"\r"):
+                    break
         except TimeoutError:
             raise
-        return line.strip() if line else None
+        return raw.decode("utf-8", "replace").strip()
 
     async def read_key() -> str:
         try:

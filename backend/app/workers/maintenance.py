@@ -121,6 +121,11 @@ class MaintenanceReport:
     # M3T4 launch tickets (0013): issued rows expired + 30-day purge.
     launch_sessions_expired: int = 0
     launch_sessions_deleted: int = 0
+    # M5T4 browser-terminal sessions (0014): stale-open closes (idle/max,
+    # crash recovery) + 30-day purge of closed rows.
+    terminal_sessions_closed_idle: int = 0
+    terminal_sessions_closed_max: int = 0
+    terminal_sessions_deleted: int = 0
     partitions_created: int = 0
     # M2T5 file retention counters (0 when the pass skipped a cadence or no
     # file storage is configured for the loop).
@@ -217,6 +222,9 @@ class MaintenanceLoop:
                         physical_files_removed=report.physical_files_removed,
                         launch_sessions_expired=report.launch_sessions_expired,
                         launch_sessions_deleted=report.launch_sessions_deleted,
+                        terminal_sessions_closed_idle=report.terminal_sessions_closed_idle,
+                        terminal_sessions_closed_max=report.terminal_sessions_closed_max,
+                        terminal_sessions_deleted=report.terminal_sessions_deleted,
                     )
             except Exception:
                 self._log.exception("maintenance_pass_failed")
@@ -239,7 +247,9 @@ class MaintenanceLoop:
         report: MaintenanceReport,
         now: datetime.datetime,
     ) -> None:
-        retention_report = enforce_retention(session, now=now, settings=self._settings)
+        retention_report = enforce_retention(
+            session, now=now, settings=self._settings, audit=self._audit_logger
+        )
         report.partitions_dropped = len(retention_report.partitions_dropped)
         report.rollup_5m_deleted = retention_report.rollup_5m_deleted
         report.rollup_1h_deleted = retention_report.rollup_1h_deleted
@@ -255,6 +265,9 @@ class MaintenanceLoop:
         report.audit_skipped_append_only = retention_report.audit_skipped_append_only
         report.launch_sessions_expired = retention_report.launch_sessions_expired
         report.launch_sessions_deleted = retention_report.launch_sessions_deleted
+        report.terminal_sessions_closed_idle = retention_report.terminal_sessions_closed_idle
+        report.terminal_sessions_closed_max = retention_report.terminal_sessions_closed_max
+        report.terminal_sessions_deleted = retention_report.terminal_sessions_deleted
         report.partitions_created = ensure_partitions(session, now=now)
         if self._file_storage is not None:
             file_report = enforce_file_retention(

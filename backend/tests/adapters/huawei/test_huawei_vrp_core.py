@@ -224,14 +224,23 @@ class TestDiscover:
                 assert row.reason_code is None
                 assert row.requirement_id.startswith("CORE-MON-")
             # Wired CLI/SSH keys without a declared SSH endpoint are honest
-            # not_configured (ssh_unconfigured); unwired keys (console.*
-            # launches, transceiver.diagnose) stay unsupported.
+            # not_configured (ssh_unconfigured); M5T4 terminal console keys
+            # without their config are not_configured too (ssh_unconfigured /
+            # telnet_credential_missing); still-unwired keys
+            # (console.web.open, transceiver.diagnose) stay unsupported.
             wired = HuaweiVrpCoreAdapter().ssh_operation_keys
+            terminal = HuaweiVrpCoreAdapter().terminal_console_keys
             for key in CORE_OPERATION_KEYS:
                 row = rows[key]
                 if key in wired:
                     assert row.support_state == "not_configured", (key, row.detail)
                     assert row.reason_code == "ssh_unconfigured", (key, row.detail)
+                elif key in terminal:
+                    assert row.support_state == "not_configured", (key, row.detail)
+                    assert row.reason_code in (
+                        "ssh_unconfigured",
+                        "telnet_credential_missing",
+                    ), (key, row.reason_code, row.detail)
                 else:
                     assert row.support_state == "unsupported", (key, row.detail)
                     assert row.reason_code == "mapping_missing", (key, row.detail)
@@ -649,8 +658,10 @@ class TestCollectBoundary:
     def test_operation_methods_without_ssh_config_are_honest_not_configured(self) -> None:
         """M5T3: the wired operation methods refuse without an SSH endpoint
         config / pinned fingerprint (not_configured — automation never
-        first-connects), and the launch path stays honest unsupported
-        (console.* is a later milestone)."""
+        first-connects); M5T4: terminal launch tickets refuse the same way
+        (console.ssh.open needs the pinned fingerprint; console.telnet.open
+        needs the device opt-in + credentials — honest not_configured, never
+        a fabricated ticket)."""
         from app.adapters.huawei.core import HuaweiVrpCoreAdapter as Adapter
         from app.domain.adapter import DeviceSession
 
@@ -678,7 +689,17 @@ class TestCollectBoundary:
             adapter.preflight_operation(session, plan)  # type: ignore[arg-type]
         assert raised.value.code == "not_configured"
         assert "指纹" in raised.value.message or "首次信任" in raised.value.message
-        # Launch paths are a later milestone: honest unsupported.
-        with pytest.raises(AdapterError) as launch_raised:
+        # console.ssh.open (M5T4 terminal): port + credentials are present
+        # but the fingerprint is unpinned -> honest not_configured.
+        with pytest.raises(AdapterError) as raised:
             adapter.create_launch(session, "console.ssh.open")
-        assert launch_raised.value.code == "unsupported_capability"
+        assert raised.value.code == "not_configured"
+        assert "首次信任" in raised.value.message or "指纹" in raised.value.message
+        # console.telnet.open: no telnet credentials -> not_configured.
+        with pytest.raises(AdapterError) as raised:
+            adapter.create_launch(session, "console.telnet.open")
+        assert raised.value.code == "not_configured"
+        # console.web.open stays a later milestone: honest unsupported.
+        with pytest.raises(AdapterError) as raised:
+            adapter.create_launch(session, "console.web.open")
+        assert raised.value.code == "unsupported_capability"

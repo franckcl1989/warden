@@ -519,7 +519,6 @@ class HuaweiVrpAdapter:
     event_keys: tuple[str, ...] = ()
     #: {family: metric keys} per adapter (DEVICE_ADAPTERS.md §6.2/§6.4).
     family_keys: dict[str, tuple[str, ...]] = {}
-
     secret_schema: dict[str, object] = {
         "type": "object",
         "required": ["snmp"],
@@ -539,9 +538,22 @@ class HuaweiVrpAdapter:
                     "community": {"type": "string", "minLength": 1},
                 },
             },
-            # SSH credentials are NOT used by M5T2 (SNMP-only); the schema is
-            # declared now for the M5T3 CLI/SSH milestone.
+            # SSH credentials are used by the M5T3 CLI/SSH operations AND by
+            # the M5T4 interactive SSH terminal (SECURITY.md §8).
             "ssh": {
+                "type": "object",
+                "required": ["username", "password"],
+                "additionalProperties": False,
+                "properties": {
+                    "username": {"type": "string", "minLength": 1},
+                    "password": {"type": "string", "minLength": 1},
+                },
+            },
+            # Telnet credentials (M5T4, CORE-ACT-03): the interactive
+            # terminal ONLY — automation never uses Telnet (DEVICE_ADAPTERS
+            # .md §6). A separate telnet user mirrors real VRP practice
+            # (the console/vty login is often not the SSH user).
+            "telnet": {
                 "type": "object",
                 "required": ["username", "password"],
                 "additionalProperties": False,
@@ -573,6 +585,12 @@ class HuaweiVrpAdapter:
                 "type": ["string", "null"],
                 "pattern": "^(?:SHA256:)?[A-Za-z0-9+/]{43}=?$",
             },
+            # M5T4 Telnet fields (CORE-ACT-03, SECURITY.md §6 denylist):
+            # ``telnet`` is the per-device opt-in whose enabling fires the
+            # security.config_changed audit (weak-protocol denylist key);
+            # ``telnet_port`` is the interactive terminal target port.
+            "telnet": {"type": "boolean"},
+            "telnet_port": {"type": "integer", "minimum": 1, "maximum": 65535},
             "verify_tls": {"type": "boolean"},
             EVENT_SOURCE_IPS_CONFIG_KEY: dict(EVENT_SOURCE_IPS_SCHEMA),
         },
@@ -586,8 +604,25 @@ class HuaweiVrpAdapter:
     # CORE-ACT-01/02/04/05/07 + ACCESS-ACT-01/02/03/05/06 run over the VRP
     # SSH executor + SFTP (app/adapters/huawei/ops.py); plan mirrors the
     # shared domain planner (rows the discovery declared supported), and the
-    # not-yet-wired keys (console.* launches, transceiver.diagnose) stay
-    # honest unsupported_capability — never a stub success.
+    # not-yet-wired keys stay honest unsupported_capability — never a stub
+    # success. The browser-terminal keys (console.ssh.open /
+    # console.telnet.open) are wired since M5T4 (ADR-007).
+
+    #: Connection-config keys of the M5T4 Telnet gates (SECURITY.md §6
+    #: denylist semantics; the ``telnet`` key change fires the
+    #: security.config_changed audit via application/security_events.py).
+    TELNET_CONFIG_KEY = "telnet"
+    TELNET_PORT_CONFIG_KEY = "telnet_port"
+    SSH_PORT_CONFIG_KEY = "ssh_port"
+    SSH_FINGERPRINT_CONFIG_KEY = "ssh_host_fingerprint"
+    #: credentials sections the terminal paths consume.
+    SSH_CREDENTIALS_KEY = "ssh"
+    TELNET_CREDENTIALS_KEY = "telnet"
+
+    #: Browser-terminal console keys of each adapter (M5T4, ADR-007): the
+    #: subclass pins the keys its device type declares; console.web.open is
+    #: NOT in this milestone (honest mapping_missing below).
+    terminal_console_keys: frozenset[str] = frozenset()
 
     def plan_operation(self, snapshot: DeviceSnapshot, request: OperationRequest) -> OperationPlan:
         return plan_operation_domain(snapshot, request)
@@ -612,12 +647,110 @@ class HuaweiVrpAdapter:
         return ops.verify_operation_method(session, plan, result, self.certified_models)
 
     def create_launch(self, session: DeviceSession, capability: str) -> LaunchDescriptor:
-        del session, capability
+        """Terminal launch tickets for the browser terminal (M5T4, ADR-007).
+
+        console.ssh.open / console.telnet.open return a ``kind=terminal``
+        descriptor: the platform creates NO vendor URL — the WebSocket
+        terminal dials the device itself (SSH with the pinned fingerprint,
+        or Telnet after BOTH gates). The checks here re-verify the device
+        config LIVE at issue time (a capability row alone can be stale):
+        missing endpoint/credentials/fingerprint/opt-in is an honest
+        ``not_configured`` — never a fabricated ticket (operations.json
+        verification.ticket_and_handshake). console.web.open stays a later
+        milestone (honest ``unsupported_capability``).
+        """
+        if capability == "console.ssh.open":
+            self._require_ssh_terminal_config(session)
+            return LaunchDescriptor(
+                kind="terminal",
+                display_hint="SSH 终端（VRP CLI）",
+                vendor_session_ref=None,
+            )
+        if capability == "console.telnet.open":
+            self._require_telnet_terminal_config(session)
+            return LaunchDescriptor(
+                kind="terminal",
+                display_hint="Telnet 终端（弱协议，明文传输）",
+                vendor_session_ref=None,
+            )
         raise AdapterError(
             "unsupported_capability",
-            "交换机连接能力（console.ssh/telnet/web）的启动描述符在后续里程碑交付",
+            f"本适配器未实现该能力的启动描述符 {capability}（console.web.open 在后续里程碑交付）",
             stage="launch",
         )
+
+    def _require_ssh_terminal_config(self, session: DeviceSession) -> None:
+        """Live SSH terminal gate: port + credentials + PINNED fingerprint.
+
+        Pin-or-refuse applies to the interactive terminal exactly like the
+        automation channel (SECURITY.md §8, M5T4 brief): a ticket is only
+        issued for a device whose host key is already pinned.
+        """
+        config = dict(session.connection_config)
+        credentials = session.credentials
+        if not isinstance(config.get(self.SSH_PORT_CONFIG_KEY), int):
+            raise AdapterError(
+                "not_configured",
+                f"设备未配置 SSH 端口（connection_config.{self.SSH_PORT_CONFIG_KEY}）；"
+                "console.ssh.open 需要 SSH 端口",
+                stage="launch",
+            )
+        ssh = credentials.get(self.SSH_CREDENTIALS_KEY)
+        if not isinstance(ssh, dict) or not ssh.get("username") or not ssh.get("password"):
+            raise AdapterError(
+                "not_configured",
+                f"设备未配置 SSH 账号（credentials.{self.SSH_CREDENTIALS_KEY}）；"
+                "console.ssh.open 需要 SSH 凭据",
+                stage="launch",
+            )
+        fingerprint = config.get(self.SSH_FINGERPRINT_CONFIG_KEY)
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise AdapterError(
+                "not_configured",
+                f"未固定 SSH 主机指纹（connection_config.{self.SSH_FINGERPRINT_CONFIG_KEY}）；"
+                "终端连接拒绝首次信任（host_key_missing）",
+                stage="launch",
+            )
+        try:
+            from app.infrastructure.protocols.vrp.session import canonical_fingerprint
+
+            canonical_fingerprint(fingerprint)
+        except ValueError as exc:
+            raise AdapterError(
+                "validation_failed", f"SSH 主机指纹格式非法：{exc}", stage="launch"
+            ) from exc
+
+    def _require_telnet_terminal_config(self, session: DeviceSession) -> None:
+        """Live Telnet terminal gate: device opt-in + port + credentials.
+
+        The GLOBAL deployment gate (``WARDEN_TELNET_ENABLED``) is enforced by
+        the launch application service BEFORE this adapter call (platform
+        config, not adapter config — SECURITY.md §6/ADR-007); this check
+        proves the DEVICE-side opt-in and target are configured.
+        """
+        config = dict(session.connection_config)
+        credentials = session.credentials
+        if config.get(self.TELNET_CONFIG_KEY) is not True:
+            raise AdapterError(
+                "not_configured",
+                f"设备未启用 Telnet（connection_config.{self.TELNET_CONFIG_KEY}）；"
+                "需逐设备显式开启（弱协议，SECURITY.md §6）",
+                stage="launch",
+            )
+        if not isinstance(config.get(self.TELNET_PORT_CONFIG_KEY), int):
+            raise AdapterError(
+                "not_configured",
+                f"设备未配置 Telnet 端口（connection_config.{self.TELNET_PORT_CONFIG_KEY}）",
+                stage="launch",
+            )
+        telnet = credentials.get(self.TELNET_CREDENTIALS_KEY)
+        if not isinstance(telnet, dict) or not telnet.get("username") or not telnet.get("password"):
+            raise AdapterError(
+                "not_configured",
+                f"设备未配置 Telnet 账号（credentials.{self.TELNET_CREDENTIALS_KEY}）；"
+                "console.telnet.open 需要 Telnet 凭据",
+                stage="launch",
+            )
 
     @property
     def implemented_metric_keys(self) -> frozenset[str]:
@@ -1016,39 +1149,42 @@ class HuaweiVrpAdapter:
         connection_config: Mapping[str, object],
         credentials: Mapping[str, object] | None,
     ) -> tuple[str, str | None, str]:
-        """One operation key row: wired keys follow the SSH configuration
-        (endpoint + pinned fingerprint); unwired keys stay unsupported.
+        """One operation key row: wired keys follow the SSH/Telnet terminal
+        configuration; unwired keys stay unsupported.
 
-        The wired keys carry the [sim] template basis in the detail: the
-        simulator DSL supports them today, formal per-model/VRP certification
-        is pending (ADR-018) — the row never claims real-hardware proof.
+        The wired keys carry the [sim] basis in the detail: the simulator
+        DSL supports them today, formal per-model/VRP certification is
+        pending (ADR-018) — the row never claims real-hardware proof.
         """
+        if key in self.terminal_console_keys:
+            return self._terminal_console_capability(requirement_id, key, connection_config, credentials)
         if key not in self.ssh_operation_keys:
             return (
                 "unsupported",
                 "mapping_missing",
                 f"{requirement_id} 的操作键 {key} 的适配路径尚未接线"
-                "（console.* 连接与 transceiver.diagnose 等在后续里程碑交付；适配器侧缺口，不是设备不支持）",
+                "（transceiver.diagnose 与 console.web.open 等在后续里程碑交付；"
+                "适配器侧缺口，不是设备不支持）",
             )
-        ssh = credentials.get("ssh") if credentials is not None else None
+        ssh = credentials.get(self.SSH_CREDENTIALS_KEY) if credentials is not None else None
         has_ssh_creds = (
             isinstance(ssh, dict)
             and bool(ssh.get("username"))
             and bool(ssh.get("password"))
         )
-        if not isinstance(connection_config.get("ssh_port"), int) or not has_ssh_creds:
+        if not isinstance(connection_config.get(self.SSH_PORT_CONFIG_KEY), int) or not has_ssh_creds:
             return (
                 "not_configured",
                 "ssh_unconfigured",
-                f"{key} 的 SSH 通道未配置（connection_config.ssh_port + credentials.ssh）；"
-                "适配路径已接线，配置 SSH 后可用",
+                f"{key} 的 SSH 通道未配置（connection_config.{self.SSH_PORT_CONFIG_KEY} "
+                f"+ credentials.{self.SSH_CREDENTIALS_KEY}）；适配路径已接线，配置 SSH 后可用",
             )
-        fingerprint = connection_config.get("ssh_host_fingerprint")
+        fingerprint = connection_config.get(self.SSH_FINGERPRINT_CONFIG_KEY)
         if not isinstance(fingerprint, str) or not fingerprint:
             return (
                 "not_configured",
                 "ssh_host_fingerprint_missing",
-                f"{key} 的 SSH 主机指纹未固定（ssh_host_fingerprint）；"
+                f"{key} 的 SSH 主机指纹未固定（{self.SSH_FINGERPRINT_CONFIG_KEY}）；"
                 "自动化连接拒绝首次信任 — 先在探测/向导中固定指纹",
             )
         return (
@@ -1056,6 +1192,94 @@ class HuaweiVrpAdapter:
             None,
             f"{key} 的 SSH/CLI 适配路径已接线（命令模板 [sim] vrp-cli-sim-1；"
             "模拟器 DSL 基础，型号/VRP 真机认证待补 — ADR-018）；指纹已固定，可执行",
+        )
+
+    def _terminal_console_capability(
+        self,
+        requirement_id: str,
+        key: str,
+        connection_config: Mapping[str, object],
+        credentials: Mapping[str, object] | None,
+    ) -> tuple[str, str | None, str]:
+        """One browser-terminal console key row (M5T4, ADR-007).
+
+        - console.ssh.open: supported only when the SSH endpoint AND the
+          pinned host-key fingerprint are configured (terminal connections
+          refuse unpinned hosts exactly like automation — SECURITY.md §8);
+        - console.telnet.open (CORE-ACT-03): additionally requires the
+          per-device ``telnet`` opt-in + telnet_port + telnet credentials.
+          The GLOBAL deployment gate is enforced at launch time by the
+          application service (platform configuration, not device state).
+        """
+        if key == "console.ssh.open":
+            ssh = credentials.get(self.SSH_CREDENTIALS_KEY) if credentials is not None else None
+            has_creds = bool(
+                isinstance(ssh, dict) and ssh.get("username") and ssh.get("password")
+            )
+            if not isinstance(connection_config.get(self.SSH_PORT_CONFIG_KEY), int) or not has_creds:
+                return (
+                    "not_configured",
+                    "ssh_unconfigured",
+                    f"console.ssh.open 的 SSH 通道未配置（connection_config."
+                    f"{self.SSH_PORT_CONFIG_KEY} + credentials.{self.SSH_CREDENTIALS_KEY}）；"
+                    "终端票据已接线，配置 SSH 后可用",
+                )
+            fingerprint = connection_config.get(self.SSH_FINGERPRINT_CONFIG_KEY)
+            if not isinstance(fingerprint, str) or not fingerprint:
+                return (
+                    "not_configured",
+                    "ssh_host_fingerprint_missing",
+                    f"console.ssh.open 的 SSH 主机指纹未固定（{self.SSH_FINGERPRINT_CONFIG_KEY}）；"
+                    "终端连接拒绝首次信任 — 先在探测/向导中固定指纹",
+                )
+            return (
+                "supported",
+                None,
+                "console.ssh.open 浏览器终端已接线（WS + asyncssh，[sim] vrp-cli-sim-1；"
+                "型号/VRP 真机认证待补 — ADR-018）；指纹已固定，可签发终端票据",
+            )
+        if key == "console.telnet.open":
+            telnet = (
+                credentials.get(self.TELNET_CREDENTIALS_KEY)
+                if credentials is not None
+                else None
+            )
+            has_creds = bool(
+                isinstance(telnet, dict) and telnet.get("username") and telnet.get("password")
+            )
+            if not has_creds:
+                return (
+                    "not_configured",
+                    "telnet_credential_missing",
+                    f"console.telnet.open 未配置 Telnet 账号（credentials."
+                    f"{self.TELNET_CREDENTIALS_KEY}）；Telnet 只用于交互终端",
+                )
+            if connection_config.get(self.TELNET_CONFIG_KEY) is not True:
+                return (
+                    "not_configured",
+                    "telnet_disabled",
+                    f"console.telnet.open 未逐设备开启（connection_config."
+                    f"{self.TELNET_CONFIG_KEY}）；弱协议需设备级显式开启（SECURITY.md §6）",
+                )
+            if not isinstance(connection_config.get(self.TELNET_PORT_CONFIG_KEY), int):
+                return (
+                    "not_configured",
+                    "telnet_unconfigured",
+                    f"console.telnet.open 未配置 Telnet 端口（connection_config."
+                    f"{self.TELNET_PORT_CONFIG_KEY}）",
+                )
+            return (
+                "supported",
+                None,
+                "console.telnet.open 浏览器终端已接线（WS + Telnet，弱协议明文传输；"
+                "仅交互终端，自动化不使用 — DEVICE_ADAPTERS.md §6）。"
+                "部署级全局开关在签发票据时校验（SECURITY.md §6/ADR-007）",
+            )
+        return (
+            "unsupported",
+            "mapping_missing",
+            f"{requirement_id} 的连接键 {key} 的适配路径尚未接线"
+            "（console.web.open 在后续里程碑交付；适配器侧缺口，不是设备不支持）",
         )
 
     def _family_answered(self, family: str, evidence: dict[str, object]) -> bool:

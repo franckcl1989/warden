@@ -799,7 +799,17 @@ class TestSshProbeStageAndDiscovery:
                 assert rows[key].support_state == "supported", (key, rows[key].detail)
                 assert rows[key].reason_code is None
                 assert "[sim]" in (rows[key].detail or ""), key
-            for key in ("console.ssh.open", "console.telnet.open", "console.web.open", "transceiver.diagnose"):
+            # M5T4: console.ssh.open is wired and flips supported with the
+            # SSH config; console.telnet.open still needs telnet credentials
+            # + the device opt-in; console.web.open / transceiver.diagnose
+            # stay honest unsupported (later milestones).
+            ssh_terminal = rows["console.ssh.open"]
+            assert ssh_terminal.support_state == "supported", ssh_terminal.detail
+            assert ssh_terminal.reason_code is None
+            telnet_terminal = rows["console.telnet.open"]
+            assert telnet_terminal.support_state == "not_configured", telnet_terminal.detail
+            assert telnet_terminal.reason_code == "telnet_credential_missing"
+            for key in ("console.web.open", "transceiver.diagnose"):
                 assert rows[key].support_state == "unsupported", key
                 assert rows[key].reason_code == "mapping_missing", key
 

@@ -37,6 +37,7 @@ from app.models.observation import (
     UiEvent,
 )
 from app.models.operation import OperationTask, OperationTaskEvent, PreviewTokenUse
+from app.models.terminal import TerminalSession
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -838,4 +839,154 @@ class TestLaunchSessionRetention:
         assert second.launch_sessions_expired == 0
         assert second.launch_sessions_deleted == 0
         assert db_session.scalar(select(func.count()).select_from(LaunchSession)) == 0
+class TestTerminalSessionRetention:
+    """Browser-terminal sessions (migration 0014, ARCHITECTURE.md §5.4).
+
+    A crashed API must not leave an OPEN terminal row behind forever (it
+    would permanently block the per-device-1 / per-user-3 caps of
+    API_CONTRACT.md §11): the sweep closes open rows whose stored activity
+    proves the idle bound passed (same reason/semantics as the live
+    in-process timer — the conditional close is idempotent) or whose total
+    bound passed; closed rows leave after the 30-day lifetime. Terminal
+    content was never stored; only metadata is purged here (SECURITY.md §8).
+    """
+
+    def _terminal_row(
+        self,
+        db_session: Session,
+        device_id: uuid.UUID,
+        user_id: uuid.UUID,
+        *,
+        status: str,
+        opened_at: datetime.datetime,
+        last_activity_at: datetime.datetime,
+        close_reason: str | None = None,
+        closed_at: datetime.datetime | None = None,
+    ) -> LaunchSession:
+        session_row = _session_row(
+            db_session, db_session.get(User, user_id), revoked_at=None
+        )
+        db_session.flush()
+        launch = LaunchSession(
+            device_id=device_id,
+            capability_key="console.ssh.open",
+            requirement_id="CORE-ACT-03",
+            user_id=user_id,
+            session_id=session_row.id,
+            protocol="ssh",
+            descriptor_url=None,
+            descriptor_data={"kind": "terminal"},
+            status="consumed",
+            consumed_at=opened_at,
+            expires_at=opened_at + datetime.timedelta(seconds=60),
+            device_version=1,
+        )
+        db_session.add(launch)
+        db_session.flush()
+        db_session.add(
+            TerminalSession(
+                launch_session_id=launch.id,
+                device_id=device_id,
+                user_id=user_id,
+                protocol="ssh",
+                capability_key="console.ssh.open",
+                requirement_id="CORE-ACT-03",
+                status=status,
+                opened_at=opened_at,
+                last_activity_at=last_activity_at,
+                close_reason=close_reason,
+                closed_at=closed_at,
+            )
+        )
+        db_session.flush()
+        return launch
+
+    def test_stale_open_rows_are_closed_by_idle_and_max_bounds(
+        self, db_session: Session
+    ) -> None:
+        device = make_collection_device(db_session, index=30)
+        user = _user(db_session)
+        db_session.flush()
+        # Idle bound passed (default 15 min): closed with idle_timeout.
+        self._terminal_row(
+            db_session,
+            device.id,
+            user.id,
+            status="open",
+            opened_at=NOW - datetime.timedelta(minutes=30),
+            last_activity_at=NOW - datetime.timedelta(minutes=30),
+        )
+        # Total bound passed (default 2 h) while last_activity looks fresh.
+        self._terminal_row(
+            db_session,
+            device.id,
+            user.id,
+            status="open",
+            opened_at=NOW - datetime.timedelta(hours=3),
+            last_activity_at=NOW - datetime.timedelta(minutes=1),
+        )
+        # A live-looking row (both bounds inside) stays open.
+        self._terminal_row(
+            db_session,
+            device.id,
+            user.id,
+            status="open",
+            opened_at=NOW - datetime.timedelta(minutes=1),
+            last_activity_at=NOW,
+        )
+        db_session.commit()
+
+        report = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
+        assert report.terminal_sessions_closed_idle == 1
+        assert report.terminal_sessions_closed_max == 1
+        rows = db_session.scalars(
+            select(TerminalSession).order_by(TerminalSession.opened_at)
+        ).all()
+        assert [row.status for row in rows] == ["closed", "closed", "open"]
+        # Oldest opened row first: the 3h row hit the max bound, the 30min
+        # row (stale activity) hit the idle bound.
+        assert rows[0].close_reason == "max_duration"
+        assert rows[1].close_reason == "idle_timeout"
+
+    def test_closed_rows_leave_after_thirty_days_and_sweep_is_idempotent(
+        self, db_session: Session
+    ) -> None:
+        device = make_collection_device(db_session, index=31)
+        user = _user(db_session)
+        db_session.flush()
+        closed_at = NOW - datetime.timedelta(days=31)
+        self._terminal_row(
+            db_session,
+            device.id,
+            user.id,
+            status="closed",
+            opened_at=closed_at - datetime.timedelta(minutes=1),
+            last_activity_at=closed_at,
+            close_reason="user_closed",
+            closed_at=closed_at,
+        )
+        # A fresh closed row stays within its forensics window.
+        self._terminal_row(
+            db_session,
+            device.id,
+            user.id,
+            status="closed",
+            opened_at=NOW - datetime.timedelta(minutes=5),
+            last_activity_at=NOW - datetime.timedelta(minutes=5),
+            close_reason="client_disconnected",
+            closed_at=NOW - datetime.timedelta(minutes=5),
+        )
+        db_session.commit()
+
+        first = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+        second = enforce_retention(db_session, now=NOW, settings=SETTINGS)
+
+        assert first.terminal_sessions_deleted == 1
+        assert second.terminal_sessions_deleted == 0
+        remaining = db_session.scalars(select(TerminalSession.id)).all()
+        assert len(remaining) == 1
+        # The 31-day-old launch ticket is gone too (purged in the same pass
+        # after its terminal history left — FK order inside enforce_retention).
+        assert db_session.scalar(select(func.count()).select_from(LaunchSession)) == 1
 

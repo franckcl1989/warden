@@ -33,9 +33,11 @@ from app.api.routes import (
     operations,
     overview,
     roles,
+    terminal,
     users,
 )
 from app.api.routes.health import router as health_router
+from app.api.routes.terminal import TerminalRegistry
 from app.config import WardenSettings, get_settings
 from app.infrastructure.audit import AuditLogger
 from app.infrastructure.db import DatabaseProbe, create_db_engine, create_session_factory
@@ -70,6 +72,9 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     app.state.audit_logger = None
     app.state.engine = None
     app.state.credential_keyring = None
+    # M5T4 (PLT-09): in-process registry of live browser-terminal sessions;
+    # POST /terminal/sessions/{id}/close wakes the owning WebSocket bridge.
+    app.state.terminal_registry = TerminalRegistry()
     if configured_settings.postgres_dsn or configured_settings.postgres_dsn_file is not None:
         engine = create_db_engine(configured_settings.database_url)
         app.state.engine = engine
@@ -110,6 +115,11 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     # Device pulls (PLT-06) carry NO user session: mounted outside the gates,
     # still under /api/v1 for the path contract.
     api_v1_router.include_router(device_file_access.router)
+    # M5T4 browser terminal (PLT-09 终端部分, ADR-007): WS /terminal/sessions/
+    # {ticket} (origin + cookie authenticated in the handler; the password-
+    # change gate is enforced there too) and POST /terminal/sessions/{id}/
+    # close (regular CSRF-protected mutating endpoint).
+    api_v1_router.include_router(terminal.router)
     app.include_router(api_v1_router)
     return app
 

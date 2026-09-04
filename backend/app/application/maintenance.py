@@ -91,6 +91,7 @@ from app.models.observation import (
     MetricRollup5m,
 )
 from app.models.operation import OperationTask
+from app.models.terminal import TerminalSession
 
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -117,6 +118,10 @@ SESSION_CLEANUP_DELAY = datetime.timedelta(days=30)
 # leave after a 30-day lifetime like login sessions (the audit trail in
 # audit_logs is permanent).
 LAUNCH_SESSION_CLEANUP_DELAY = datetime.timedelta(days=30)
+# Browser-terminal sessions (API_CONTRACT.md §7/§11, migration 0014): rows
+# leave 30 days after close (or after open when never closed — a crashed
+# API must never leave a forever-open row blocking the per-device-1 cap).
+TERMINAL_SESSION_CLEANUP_DELAY = datetime.timedelta(days=30)
 
 # Chunk size for retention batch deletes (DATA_MODEL.md §10: 分批删除).
 DELETE_BATCH_SIZE = 2000
@@ -216,8 +221,24 @@ _CHUNKED_DELETE_SQL: dict[str, str] = {
         # status older than the cutoff is expired history — the permanent
         # record is audit_logs (launch.create / launch.consume), never this
         # row. Runs as warden_app, which owns the table (0013, 0008 model).
+        # Terminal rows FK-restrict their ticket, but they are purged first
+        # in the same pass (enforce_retention order), so a 30-day-old ticket
+        # whose terminal history already left is deletable here.
         "DELETE FROM launch_sessions WHERE id IN "
         "(SELECT id FROM launch_sessions WHERE expires_at < :cutoff "
+        "ORDER BY id LIMIT 2000)"
+    ),
+    "terminal_sessions": (
+        # Browser-terminal sessions (migration 0014): one row per terminal
+        # session, closed within minutes-to-hours of opening; rows leave 30
+        # days after close (or after open when never closed — a crashed API
+        # row that the stale-close sweep missed must not live forever). The
+        # permanent record is audit_logs (terminal.handshake_ok /
+        # handshake_failed / closed), never this row — and terminal CONTENT
+        # was never stored here (SECURITY.md §8).
+        "DELETE FROM terminal_sessions WHERE id IN "
+        "(SELECT id FROM terminal_sessions "
+        "WHERE COALESCE(closed_at, opened_at) < :cutoff "
         "ORDER BY id LIMIT 2000)"
     ),
 }
@@ -274,6 +295,14 @@ class RetentionReport:
     # their 60-second window, and rows purged after the 30-day lifetime.
     launch_sessions_expired: int = 0
     launch_sessions_deleted: int = 0
+    # M5T4 browser-terminal sessions (migration 0014, ARCHITECTURE.md §5.4):
+    # a crashed API leaves open rows behind — the sweep closes rows whose
+    # stored activity/idle or total bound passed (same reasons as the live
+    # in-process timers) and purges closed rows after 30 days. The counts
+    # report how many rows THIS pass closed for each bound.
+    terminal_sessions_closed_idle: int = 0
+    terminal_sessions_closed_max: int = 0
+    terminal_sessions_deleted: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -731,6 +760,76 @@ def _expire_launch_sessions(db: Session, *, now: datetime.datetime) -> int:
     return int(rowcount) if rowcount is not None else 0
 
 
+def _close_stale_terminal_sessions(
+    db: Session,
+    *,
+    settings: WardenSettings,
+    audit: AuditLogger | None,
+    now: datetime.datetime,
+) -> tuple[int, int, list[TerminalSession]]:
+    """Close OPEN browser-terminal rows whose bounds provably passed.
+
+    ARCHITECTURE.md §5.4 (会话最长 2 小时、空闲 15 分钟断开) is enforced live
+    by the API process AND here: a crashed API must not leave an open row
+    behind forever (it would permanently block the per-device-1 / per-user-3
+    caps of API_CONTRACT.md §11). The same reasons as the live timers are
+    used; the conditional close is idempotent (a live timer that wins the
+    race closes + audits itself, this sweep then matches zero rows). Audit
+    rows record the sweep close with no actor (system-driven) and never any
+    content. Returns (idle_closed, max_closed, closed_rows).
+    """
+    idle_rows = _close_by(
+        db,
+        reason="idle_timeout",
+        predicate=TerminalSession.last_activity_at
+        <= now - datetime.timedelta(seconds=settings.terminal_session_idle_seconds),
+        now=now,
+    )
+    max_rows = _close_by(
+        db,
+        reason="max_duration",
+        predicate=TerminalSession.opened_at
+        <= now - datetime.timedelta(seconds=settings.terminal_session_max_seconds),
+        now=now,
+    )
+    closed_rows = idle_rows + max_rows
+    if audit is not None:
+        for row in closed_rows:
+            audit.record(
+                action="terminal.closed",
+                resource_type="terminal_session",
+                resource_id=str(row.id),
+                device_id=row.device_id,
+                requirement_id=row.requirement_id,
+                result="success",
+                detail={
+                    "reason": row.close_reason,
+                    "protocol": row.protocol,
+                    "capability_key": row.capability_key,
+                    "trigger": "retention",
+                },
+            )
+    return len(idle_rows), len(max_rows), closed_rows
+
+
+def _close_by(
+    db: Session,
+    *,
+    reason: str,
+    predicate: Any,
+    now: datetime.datetime,
+) -> list[TerminalSession]:
+    """One bounded close statement; returns the rows THIS call closed."""
+    return list(
+        db.scalars(
+            update(TerminalSession)
+            .where(TerminalSession.status == "open", predicate)
+            .values(status="closed", closed_at=now, close_reason=reason)
+            .returning(TerminalSession)
+        ).all()
+    )
+
+
 def _append_only_trigger_exists(db: Session, table: str, trigger: str) -> bool:
     """True when an append-only trigger protects ``table`` (0002/0005).
 
@@ -756,6 +855,7 @@ def enforce_retention(
     *,
     now: datetime.datetime,
     settings: WardenSettings,
+    audit: AuditLogger | None = None,
 ) -> RetentionReport:
     """Enforce the tiered retention (DATA_MODEL.md §10); the caller commits.
 
@@ -763,7 +863,8 @@ def enforce_retention(
     migration 0008 — the DROP/UPDATE/DELETE below are therefore real,
     deployable behavior. The append-only streams are never touched (ADR-030;
     see the module docstring for the exact exemptions and the PostgreSQL
-    trigger/ownership mechanics).
+    trigger/ownership mechanics). ``audit`` (optional, file-retention
+    pattern) records system-driven terminal closes without an actor.
     """
     report = RetentionReport()
 
@@ -832,6 +933,24 @@ def enforce_retention(
         db,
         "sessions",
         {"cutoff": now - SESSION_CLEANUP_DELAY},
+    )
+    # Browser-terminal sessions (M5T4, migration 0014): close rows whose
+    # idle/total bound provably passed (crash recovery — same reasons and
+    # semantics as the live API timers; idempotent conditional closes), then
+    # purge closed rows after the 30-day lifetime. The purge runs BEFORE the
+    # launch purge below: terminal rows FK-restrict their launch ticket, so
+    # the ticket can only leave once its terminal history is gone.
+    (
+        report.terminal_sessions_closed_idle,
+        report.terminal_sessions_closed_max,
+        _closed_terminal_rows,
+    ) = _close_stale_terminal_sessions(
+        db, settings=settings, audit=audit, now=now
+    )
+    report.terminal_sessions_deleted = _chunked_delete(
+        db,
+        "terminal_sessions",
+        {"cutoff": now - TERMINAL_SESSION_CLEANUP_DELAY},
     )
     # Launch tickets (M3T4, migration 0013): issued rows past their
     # 60-second window become ``expired`` (bookkeeping — the single-use

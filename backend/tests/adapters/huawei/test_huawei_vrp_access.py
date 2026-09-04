@@ -123,11 +123,13 @@ class TestProbeAndDiscover:
             assert row.support_state == "supported", (key, row.detail)
             assert row.discovery_method == ADAPTER_KEY and row.reason_code is None
         # Wired CLI/SSH keys without a declared SSH endpoint are honest
-        # not_configured; unwired keys (console.* launches) stay unsupported.
+        # not_configured; the M5T4 terminal key (console.ssh.open) likewise;
+        # still-unwired keys (console.web.open) stay unsupported.
         wired = HuaweiVrpAccessAdapter().ssh_operation_keys
+        terminal = HuaweiVrpAccessAdapter().terminal_console_keys
         for key in ACCESS_OPERATION_KEYS:
             row = rows[key]
-            if key in wired:
+            if key in wired or key in terminal:
                 assert row.support_state == "not_configured", (key, row.detail)
                 assert row.reason_code == "ssh_unconfigured", (key, row.detail)
             else:

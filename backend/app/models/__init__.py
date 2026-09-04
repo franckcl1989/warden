@@ -40,6 +40,7 @@ from app.models.operation import (
     OperationTaskEvent,
     PreviewTokenUse,
 )
+from app.models.terminal import TERMINAL_CLOSE_REASONS, TERMINAL_STATUSES, TerminalSession
 
 __all__ = [
     "ACTIVE_FILE_REFERENCE_STATES",
@@ -63,6 +64,8 @@ __all__ = [
     "RISK_LEVELS",
     "SUPPORT_STATES",
     "TASK_STATES",
+    "TERMINAL_CLOSE_REASONS",
+    "TERMINAL_STATUSES",
     "Alert",
     "CollectionObservationError",
     "CollectionRun",
@@ -82,6 +85,7 @@ __all__ = [
     "OperationTaskEvent",
     "PreviewTokenUse",
     "Session",
+    "TerminalSession",
     "UiEvent",
     "User",
 ]

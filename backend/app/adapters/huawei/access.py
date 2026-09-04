@@ -27,8 +27,7 @@ class HuaweiVrpAccessAdapter(HuaweiVrpAdapter):
     certified_models = CERTIFIED_ACCESS_MODELS
 
     #: ACCESS-ACT keys wired over the VRP SSH executor (DEVICE_ADAPTERS.md
-    #: §6.4; console.* launches are a later milestone — capability rows
-    #: stay honest mapping_missing for them).
+    #: §6.4).
     ssh_operation_keys: frozenset[str] = frozenset(
         {
             "device.restart",
@@ -40,6 +39,10 @@ class HuaweiVrpAccessAdapter(HuaweiVrpAdapter):
             "firmware.update",
         }
     )
+
+    #: M5T4 browser-terminal keys (ADR-007): ACCESS-ACT-04 has SSH + Web —
+    #: only console.ssh.open is a terminal; console.web.open stays unwired.
+    terminal_console_keys: frozenset[str] = frozenset({"console.ssh.open"})
 
     family_keys: dict[str, tuple[str, ...]] = {
         "system": ("system.cpu_percent", "system.memory_percent"),

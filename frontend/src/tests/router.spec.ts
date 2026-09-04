@@ -23,6 +23,7 @@ const EXPECTED_PATHS = [
   '/audit',
   '/users',
   '/system',
+  '/terminal/sessions/:ticket',
 ];
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -63,7 +64,7 @@ describe('router 路由表', () => {
   it('包含 PRODUCT_DESIGN §2 的 11 个路由、强制改密页及任务详情页，路径精确匹配', () => {
     const paths = routes.map((route) => route.path).sort();
     expect(paths).toEqual([...EXPECTED_PATHS].sort());
-    expect(routes).toHaveLength(13);
+    expect(routes).toHaveLength(14);
   });
 
   it('每个路由都有名称、中文标题和组件', () => {

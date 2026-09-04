@@ -54,17 +54,26 @@ from app.models.auth import Session as AuthSession
 from app.models.auth import User
 from app.models.devices import Device
 from app.models.launch import LaunchSession
+from app.models.terminal import TerminalSession
 
 PLT_09 = "PLT-09"
 
 # Capability key -> row protocol (contracts/operations.json channel=launch
-# profiles of this milestone). Terminal keys (console.ssh.open/telnet) are
-# gated out until the M3T5 terminal milestone; unknown launch-channel keys
-# are refused rather than guessed (AGENTS.md: 不得自行猜测).
+# profiles). Terminal keys (console.ssh.open / console.telnet.open) issue
+# one-time browser-terminal tickets (M5T4, ADR-007); unknown launch-channel
+# keys are refused rather than guessed (AGENTS.md: 不得自行猜测).
 LAUNCH_PROTOCOL_BY_KEY: dict[str, str] = {
     "console.kvm.open": "kvm",
     "console.dsm.open": "web",  # NAS-ACT-02 (M4T3)
+    "console.ssh.open": "ssh",  # CORE-ACT-03 / ACCESS-ACT-04 (M5T4)
+    "console.telnet.open": "telnet",  # CORE-ACT-03 (M5T4)
 }
+
+#: Terminal-ticket protocols: these launches return a WebSocket URL and are
+#: consumed by ``WS /terminal/sessions/{ticket}`` — never by GET
+#: ``/launches/{id}`` (a terminal ticket read through the descriptor GET is
+#: a uniform 404 and does NOT consume the row).
+TERMINAL_LAUNCH_PROTOCOLS = frozenset({"ssh", "telnet"})
 
 MESSAGE_UNSUPPORTED_LAUNCH = "该能力不属于远程连接能力，不支持创建启动描述符"
 MESSAGE_NOT_A_TASK_CHANNEL = "该能力属于持久化任务通道，不能作为远程连接启动"
@@ -75,27 +84,30 @@ MESSAGE_USER_SESSION_CAP = "当前用户同时打开的远程会话已达上限�
 MESSAGE_DEVICE_SESSION_CAP = "该设备已有一个活动的远程会话，请先使用或等待其过期"
 MESSAGE_DEVICE_DISABLED = "设备已停用，无法创建远程连接"
 MESSAGE_DEVICE_NOT_READY = "设备未就绪，无法创建远程连接"
+MESSAGE_TELNET_GLOBAL_DISABLED = (
+    "Telnet 未在该部署启用（全局默认关闭，SECURITY.md §6/ADR-007）："
+    "需部署管理员显式开启且只用于交互终端"
+)
 
 # API_CONTRACT.md §11: 每用户最多 3、每设备最多 1 个活动交互会话。
 MAX_ACTIVE_LAUNCHES_PER_USER = 3
 MAX_ACTIVE_LAUNCHES_PER_DEVICE = 1
 
 
-def _retry_after(rows: list[LaunchSession], now: datetime.datetime) -> int:
-    """Seconds until the last blocking session expires (>= 1)."""
-    if not rows:
-        return 1
-    oldest_expiry = min(row.expires_at for row in rows)
-    return max(1, int((oldest_expiry - now).total_seconds()) + 1)
-
-
-def _cap_error(rows: list[LaunchSession], now: datetime.datetime, *, device: bool) -> AppError:
+def _cap_error(
+    rows: list[LaunchSession],
+    now: datetime.datetime,
+    *,
+    device: bool,
+    terminal_blocking: bool = False,
+) -> AppError:
     scope = "launch_session_device" if device else "launch_session_user"
     message = MESSAGE_DEVICE_SESSION_CAP if device else MESSAGE_USER_SESSION_CAP
+    retry = 60 if terminal_blocking else _retry_after_any(rows, now)
     return AppError(
         "rate_limited",
         message,
-        details={"retry_after_seconds": _retry_after(rows, now), "scope": scope},
+        details={"retry_after_seconds": retry, "scope": scope},
     )
 
 
@@ -116,6 +128,35 @@ def _active_rows(
             select(LaunchSession).where(*conditions).order_by(LaunchSession.expires_at)
         ).all()
     )
+
+
+def _open_terminal_rows(
+    db: Session,
+    *,
+    user_id: uuid.UUID | None = None,
+    device_id: uuid.UUID | None = None,
+) -> list[TerminalSession]:
+    """OPEN browser-terminal session rows for a user or device (M5T4).
+
+    API_CONTRACT.md §11 concurrency: the terminal-session caps and the
+    launch-ticket caps are ONE pool (documented in the M5T4 report) — an
+    open session blocks a new launch for the same device and counts against
+    the user's 3, so tickets cannot pile up around open sessions.
+    """
+    conditions = [TerminalSession.status == "open"]
+    if user_id is not None:
+        conditions.append(TerminalSession.user_id == user_id)
+    if device_id is not None:
+        conditions.append(TerminalSession.device_id == device_id)
+    return list(db.scalars(select(TerminalSession).where(*conditions)).all())
+
+
+def _retry_after_any(rows: list[LaunchSession], now: datetime.datetime) -> int:
+    """Seconds until the last blocking ticket expires (>= 1)."""
+    if not rows:
+        return 1
+    oldest_expiry = min(row.expires_at for row in rows)
+    return max(1, int((oldest_expiry - now).total_seconds()) + 1)
 
 
 def _serialize_user(db: Session, user_id: uuid.UUID) -> None:
@@ -199,13 +240,23 @@ def _adapter_error_to_app(exc: AdapterError, capability_key: str) -> AppError:
 def _descriptor_error(descriptor: LaunchDescriptor, capability_key: str) -> AppError | None:
     """Guard against fabricated descriptors (AGENTS.md: 不得把不存在的伪装成成功).
 
-    A kind=url descriptor MUST carry a validated http(s) URL; anything else
-    is an honest not_configured — the platform never opens javascript:/data:
-    or empty targets in a browser tab.
+    Protocol semantics (M5T4): terminal protocols (ssh/telnet) MUST return a
+    ``kind=terminal`` descriptor WITHOUT a URL (the ticket is consumed by the
+    WebSocket endpoint, never by a page navigation); url protocols (kvm/web)
+    MUST return a validated http(s) URL — the platform never opens
+    javascript:/data: or empty targets in a browser tab.
     """
+    protocol = LAUNCH_PROTOCOL_BY_KEY.get(capability_key)
+    is_terminal = protocol in TERMINAL_LAUNCH_PROTOCOLS
+    if is_terminal:
+        if descriptor.kind != "terminal" or descriptor.url is not None:
+            return AppError(
+                "not_configured",
+                MESSAGE_DESCRIPTOR_BAD_KIND,
+                details={"capability_key": capability_key, "missing": "terminal_descriptor_required"},
+            )
+        return None
     if descriptor.kind != "url":
-        # M3T4 carries only url descriptors; terminal-kind tickets arrive
-        # with the M3T5 terminal milestone and are refused here honestly.
         return AppError(
             "not_configured",
             MESSAGE_DESCRIPTOR_BAD_KIND,
@@ -236,6 +287,7 @@ def create_launch(
     keyring: CredentialKeyring,
     logger: AuditLogger | None,
     audit: AuditContext,
+    telnet_allowed: bool = False,
     now: datetime.datetime | None = None,
 ) -> LaunchSession:
     """Protection-chain steps for one launch; the caller (route) commits.
@@ -282,16 +334,36 @@ def create_launch(
                 "capability_key": probe_plan.capability_key,
             },
         )
+    # SECURITY.md §6 / ADR-007 / operations.json preconditions: Telnet is
+    # globally disabled unless the deployment explicitly enables it; the
+    # per-device opt-in is enforced by the adapter (live config check).
+    # This gate must NOT contact the device while Telnet is off.
+    if protocol == "telnet" and not telnet_allowed:
+        raise AppError(
+            "not_configured",
+            MESSAGE_TELNET_GLOBAL_DISABLED,
+            details={
+                "capability_key": probe_plan.capability_key,
+                "missing": "telnet_enabled",
+            },
+        )
     # Serialize the concurrency guards (fixed order: user then device) and
-    # re-check inside the SAME transaction the INSERT commits in.
+    # re-check inside the SAME transaction the INSERT commits in. The caps
+    # count issued tickets AND open terminal sessions as one pool (§11).
     _serialize_user(db, user.id)
     _serialize_device(db, device.id)
     user_active = _active_rows(db, user_id=user.id)
-    if len(user_active) >= MAX_ACTIVE_LAUNCHES_PER_USER:
-        raise _cap_error(user_active, current, device=False)
+    user_open_terminal = _open_terminal_rows(db, user_id=user.id)
+    if len(user_active) + len(user_open_terminal) >= MAX_ACTIVE_LAUNCHES_PER_USER:
+        raise _cap_error(
+            user_active, current, device=False, terminal_blocking=bool(user_open_terminal)
+        )
     device_active = _active_rows(db, device_id=device.id)
-    if len(device_active) >= MAX_ACTIVE_LAUNCHES_PER_DEVICE:
-        raise _cap_error(device_active, current, device=True)
+    device_open_terminal = _open_terminal_rows(db, device_id=device.id)
+    if len(device_active) + len(device_open_terminal) >= MAX_ACTIVE_LAUNCHES_PER_DEVICE:
+        raise _cap_error(
+            device_active, current, device=True, terminal_blocking=bool(device_open_terminal)
+        )
 
     try:
         adapter: DeviceAdapter = get_adapter(device.adapter_key)
@@ -323,6 +395,9 @@ def create_launch(
             "vendor_session_ref": descriptor.vendor_session_ref,
         },
         status="issued",
+        # API_CONTRACT.md §7: 票据绑定…设备版本 (migration 0014) — the
+        # terminal connect refuses a ticket whose device was re-configured.
+        device_version=device.version,
         expires_at=expires_at,
     )
     db.add(row)
@@ -360,15 +435,19 @@ def consume_launch(
     audit: AuditContext,
     now: datetime.datetime | None = None,
 ) -> LaunchSession | None:
-    """Single-use consume of one launch ticket (GET /launches/{id}).
+    """Single-use consume of one URL launch ticket (GET /launches/{id}).
 
-    The conditional UPDATE claims ONLY an ``issued`` row whose user matches
-    and whose 60-second window has not passed; a second read, a foreign
-    user, an expired or revoked row and an unknown id all match zero rows
-    and surface as a uniform 404 by the caller (non-enumerable — a reader
-    cannot distinguish "used", "expired" or "someone else's"). The claim +
-    audit commit in ONE transaction (DATA_MODEL.md §11). The caller renders
-    the response and commits. Returns None when nothing was claimable.
+    The conditional UPDATE claims ONLY an ``issued`` row whose user matches,
+    whose 60-second window has not passed AND whose protocol is url-kind
+    (kvm/web — API_CONTRACT.md §7 descriptors). Terminal tickets
+    (ssh/telnet) are consumed exclusively by ``WS /terminal/sessions/
+    {ticket}``: reading one through this GET is a uniform 404 that never
+    consumes the row. A second read, a foreign user, an expired or revoked
+    row and an unknown id all match zero rows and surface as a uniform 404
+    by the caller (non-enumerable — a reader cannot distinguish "used",
+    "expired" or "someone else's"). The claim + audit commit in ONE
+    transaction (DATA_MODEL.md §11). The caller renders the response and
+    commits. Returns None when nothing was claimable.
     """
     try:
         key = uuid.UUID(launch_id)
@@ -382,6 +461,7 @@ def consume_launch(
             LaunchSession.user_id == user_id,
             LaunchSession.status == "issued",
             LaunchSession.expires_at > current,
+            LaunchSession.protocol.in_(("kvm", "web")),
         )
         .values(
             status="consumed",

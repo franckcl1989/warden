@@ -29,8 +29,8 @@ class HuaweiVrpCoreAdapter(HuaweiVrpAdapter):
     event_keys = ("event.port_flap", "event.device_restart", "event.auth_failure")
 
     #: CORE-ACT keys wired over the VRP SSH executor (DEVICE_ADAPTERS.md
-    #: §6.3; console.* launches and transceiver.diagnose are later
-    #: milestones — capability rows stay honest mapping_missing for them).
+    #: §6.3; transceiver.diagnose stays a later milestone — capability rows
+    #: stay honest mapping_missing for it).
     ssh_operation_keys: frozenset[str] = frozenset(
         {
             "device.restart",
@@ -40,6 +40,13 @@ class HuaweiVrpCoreAdapter(HuaweiVrpAdapter):
             "config.restore",
             "firmware.update",
         }
+    )
+
+    #: M5T4 browser-terminal keys (ADR-007): SSH + Telnet terminal tickets;
+    #: console.web.open stays unwired (later milestone, M3T4-style URL
+    #: descriptor per ADR-006).
+    terminal_console_keys: frozenset[str] = frozenset(
+        {"console.ssh.open", "console.telnet.open"}
     )
 
     family_keys: dict[str, tuple[str, ...]] = {

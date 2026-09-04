@@ -21,6 +21,8 @@
     "openapi-codegen": "node scripts/openapi-codegen.mjs"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "echarts": "^6.1.0",
     "element-plus": "^2.14.5",
     "pinia": "^4.0.3",

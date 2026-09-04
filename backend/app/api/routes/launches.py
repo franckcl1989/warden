@@ -192,10 +192,17 @@ def device_launches_create(
         keyring=keyring,
         logger=_request_logger(request),
         audit=_audit_context(request, context),
+        telnet_allowed=bool(request.app.state.settings.telnet_enabled),
     )
     db.commit()
     db.refresh(row)
-    url = str(request.url_for("launches_get", id=str(row.id)))
+    if row.protocol in launch_service.TERMINAL_LAUNCH_PROTOCOLS:
+        # Terminal tickets (console.ssh.open/telnet.open, M5T4): consumed by
+        # the WebSocket endpoint — the URL points at the WS route (the SPA
+        # swaps http(s) for ws(s)); there is no descriptor GET for them.
+        url = str(request.url_for("terminal_sessions_connect", ticket=str(row.id)))
+    else:
+        url = str(request.url_for("launches_get", id=str(row.id)))
     return LaunchCreateResponse(launch_id=row.id, expires_at=row.expires_at, url=url)
 
 

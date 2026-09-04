@@ -23,6 +23,7 @@ import psycopg
 import psycopg.types.json
 import pytest
 from app.infrastructure.db import create_db_engine, create_session_factory
+from sqlalchemy import text
 
 from tests.db.conftest import WARDEN_APP_ROLE, base_test_dsn
 from tests.observation_factories import make_collection_device
@@ -50,6 +51,10 @@ PURGEABLE_TABLES = (
     # (UPDATE) and purges them after 30 days (DELETE), both via ownership
     # exactly like the 0010 ledger.
     "launch_sessions",
+    # M5T4 (0014): terminal_sessions (browser-terminal rows) is owned by
+    # warden_app — the sweep closes stale open rows (UPDATE) and purges
+    # closed rows after 30 days (DELETE), exactly like the 0013 ledger.
+    "terminal_sessions",
 )
 APPEND_ONLY_TABLES = ("audit_logs", "operation_task_events")
 
@@ -264,6 +269,67 @@ def test_0013_launch_sessions_owned_by_warden_app_and_purgeable(
         # ... and purge it (the 30-day DELETE).
         deleted = connection.execute(
             "DELETE FROM launch_sessions WHERE device_id = %s", (device_id,)
+        )
+        connection.commit()
+        assert deleted.rowcount == 1
+
+
+@pytest.mark.integration
+def test_0014_terminal_sessions_owned_by_warden_app_and_purgeable(
+    warden_app_dsn: str, superuser_session_factory
+) -> None:
+    """The terminal-session table (migration 0014) follows the 0013
+    ownership pattern: warden_app OWNS it, so the retention sweep (which
+    runs as the app account) can close stale rows (UPDATE) and purge
+    30-day-old rows (DELETE); INSERT/DELETE work as warden_app."""
+    with superuser_session_factory() as session:
+        user = make_user(session, index=4)
+        device = make_collection_device(session, index=4)
+        user_id = user.id
+        device_id = device.id
+        web_session = make_web_session(session, user_id=user_id)
+        launch_id = session.execute(
+            text(
+                "INSERT INTO launch_sessions (id, device_id, capability_key, "
+                "requirement_id, user_id, session_id, protocol, status, "
+                "consumed_at, expires_at) "
+                "VALUES (gen_random_uuid(), :device_id, 'console.ssh.open', "
+                "'CORE-ACT-03', :user_id, :session_id, 'ssh', 'consumed', "
+                "now(), now() + interval '60 seconds') RETURNING id"
+            ),
+            {"device_id": device_id, "user_id": user_id, "session_id": web_session.id},
+        ).scalar_one()
+        session.commit()
+
+    with psycopg.connect(base_test_dsn()) as connection:
+        owner = connection.execute(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class "
+            "WHERE oid = 'terminal_sessions'::regclass"
+        ).fetchone()[0]
+    assert owner == WARDEN_APP_ROLE
+
+    with psycopg.connect(warden_app_dsn) as connection:
+        connection.execute(
+            "INSERT INTO terminal_sessions (id, launch_session_id, device_id, "
+            "user_id, protocol, capability_key, requirement_id, status, "
+            "opened_at, last_activity_at) "
+            "VALUES (gen_random_uuid(), %s, %s, %s, 'ssh', 'console.ssh.open', "
+            "'CORE-ACT-03', 'open', now(), now())",
+            (launch_id, device_id, user_id),
+        )
+        connection.commit()
+        # warden_app can close the stale row (the sweep's UPDATE) ...
+        closed = connection.execute(
+            "UPDATE terminal_sessions SET status = 'closed', "
+            "close_reason = 'server_restart', closed_at = now() "
+            "WHERE device_id = %s AND status = 'open'",
+            (device_id,),
+        )
+        connection.commit()
+        assert closed.rowcount == 1
+        # ... and purge it (the 30-day DELETE).
+        deleted = connection.execute(
+            "DELETE FROM terminal_sessions WHERE device_id = %s", (device_id,)
         )
         connection.commit()
         assert deleted.rowcount == 1
