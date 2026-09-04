@@ -4,10 +4,16 @@
  *
  * 进入本页即用路由参数 ticket 建立 WebSocket 连接（同源 Cookie 认证、
  * Origin 由服务端校验）：二进制帧是终端字节流（直接写入 xterm），文本帧
- * 是控制消息（ready / closed / resize）。会话最长 2 小时、空闲 15 分钟由
- * 服务端强制断开（closed 帧带机器原因）；Telnet 会话始终显示持久弱协议
- * 横幅。终端内容绝不落日志/数据库（SECURITY.md §8）——本组件也不做任何
- * 内容持久化。
+ * 是控制消息（ready / refused / closed / resize）。会话最长 2 小时、空闲
+ * 15 分钟由服务端强制断开（closed 帧带机器原因）；Telnet 会话始终显示持久
+ * 弱协议横幅。终端内容绝不落日志/数据库（SECURITY.md §8）——本组件也不做
+ * 任何内容持久化。
+ *
+ * 拒绝契约（M5T4 review）：服务端先 accept 再校验票据/门禁/拨号；失败时先
+ * 送一个机器 refused 帧（携带 reason 键 + code 关闭码 4000-4999），随后以
+ * 该码关闭——本组件按 refused.reason 显示具体中文，关闭码在帧丢失时兜底。
+ * Origin/会话等 HTTP 层校验仍在 accept 前，表现为握手失败（error + close
+ * 1006），走通用失败文案。
  */
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
@@ -17,7 +23,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 
 import { useRoute, useRouter } from 'vue-router';
 
 import { apiBaseUrl, isApiError, request } from '@/api/client';
-import { closeReasonMessage, handshakeCodeMessage } from '@/features/terminal/messages';
+import {
+  closeReasonMessage,
+  handshakeCodeMessage,
+  refusalReasonMessage,
+} from '@/features/terminal/messages';
 
 type SessionState = 'connecting' | 'open' | 'closed';
 
@@ -68,7 +78,13 @@ function handleControl(payload: unknown): void {
   if (typeof payload !== 'object' || payload === null) {
     return;
   }
-  const control = payload as { type?: unknown; session_id?: unknown; protocol?: unknown; reason?: unknown };
+  const control = payload as {
+    type?: unknown;
+    session_id?: unknown;
+    protocol?: unknown;
+    reason?: unknown;
+    code?: unknown;
+  };
   if (control.type === 'ready') {
     sessionId.value = String(control.session_id ?? '');
     protocol.value = control.protocol === 'telnet' ? 'telnet' : control.protocol === 'ssh' ? 'ssh' : '';
@@ -78,6 +94,14 @@ function handleControl(payload: unknown): void {
     const reason = String(control.reason ?? '');
     closedReason.value = reason;
     statusText.value = closeReasonMessage(reason);
+    state.value = 'closed';
+  } else if (control.type === 'refused') {
+    // 会话从未建立：拒绝帧先于关闭码到达（reason 是权威机器键，code 兜底）。
+    const reason = String(control.reason ?? '');
+    const code = typeof control.code === 'number' ? control.code : 1006;
+    closedReason.value = reason;
+    statusText.value =
+      refusalReasonMessage(reason) ?? (handshakeCodeMessage(code) || '终端连接被拒绝，请稍后重试。');
     state.value = 'closed';
   }
 }

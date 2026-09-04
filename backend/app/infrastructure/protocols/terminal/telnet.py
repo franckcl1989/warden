@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.infrastructure.protocols.terminal.errors import TerminalTransportError
 
@@ -49,6 +49,10 @@ _AUTH_FAILED_RE = re.compile(rb"authentication failed|invalid|refused|error", re
 
 #: Login-stage read size; login prompts never need a bigger lookahead.
 _LOGIN_READ_CHUNK = 512
+
+#: Cap on protocol bytes buffered across reads (a peer streaming an
+#: unterminated sub-negotiation is not trusted to grow memory).
+_IAC_BUFFER_MAX = 4096
 
 
 @dataclass
@@ -96,6 +100,17 @@ class TelnetConnection:
     #: but belonging to the session output (e.g. the banner after the login
     #: confirmation); served before any further socket reads.
     pending: bytes = b""
+    #: Protocol-parser state across reads (a real telnet peer may split IAC
+    #: sequences and sub-negotiations across TCP segments — M5T4 review
+    #: fix): the 1-2 bytes of an IAC command truncated at a chunk boundary,
+    #: whether the stream is inside an unterminated ``IAC SB ...`` payload,
+    #: and how many payload bytes were swallowed since the SB started
+    #: (bounded — a pathological peer that never sends IAC SE is not
+    #: trusted to swallow the session forever). Protocol bytes never surface
+    #: as terminal content.
+    _partial_command: bytearray = field(default_factory=bytearray, repr=False)
+    _in_subnegotiation: bool = field(default=False, repr=False)
+    _subnegotiation_dropped: int = field(default=0, repr=False)
 
     async def write(self, data: bytes) -> None:
         """Forward user bytes; escape any embedded IAC (0xFF -> 0xFF 0xFF)."""
@@ -105,45 +120,94 @@ class TelnetConnection:
         await self.writer.drain()
 
     async def read_raw_chunk(self) -> bytes:
-        """Next chunk with telnet commands stripped; b'' at EOF."""
-        if self.pending:
-            chunk = self.pending
-            self.pending = b""
-            return await self._process(chunk)
-        chunk = await self.reader.read(4096)
-        if not chunk:
-            return b""
-        return await self._process(chunk)
+        """Next chunk of user-visible bytes (IAC commands stripped).
+
+        Negotiation-only reads are drained internally: a pure-protocol chunk
+        must never look like EOF (b'') to the stream consumer. b'' is
+        returned only at the real EOF.
+        """
+        while True:
+            if self.pending:
+                chunk = self.pending
+                self.pending = b""
+            else:
+                chunk = await self.reader.read(4096)
+                if not chunk:
+                    return b""
+            visible = await self._process(chunk)
+            if visible:
+                return visible
 
     async def _process(self, data: bytes) -> bytes:
-        """Strip/negotiate IAC sequences; return the user-visible remainder."""
+        """Strip/negotiate IAC sequences; return the user-visible remainder.
+
+        Incremental state machine: an IAC command truncated at the end of a
+        read is buffered in ``_partial_command`` and completed with the next
+        chunk; an unterminated ``IAC SB ...`` payload is discarded across
+        reads until ``IAC SE`` (never buffered — payload bytes are dropped
+        as they arrive).
+        """
+        if self._partial_command:
+            combined = bytes(self._partial_command) + data
+            self._partial_command.clear()
+        else:
+            combined = data
         remaining = bytearray()
         index = 0
-        length = len(data)
+        length = len(combined)
         while index < length:
-            byte = data[index]
+            byte = combined[index]
+            if self._in_subnegotiation:
+                if byte != IAC:
+                    self._subnegotiation_dropped += 1
+                    if self._subnegotiation_dropped > _IAC_BUFFER_MAX:
+                        # Pathological peer: never sends IAC SE. Stop
+                        # swallowing so the session survives (the payload
+                        # beyond the cap is dropped, not guessed).
+                        self._in_subnegotiation = False
+                        self._subnegotiation_dropped = 0
+                    index += 1
+                    continue
+                if index + 1 >= length:
+                    # IAC at the chunk end: SE/IAC-pair byte arrives with
+                    # the next read — buffer the single byte.
+                    self._partial_command.extend(combined[index:])
+                    return bytes(remaining)
+                following = combined[index + 1]
+                if following == SE:
+                    self._in_subnegotiation = False
+                    self._subnegotiation_dropped = 0
+                    index += 2
+                elif following == IAC:
+                    # Escaped 0xFF inside the payload (RFC 854).
+                    self._subnegotiation_dropped += 1
+                    index += 2
+                else:
+                    # Stray IAC: payload byte (dropped); scan on from it.
+                    index += 1
+                continue
             if byte != IAC:
                 remaining.append(byte)
                 index += 1
                 continue
             if index + 2 >= length:
-                # A truncated IAC at a chunk boundary: the next read() will
-                # deliver the rest — stash nothing (chunked IACs across
-                # reads are not produced by this project's simulator; the
-                # sequence is dropped rather than guessed).
-                break
-            command = data[index + 1]
-            option = data[index + 2]
+                # A truncated IAC command at a chunk boundary: the next read
+                # will deliver the rest — buffer the partial sequence
+                # instead of dropping it (a real telnet peer splits
+                # sequences; the old code dropped the tail AND mis-parsed
+                # the next chunk's leading bytes as content).
+                self._partial_command.extend(combined[index:])
+                return bytes(remaining)
+            command = combined[index + 1]
+            option = combined[index + 2]
             index += 3
             if command in (WILL, WONT, DO, DONT) and option == SB:
                 # Malformed framing: stop parsing this chunk.
                 break
             if command == SB:
-                # Sub-negotiation: discard until IAC SE.
-                end = data.find(bytes([IAC, SE]), index)
-                if end < 0:
-                    break
-                index = end + 2
+                # Sub-negotiation: discard the payload until IAC SE.
+                self._in_subnegotiation = True
+                self._subnegotiation_dropped = 0
                 continue
             if command == WILL:
                 reply = (

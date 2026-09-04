@@ -2,14 +2,16 @@
 
 - ``WS /terminal/sessions/{ticket}`` — operation_id
   ``terminal_sessions_connect`` (contracts/http-api.json): handshake
-  checks (Origin against the deployment origin, session cookie, one-time
-  ticket claim incl. device-version binding), then the API process dials
-  the device (asyncssh with the pinned host-key fingerprint for SSH; telnet
-  after BOTH gates — SECURITY.md §6/ADR-007) and bridges the raw byte
-  stream with backpressure (ARCHITECTURE.md §5.4: WebSocket 建立后由 API 进
-  程连接目标 SSH/Telnet; 会话最长 2 小时、空闲 15 分钟断开 — injectable via
-  deployment settings). Terminal CONTENT is never logged or recorded
-  (SECURITY.md §8/§12): only metadata enters logs and audit rows.
+  checks (Origin against the deployment origin, session cookie, forced
+  password change) happen BEFORE the upgrade and are HTTP-level denials,
+  then the endpoint ACCEPTS FIRST and only afterwards claims the one-time
+  ticket (incl. device-version binding) and dials the device (asyncssh
+  with the pinned host-key fingerprint for SSH; telnet after BOTH gates —
+  SECURITY.md §6/ADR-007), bridging the raw byte stream with backpressure
+  (ARCHITECTURE.md §5.4: WebSocket 建立后由 API 进程连接目标 SSH/Telnet; 会话
+  最长 2 小时、空闲 15 分钟断开 — injectable via deployment settings).
+  Terminal CONTENT is never logged or recorded (SECURITY.md §8/§12): only
+  metadata enters logs and audit rows.
 - ``POST /terminal/sessions/{id}/close`` — operation_id
   ``terminal_sessions_close``: closes one session by id (row + live WS).
 
@@ -18,13 +20,28 @@ binary frames so they can never collide):
 
 - server -> client: ``{"type":"ready","session_id":..,"protocol":..}`` once
   the session is open; ``{"type":"closed","reason":..}`` before a normal
-  server-side close; the client may send
-  ``{"type":"resize","cols":n,"rows":n}`` (PTY window change);
-- handshake refusals happen BEFORE accept and map to WebSocket close codes:
-  4401 unauthenticated, 4403 origin/password-gate, 4404 ticket unavailable
-  (unknown/expired/used/foreign/device-version drift — uniform), 4429
-  concurrency cap, 4101 device handshake failed (audit carries the stable
-  error code; the payload never appears anywhere).
+  server-side close; ``{"type":"refused","code":..,"reason":..,
+  "protocol":..}`` before a refusal close (ticket/gate/dial/platform
+  failures — ``reason`` is the machine key and ``code`` mirrors it in the
+  private-use 4000-4999 range); the client may send
+  ``{"type":"resize","cols":n,"rows":n}`` (PTY window change).
+- Delivery model (empirically pinned on uvicorn): a WebSocket close BEFORE
+  ``accept()`` is an HTTP 403 handshake denial — the close code never
+  reaches the client (the browser sees error + close 1006). The endpoint
+  therefore keeps ONLY the HTTP-level auth conditions pre-accept (Origin,
+  session cookie, forced password change — 4401/4403, client-knowable), and
+  accepts first so every server-side refusal is a real post-accept close:
+  one machine ``refused`` JSON frame followed by the code (4404 ticket
+  unavailable — unknown/expired/used/foreign/device-version drift, uniform
+  like the M3T4 uniform-404; 4429 concurrency cap; 4101 device handshake
+  failed — the audit carries the stable error code, the payload never
+  appears anywhere; 4500 unexpected platform failure). A refusal never
+  consumes the ticket (a claim refusal rolls back; a dial refusal closes
+  the row with ``handshake_failed`` + audit and the consumed ticket cannot
+  replay — SECURITY.md §8 semantics unchanged).
+- Refusal reason vocabulary (``application/terminal_sessions.py``):
+  ticket_unavailable / capacity_user / capacity_device /
+  password_change_required / handshake_failed / internal_error.
 
 Close-reason vocabulary (row + closed frame + audit): user_closed /
 idle_timeout / max_duration / handshake_failed / device_connection_lost /
@@ -54,9 +71,11 @@ from app.application.collection import build_device_session
 from app.application.terminal_sessions import (
     CAPACITY_DEVICE,
     CAPACITY_USER,
+    REFUSAL_PASSWORD_CHANGE,
     WS_CLOSE_CAPACITY,
     WS_CLOSE_FORBIDDEN,
     WS_CLOSE_HANDSHAKE_FAILED,
+    WS_CLOSE_INTERNAL_ERROR,
     WS_CLOSE_TICKET_UNAVAILABLE,
     WS_CLOSE_UNAUTHENTICATED,
     ClaimOutcome,
@@ -181,7 +200,7 @@ def _claim(
 def _refusal_close_code(refusal: str) -> int:
     if refusal in (CAPACITY_USER, CAPACITY_DEVICE):
         return WS_CLOSE_CAPACITY
-    if refusal == "password_change_required":
+    if refusal == REFUSAL_PASSWORD_CHANGE:
         return WS_CLOSE_FORBIDDEN
     return WS_CLOSE_TICKET_UNAVAILABLE
 
@@ -496,19 +515,30 @@ class _TerminalBridge:
     # -- lifecycle -----------------------------------------------------------
 
     async def run(self) -> None:
-        """Pump until an end condition; then finalize row + audit + close."""
+        """Pump until an end condition; then finalize row + audit + close.
+
+        ``reason`` is initialized BEFORE the ready send: any unexpected
+        failure below (including a client disconnect while sending ready)
+        still finalizes the row instead of leaking it to the retention
+        sweep.
+        """
         self._ctx.registry.register(self._ctx.terminal_row.id, self)
         outbound: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=_OUTBOUND_QUEUE_MAX)
+        reason = "internal_error"
         try:
-            await self._ctx.websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "ready",
-                        "session_id": str(self._ctx.terminal_row.id),
-                        "protocol": self._ctx.terminal_row.protocol,
-                    }
+            try:
+                await self._ctx.websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "ready",
+                            "session_id": str(self._ctx.terminal_row.id),
+                            "protocol": self._ctx.terminal_row.protocol,
+                        }
+                    )
                 )
-            )
+            except WebSocketDisconnect:
+                reason = "client_disconnected"
+                return
             pumps: dict[asyncio.Task[str | None], str] = {
                 asyncio.create_task(self._device_to_queue(outbound)): "device",
                 asyncio.create_task(self._sender(outbound)): "sender",
@@ -518,7 +548,6 @@ class _TerminalBridge:
                 asyncio.create_task(self._close_waiter()): "close",
                 asyncio.create_task(self._activity_persister()): "activity",
             }
-            reason = "internal_error"
             try:
                 done, pending = await asyncio.wait(
                     pumps, return_when=asyncio.FIRST_COMPLETED
@@ -644,9 +673,97 @@ async def _dial(websocket: WebSocket, *, terminal_row: TerminalSession) -> _Endp
 # ---------------------------------------------------------------------------
 
 
+def _claim_protocol(outcome: ClaimOutcome) -> str | None:
+    """Protocol of a claim outcome (None when the ticket is unknowable)."""
+    if outcome.ok and outcome.terminal_session is not None:
+        return outcome.terminal_session.protocol
+    return None
+
+
+async def _refuse(
+    websocket: WebSocket,
+    *,
+    code: int,
+    reason: str,
+    protocol: str | None,
+) -> None:
+    """One post-accept refusal: a machine JSON frame, then the close code.
+
+    Both are ONLY deliverable after the 101 upgrade (a pre-accept close is
+    an HTTP 403 handshake denial). The frame carries the reason KEY the
+    browser maps to Chinese copy; the code (private-use 4000-4999) mirrors
+    it and stays the fallback if a proxy ever drops the frame. Refusals
+    never consume the ticket (claim refusals roll back; a dial refusal
+    consumed the ticket but closed its row + audited handshake_failed — no
+    replay possible either way).
+    """
+    with contextlib.suppress(Exception):  # noqa: BLE001 - client may be gone
+        await websocket.send_text(
+            json.dumps(
+                {"type": "refused", "code": code, "reason": reason, "protocol": protocol}
+            )
+        )
+        await websocket.close(code=code)
+
+
+async def _fail_setup_internal(
+    websocket: WebSocket,
+    factory: sessionmaker[Session],
+    terminal_row: TerminalSession,
+    auth: _AuthResolution,
+) -> None:
+    """Unexpected exception after the claim committed (ticket consumed, row
+    OPEN): close the row with internal_error + audit NOW instead of leaving
+    it to the retention sweep, then refuse the client (post-accept code)."""
+    _log.warning(
+        "terminal_session_setup_failed",
+        session_id=str(terminal_row.id),
+        device_id=str(terminal_row.device_id),
+        protocol=terminal_row.protocol,
+    )
+    outcome = await asyncio.to_thread(
+        _close_row_internal_error, factory, terminal_row, utcnow()
+    )
+    if outcome.closed_now:
+        source_ip, agent, request_id = _ws_audit_meta(websocket, auth)
+        await asyncio.to_thread(
+            _audit_record,
+            websocket.app,
+            action="terminal.closed",
+            result="success",
+            actor_user_id=auth.user.id,
+            session_id=auth.web_session.id,
+            terminal_row=terminal_row,
+            source_ip=source_ip,
+            user_agent_summary=agent,
+            request_id=request_id,
+            detail={
+                "reason": "internal_error",
+                "protocol": terminal_row.protocol,
+                "capability_key": terminal_row.capability_key,
+                "duration_seconds": 0,
+            },
+        )
+    await _refuse(
+        websocket,
+        code=WS_CLOSE_INTERNAL_ERROR,
+        reason="internal_error",
+        protocol=terminal_row.protocol,
+    )
+
+
 @router.websocket("/terminal/sessions/{ticket}", name="terminal_sessions_connect")
 async def terminal_sessions_connect(websocket: WebSocket, ticket: str) -> None:
-    """SSH/Telnet browser terminal over one one-time ticket (PLT-09)."""
+    """SSH/Telnet browser terminal over one one-time ticket (PLT-09).
+
+    Accept-first-then-validate: the HTTP-level auth conditions (Origin,
+    session cookie, forced password change) close BEFORE the upgrade — a
+    real ASGI server answers a pre-accept close with HTTP 403, which is
+    fine for these client-knowable conditions. Every server-side refusal
+    after the upgrade (ticket claim, device gates, dial, unexpected
+    failures) is a deliverable post-accept close: one machine ``refused``
+    frame then the private-use close code (see the module docstring).
+    """
     settings = _settings_of(websocket)
     factory = _factory_of(websocket.app)
     if not _origin_allowed(websocket):
@@ -659,26 +776,65 @@ async def terminal_sessions_connect(websocket: WebSocket, ticket: str) -> None:
     if auth.user.must_change_password:
         await websocket.close(code=WS_CLOSE_FORBIDDEN)
         return
+
+    # Accept FIRST: every refusal below must be deliverable to the client
+    # (uvicorn delivers close codes only after the 101 upgrade).
+    await websocket.accept()
     outcome = await asyncio.to_thread(
         _claim, factory, ticket=ticket, user=auth.user, settings=settings
     )
     if not outcome.ok:
-        await websocket.close(code=_refusal_close_code(outcome.refusal))
+        await _refuse(
+            websocket,
+            code=_refusal_close_code(outcome.refusal),
+            reason=outcome.refusal,
+            protocol=_claim_protocol(outcome),
+        )
         return
     terminal_row = outcome.terminal_session
     launch_row = outcome.launch
     assert terminal_row is not None and launch_row is not None
 
-    dialed = await _dial(websocket, terminal_row=terminal_row)
-    if isinstance(dialed, tuple):
-        error_code, detail = dialed
-        await asyncio.to_thread(_close_row_handshake_failed, factory, terminal_row, utcnow())
+    try:
+        dialed = await _dial(websocket, terminal_row=terminal_row)
+        if isinstance(dialed, tuple):
+            error_code, detail = dialed
+            await asyncio.to_thread(
+                _close_row_handshake_failed, factory, terminal_row, utcnow()
+            )
+            source_ip, agent, request_id = _ws_audit_meta(websocket, auth)
+            await asyncio.to_thread(
+                _audit_record,
+                websocket.app,
+                action="terminal.handshake_failed",
+                result="failure",
+                actor_user_id=auth.user.id,
+                session_id=auth.web_session.id,
+                terminal_row=terminal_row,
+                source_ip=source_ip,
+                user_agent_summary=agent,
+                request_id=request_id,
+                detail={
+                    "protocol": terminal_row.protocol,
+                    "capability_key": terminal_row.capability_key,
+                    "error_code": error_code,
+                    "reason_code": detail,
+                },
+            )
+            await _refuse(
+                websocket,
+                code=WS_CLOSE_HANDSHAKE_FAILED,
+                reason="handshake_failed",
+                protocol=terminal_row.protocol,
+            )
+            return
+
         source_ip, agent, request_id = _ws_audit_meta(websocket, auth)
         await asyncio.to_thread(
             _audit_record,
             websocket.app,
-            action="terminal.handshake_failed",
-            result="failure",
+            action="terminal.handshake_ok",
+            result="success",
             actor_user_id=auth.user.id,
             session_id=auth.web_session.id,
             terminal_row=terminal_row,
@@ -688,31 +844,11 @@ async def terminal_sessions_connect(websocket: WebSocket, ticket: str) -> None:
             detail={
                 "protocol": terminal_row.protocol,
                 "capability_key": terminal_row.capability_key,
-                "error_code": error_code,
-                "reason_code": detail,
             },
         )
-        await websocket.close(code=WS_CLOSE_HANDSHAKE_FAILED)
+    except Exception:  # noqa: BLE001 - never leave an open row to the sweep
+        await _fail_setup_internal(websocket, factory, terminal_row, auth)
         return
-
-    source_ip, agent, request_id = _ws_audit_meta(websocket, auth)
-    await asyncio.to_thread(
-        _audit_record,
-        websocket.app,
-        action="terminal.handshake_ok",
-        result="success",
-        actor_user_id=auth.user.id,
-        session_id=auth.web_session.id,
-        terminal_row=terminal_row,
-        source_ip=source_ip,
-        user_agent_summary=agent,
-        request_id=request_id,
-        detail={
-            "protocol": terminal_row.protocol,
-            "capability_key": terminal_row.capability_key,
-        },
-    )
-    await websocket.accept()
     bridge = _TerminalBridge(
         _BridgeContext(
             websocket=websocket,
@@ -743,6 +879,28 @@ def _close_row_handshake_failed(
             now=now,
         )
         db.commit()
+
+
+def _close_row_internal_error(
+    factory: sessionmaker[Session],
+    terminal_row: TerminalSession,
+    now: datetime.datetime,
+) -> terminal_service.CloseOutcome:
+    """Conditional internal_error close; ``closed_now`` decides the audit
+    (idempotent — races with a concurrent close cannot double-audit)."""
+    with factory() as db:
+        outcome = terminal_service.close_terminal_session(
+            db,
+            session_id=str(terminal_row.id),
+            user_id=None,
+            reason="internal_error",
+            now=now,
+        )
+        if outcome.closed_now:
+            db.commit()
+        else:
+            db.rollback()
+        return outcome
 
 
 # ---------------------------------------------------------------------------

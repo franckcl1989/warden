@@ -22,9 +22,14 @@ protocol ssh/telnet); ``WS /terminal/sessions/{ticket}`` then claims it:
    reason on every exit — content is never logged or recorded here
    (SECURITY.md §8/§12: this module touches only metadata).
 
-All ticket-level failures are a uniform close code (non-enumerable like the
-M3T4 uniform-404 semantics); only the concurrency caps are distinguishable
-(they are only reachable with a VALID own ticket).
+All ticket-level failures are a uniform refusal (non-enumerable like the M3T4
+uniform-404 semantics); only the concurrency caps are distinguishable (they
+are only reachable with a VALID own ticket). Refusals are delivered POST-accept
+as a machine ``refused`` JSON frame + a private-use close code (4000-4999):
+a pre-accept close cannot deliver codes through a real ASGI server (uvicorn
+answers it with an HTTP 403 handshake denial), so the WS route accepts first
+and only the HTTP-level auth checks (Origin, session cookie, forced password
+change) stay pre-accept (routes/terminal.py).
 """
 
 from __future__ import annotations
@@ -55,22 +60,35 @@ from app.models.terminal import TerminalSession
 PLT_09 = "PLT-09"
 
 #: WebSocket close codes of the terminal endpoint (client-facing protocol;
-#: the browser maps them to Chinese messages — no content ever travels here).
-WS_CLOSE_UNAUTHENTICATED = 4401
-WS_CLOSE_FORBIDDEN = 4403  # origin rejected / password change required
-WS_CLOSE_TICKET_UNAVAILABLE = 4404  # unknown/expired/used/foreign/mismatch
-WS_CLOSE_CAPACITY = 4429
-WS_CLOSE_HANDSHAKE_FAILED = 4101
+#: the browser maps the machine reasons to Chinese messages — no content
+#: ever travels here). All sit in the private-use 4000-4999 range and are
+#: ONLY deliverable POST-accept: the route accepts the WS first and refuses
+#: ticket/gate/dial failures with one small JSON ``refused`` frame followed
+#: by these codes (a pre-accept close is an HTTP 403 handshake denial — only
+#: the HTTP-level auth checks below still close pre-accept).
+WS_CLOSE_UNAUTHENTICATED = 4401  # pre-accept: session cookie missing/invalid
+WS_CLOSE_FORBIDDEN = 4403  # pre-accept: origin rejected / password change required
+WS_CLOSE_TICKET_UNAVAILABLE = 4404  # post-accept: unknown/expired/used/foreign/mismatch
+WS_CLOSE_CAPACITY = 4429  # post-accept: concurrency cap (per-user 3 / per-device 1)
+WS_CLOSE_HANDSHAKE_FAILED = 4101  # post-accept: device dial/handshake failed
+WS_CLOSE_INTERNAL_ERROR = 4500  # post-accept: unexpected platform failure
+
+#: Machine refusal reasons of the post-accept ``refused`` frame. The close
+#: code mirrors the reason; the browser maps the KEY (the code is the
+#: fallback when a proxy drops the frame — never the other way around).
+#: ``TICKET_UNAVAILABLE`` is deliberately uniform (M3T4 uniform-404
+#: semantics); only capacity refusals are distinguishable.
+TICKET_UNAVAILABLE = "ticket_unavailable"
+CAPACITY_USER = "capacity_user"
+CAPACITY_DEVICE = "capacity_device"
+#: Refusal reason key (not a credential): the user must change their
+#: password before any terminal opens (route-level pre-accept gate).
+REFUSAL_PASSWORD_CHANGE = "password_change_required"  # noqa: S105 (a machine reason key, not a credential)
 
 #: Terminal protocols (contracts/operations.json launch profiles with
 #: conflict_scope terminal_session). Consumed ONLY through the WS endpoint —
 #: GET /launches/{id} must never consume a terminal ticket.
 TERMINAL_PROTOCOLS = frozenset({"ssh", "telnet"})
-
-#: Uniform ticket-refusal machine codes (all map to 4404).
-TICKET_UNAVAILABLE = "ticket_unavailable"
-CAPACITY_USER = "capacity_user"
-CAPACITY_DEVICE = "capacity_device"
 
 #: Telnet weak-protocol gate keys (SECURITY.md §6 denylist semantics).
 TELNET_CONFIG_KEY = "telnet"
@@ -244,7 +262,7 @@ def claim_terminal_session(
         # "not claimable" (non-enumerable); the ticket is not consumed.
         return _ticket_unavailable()
     if user.must_change_password:
-        return ClaimOutcome.refused("password_change_required")
+        return ClaimOutcome.refused(REFUSAL_PASSWORD_CHANGE)
     if row.protocol == "telnet" and not settings.telnet_enabled:
         return _ticket_unavailable()
     if row.protocol == "telnet" and device.connection_config.get(TELNET_CONFIG_KEY) is not True:

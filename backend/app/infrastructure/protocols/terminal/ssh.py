@@ -1,8 +1,10 @@
 """Interactive SSH transport for the browser terminal (M5T4).
 
-The WebSocket terminal is an interactive login shell over SSH with a PTY.
-The same security rules as the M5T3 automation channel apply (SECURITY.md
-§8, DEVICE_ADAPTERS.md §6.1, M5T3 report):
+The WebSocket terminal is an interactive login shell over SSH WITHOUT a
+PTY in 0.1.0 (design decision 6 of the M5T4 report: the [sim] semantics
+need no pty; ``resize`` is accepted and no-ops — PTY window-change is the
+documented future step). The same security rules as the M5T3 automation
+channel apply (SECURITY.md §8, DEVICE_ADAPTERS.md §6.1, M5T3 report):
 
 - host-key pin-or-refuse: the pinned ``ssh_host_fingerprint`` is enforced at
   every connect through ``vrp.session.open_connection`` (asyncssh host-key
@@ -13,9 +15,9 @@ The same security rules as the M5T3 automation channel apply (SECURITY.md
 - connect timeout 10 s (DEVICE_ADAPTERS.md §8), mapped to the stable error
   vocabulary of ``errors.py``.
 
-The session opens a raw interactive channel with a PTY (``encoding=None`` —
-the API moves raw bytes between the WebSocket and the device; nothing is
-ever decoded, logged or recorded here).
+The session opens a raw interactive channel WITHOUT a PTY
+(``encoding=None`` — the API moves raw bytes between the WebSocket and the
+device; nothing is ever decoded, logged or recorded here).
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ CONNECT_TIMEOUT_SECONDS = 10.0
 
 @dataclass
 class InteractiveSsh:
-    """One open interactive SSH channel (PTY) plus the owning connection."""
+    """One open interactive SSH channel (no PTY) plus the owning connection."""
 
     connection: asyncssh.SSHClientConnection
     writer: SSHWriter[bytes]
@@ -84,7 +86,7 @@ async def open_interactive_ssh(
     *,
     connect_timeout: float = CONNECT_TIMEOUT_SECONDS,
 ) -> InteractiveSsh:
-    """Open an authenticated interactive SSH session (PTY).
+    """Open an authenticated interactive SSH session (no PTY in 0.1.0).
 
     Fingerprint pin-or-refuse is enforced by ``open_connection``
     (``accept_unpinned=False`` — there is no first-connect capture on the

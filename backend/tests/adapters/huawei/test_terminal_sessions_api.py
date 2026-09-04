@@ -5,24 +5,41 @@ onboarding + asyncssh SSH server with telnet variant): console.ssh.open /
 console.telnet.open tickets (gates, WS url), the WebSocket lifecycle
 (ticket single-use + expiry + user binding + device-version binding,
 concurrency caps, idle/max bounds, close endpoint, audit, and the
-never-log-content rule with a canary string). The simulators are TEST
-DEVICES — never hardware evidence (tests/simulators/vrp/README.md).
+never-log-content rule with a canary string).
+
+Refusal-delivery contract (M5T4 review fix): the endpoint accepts FIRST
+and refuses ticket/gate/dial failures POST-accept with one machine JSON
+frame ``{"type":"refused","code":..,"reason":..}`` followed by the close
+code �?a real ASGI server cannot deliver close codes before the 101
+upgrade (a pre-accept close is an HTTP 403 handshake denial). The
+TestClient cases here assert the frame + code as the browser sees them;
+``TestRealAsgiRefusalDelivery`` repeats the refusals over a REAL uvicorn
+server (loopback TCP) to pin the delivery contract at the ASGI boundary.
+The simulators are TEST DEVICES �?never hardware evidence
+(tests/simulators/vrp/README.md).
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
+import socket
+import threading
 import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import httpx
 import pytest
+import uvicorn
+import websockets
 from app.config import WardenSettings
 from app.infrastructure.crypto import CredentialCipher, CredentialKeyring
 from app.infrastructure.db import create_session_factory, dsn_with_psycopg_dialect
 from app.infrastructure.network_policy import DeviceEndpointPolicy
+from app.infrastructure.session_tokens import SESSION_COOKIE_NAME
 from app.main import create_app
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -54,6 +71,15 @@ CLOSE_FORBIDDEN = 4403
 CLOSE_TICKET_UNAVAILABLE = 4404
 CLOSE_CAPACITY = 4429
 CLOSE_HANDSHAKE_FAILED = 4101
+CLOSE_INTERNAL_ERROR = 4500
+
+#: Post-accept refusal reason keys of the ``refused`` control frame
+#: (application/terminal_sessions.py + routes/terminal.py).
+REASON_TICKET_UNAVAILABLE = "ticket_unavailable"
+REASON_CAPACITY_USER = "capacity_user"
+REASON_CAPACITY_DEVICE = "capacity_device"
+REASON_HANDSHAKE_FAILED = "handshake_failed"
+REASON_INTERNAL_ERROR = "internal_error"
 
 CANARY = "M5T4-CANARY-s3cret-t3rminal"
 
@@ -321,6 +347,35 @@ def _expect_disconnect_code(
     return exc
 
 
+def _refused_frames(messages: list[object]) -> list[dict[str, object]]:
+    return [
+        message
+        for message in messages
+        if isinstance(message, dict) and message.get("type") == "refused"
+    ]
+
+
+def _expect_refusal(
+    http: TestClient,
+    ticket: str,
+    code: int,
+    reason: str,
+    *,
+    origin: str = WS_ORIGIN,
+) -> list[dict[str, object]]:
+    """Assert the post-accept refusal contract: a machine ``refused`` text
+    frame precedes the close (code + reason), then the close code lands."""
+    exc, messages = _connect_expecting_close(http, ticket, origin=origin)
+    assert exc is not None, "expected a disconnect"
+    assert int(exc.code) == code
+    refused = _refused_frames(messages)
+    assert refused, f"expected a refused frame, got {messages!r}"
+    frame = refused[-1]
+    assert frame["reason"] == reason, frame
+    assert frame["code"] == code, frame
+    return refused
+
+
 def _wait_closed(rig: TerminalRig, session_id: str, *, timeout: float = 15.0) -> str:
     """Poll the session row until it is closed (the bridge finalizes
     asynchronously after a client-side disconnect); returns close_reason."""
@@ -340,7 +395,7 @@ def _wait_audit_count(
     rig: TerminalRig, action: str, expected: int, *, timeout: float = 15.0
 ) -> list[dict[str, object]]:
     """Poll until ``action`` has ``expected`` audit rows (the bridge writes
-    the close audit right after the row close — inside the live session)."""
+    the close audit right after the row close �?inside the live session)."""
     deadline = time.monotonic() + timeout
     rows: list[dict[str, object]] = []
     while time.monotonic() < deadline:
@@ -381,7 +436,7 @@ class TestTicketGates:
         ) as (rig, snmp_handle, vrp, http):
             assert vrp.telnet_port is not None
             # The device is fully telnet-configured (opt-in + port + creds):
-            # its capability row is supported — the GLOBAL deployment gate is
+            # its capability row is supported �?the GLOBAL deployment gate is
             # what refuses the ticket (missing=telnet_enabled).
             telnet_config: dict[str, object] = {"telnet": True, "telnet_port": int(vrp.telnet_port)}
             device_id = _onboarded_id(
@@ -402,7 +457,7 @@ class TestTicketGates:
             assert error["code"] == "not_configured"
             assert error["details"]["missing"] == "telnet_enabled"
             # The descriptor GET must NOT consume a terminal ticket (the
-            # ssh ticket above is still issued — a refused read never
+            # ssh ticket above is still issued �?a refused read never
             # consumes, and the GET of a terminal ticket is a uniform 404).
             launch_id = body["launch_id"]
             consumed = http.get(f"{API}/launches/{launch_id}", headers={"Accept": "application/json"})
@@ -566,6 +621,47 @@ class TestTerminalWebSocket:
         rendered = capture.getvalue()
         assert CANARY not in rendered
         assert "terminal_session_closed" in rendered  # metadata logs happened
+    def test_unexpected_dial_failure_closes_row_with_internal_error_and_audits(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        """Review fix: an unexpected exception between the claim and the
+        accepted bridge must close the open row NOW (internal_error) with a
+        terminal.closed audit �?never leave it for the retention sweep."""
+        from app.api.routes import terminal as terminal_route
+
+        async def _dial_boom(websocket, *, terminal_row):
+            del websocket, terminal_row
+            raise RuntimeError("simulated unexpected dial failure")
+
+        monkeypatch.setattr(terminal_route, "_dial", _dial_boom)
+        with _rig_env(
+            switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+        ) as (rig, snmp_handle, vrp, http):
+            device_id = _onboarded_id(
+                http, name="ws-dial-boom", snmp_handle=snmp_handle, vrp_handle=vrp
+            )
+            csrf = _csrf(http)
+            launch_id = _launch(http, csrf, device_id, "console.ssh.open").json()["launch_id"]
+            _expect_refusal(http, launch_id, CLOSE_INTERNAL_ERROR, REASON_INTERNAL_ERROR)
+            # The row was closed immediately with internal_error and the
+            # consumed ticket cannot replay.
+            assert rig.scalar(
+                "SELECT close_reason FROM terminal_sessions WHERE launch_session_id = :id",
+                id=uuid.UUID(launch_id),
+            ) == "internal_error"
+            assert rig.scalar(
+                "SELECT status FROM terminal_sessions WHERE launch_session_id = :id",
+                id=uuid.UUID(launch_id),
+            ) == "closed"
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(launch_id)
+            ) == "consumed"
+            closed_audits = rig.audit_rows("terminal.closed")
+            assert len(closed_audits) == 1
+            assert closed_audits[0]["detail_jsonb"]["reason"] == "internal_error"
+            assert rig.audit_rows("terminal.handshake_ok") == []
+            assert rig.audit_rows("terminal.handshake_failed") == []
+
     def test_handshake_failure_is_audited_and_closes(
         self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
     ) -> None:
@@ -581,7 +677,8 @@ class TestTerminalWebSocket:
             # connect handshake fails like a credential/availability failure.
             vrp.device.knobs.restart_blip_seconds = 60.0
             vrp.device.perform_reboot()
-            _expect_disconnect_code(http, launch_id, CLOSE_HANDSHAKE_FAILED)
+            # Post-accept refusal contract: machine frame + close code 4101.
+            _expect_refusal(http, launch_id, CLOSE_HANDSHAKE_FAILED, REASON_HANDSHAKE_FAILED)
             failed = rig.audit_rows("terminal.handshake_failed")
             assert len(failed) == 1
             assert failed[0]["result"] == "failure"
@@ -598,6 +695,10 @@ class TestTerminalWebSocket:
                 "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(launch_id)
             ) == "consumed"
             assert rig.audit_rows("terminal.handshake_ok") == []
+            # Audit pin (M5T4 review): a session that never opened audits
+            # ONLY terminal.handshake_failed �?no terminal.closed row (the
+            # close-reason vocabulary is carried by the handshake audit).
+            assert rig.audit_rows("terminal.closed") == []
 
     def test_ticket_single_use_and_cross_user_refusal(
         self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
@@ -620,8 +721,8 @@ class TestTerminalWebSocket:
                     pass
                 websocket.close()
                 assert _wait_closed(rig, ready["session_id"]) == "client_disconnected"
-            # Reuse of the same consumed ticket: uniform 4404.
-            _expect_disconnect_code(http, launch_id, CLOSE_TICKET_UNAVAILABLE)
+            # Reuse of the same consumed ticket: uniform 4404 refusal.
+            _expect_refusal(http, launch_id, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
             assert rig.scalar(
                 "SELECT count(*) FROM terminal_sessions WHERE launch_session_id = :id",
                 id=uuid.UUID(launch_id),
@@ -655,7 +756,7 @@ class TestTerminalWebSocket:
                 headers={"Origin": WS_ORIGIN},
             )
             assert login.status_code == 200
-            _expect_disconnect_code(http, foreign_id, CLOSE_TICKET_UNAVAILABLE)
+            _expect_refusal(http, foreign_id, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
             assert rig.scalar(
                 "SELECT status FROM launch_sessions WHERE id = :id",
                 id=uuid.UUID(foreign_id),
@@ -676,14 +777,14 @@ class TestTerminalWebSocket:
                 "UPDATE launch_sessions SET expires_at = now() - interval '1 minute' WHERE id = :id",
                 id=uuid.UUID(launch_id),
             )
-            _expect_disconnect_code(http, launch_id, CLOSE_TICKET_UNAVAILABLE)
+            _expect_refusal(http, launch_id, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
             assert rig.scalar(
                 "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(launch_id)
             ) == "issued"
             # Device re-configured (version bumped) after issue: refused.
             second = _launch(http, csrf, device_id, "console.ssh.open").json()["launch_id"]
             rig.exec("UPDATE devices SET version = version + 1 WHERE id = :id", id=uuid.UUID(device_id))
-            _expect_disconnect_code(http, second, CLOSE_TICKET_UNAVAILABLE)
+            _expect_refusal(http, second, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
             assert rig.scalar(
                 "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(second)
             ) == "issued"
@@ -705,12 +806,15 @@ class TestTerminalWebSocket:
             assert rig.scalar(
                 "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(launch_id)
             ) == "issued"
-            # Logged out: unauthenticated close.
+            # Logged out: unauthenticated close (HTTP-level pre-accept
+            # denial �?no refused frame, only the close code the TestClient
+            # surfaces for the refused upgrade).
             http.post(f"{API}/auth/logout", headers={"X-CSRF-Token": csrf})
             _expect_disconnect_code(http, launch_id, CLOSE_UNAUTHENTICATED)
-            # Unknown ticket (authenticated): uniform 4404.
+            # Unknown ticket (authenticated): post-accept uniform 4404
+            # refusal frame + code.
             _csrf(http)
-            _expect_disconnect_code(http, str(uuid.uuid4()), CLOSE_TICKET_UNAVAILABLE)
+            _expect_refusal(http, str(uuid.uuid4()), CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
 
     def test_idle_bound_closes_with_reason(
         self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
@@ -862,7 +966,7 @@ class TestTerminalWebSocket:
             valid_ticket = released.json()["launch_id"]
             # 3) Claim-time user cap (defense in depth): while the user's
             #    ticket is still valid, three other active interactions
-            #    appear (direct seeding — only reachable through concurrent
+            #    appear (direct seeding �?only reachable through concurrent
             #    claim races); the claim closes 4429 and never consumes.
             with rig.factory() as session:
                 user_id = session.execute(
@@ -906,7 +1010,7 @@ class TestTerminalWebSocket:
                         },
                     )
                 session.commit()
-            _expect_disconnect_code(http, valid_ticket, CLOSE_CAPACITY)
+            _expect_refusal(http, valid_ticket, CLOSE_CAPACITY, REASON_CAPACITY_USER)
             assert rig.scalar(
                 "SELECT status FROM launch_sessions WHERE id = :id",
                 id=uuid.UUID(valid_ticket),
@@ -1079,3 +1183,491 @@ class TestTerminalWebSocket:
             handshake = rig.audit_rows("terminal.handshake_ok")
             assert len(handshake) == 1
             assert handshake[0]["detail_jsonb"]["protocol"] == "telnet"
+
+
+# ---------------------------------------------------------------------------
+# Uvicorn-level refusal delivery (M5T4 review fix #1)
+#
+# A real ASGI server answers a pre-accept ``websocket.close()`` with an
+# HTTP 403 handshake denial — the close code NEVER reaches the client (the
+# browser sees error + close 1006). The terminal endpoint therefore accepts
+# FIRST and refuses ticket/gate/dial failures post-accept: a machine
+# ``refused`` JSON frame followed by a private-use close code. These tests
+# boot a real uvicorn server over loopback TCP and assert exactly what a
+# real client observes for each refusal class: a successful 101 upgrade,
+# the refused frame with the specific reason, and the specific close code —
+# NOT a bare HTTP 403 (pre-fix, every one of these connects failed with
+# HTTP 403 and no code).
+# ---------------------------------------------------------------------------
+
+
+def _start_real_asgi_server(
+    app,
+) -> tuple[uvicorn.Server, threading.Thread, list[BaseException], int]:
+    """Boot one real uvicorn server on a loopback OS-assigned port."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    port = int(sock.getsockname()[1])
+    config = uvicorn.Config(
+        app=app,
+        host="127.0.0.1",
+        port=port,
+        ws="websockets",
+        log_level="warning",
+        access_log=False,
+    )
+    server = uvicorn.Server(config=config)
+    failures: list[BaseException] = []
+    thread = threading.Thread(
+        target=_run_server_threadsafe(server, sock, failures),
+        daemon=True,
+        name="uvicorn-terminal-test",
+    )
+    thread.start()
+    deadline = time.monotonic() + 20.0
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not server.started:
+        if failures:
+            raise AssertionError(f"real ASGI (uvicorn) server failed: {failures[0]!r}")
+        raise AssertionError("real ASGI (uvicorn) server did not start")
+    return server, thread, failures, port
+
+
+def _run_server_threadsafe(
+    server: uvicorn.Server, sock: socket.socket, failures: list[BaseException]
+):
+    def run() -> None:
+        try:
+            server.run(sockets=[sock])
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the caller
+            failures.append(exc)
+
+    return run
+
+
+@contextmanager
+def _real_asgi_env(
+    switch_agent,
+    fresh_test_db_dsn: str,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    telnet_enabled: bool = False,
+) -> Iterator[tuple[TerminalRig, object, object, int]]:
+    """One terminal rig served by a REAL uvicorn process thread (no
+    TestClient anywhere on the request path)."""
+    with switch_agent(profile_key="core_s5732") as snmp_handle, running_vrp_server(
+        "core_s5732", telnet_enabled=True
+    ) as vrp_handle:
+        rig = TerminalRig(
+            fresh_test_db_dsn,
+            tmp_path,
+            monkeypatch,
+            snmp_handle.port,
+            telnet_enabled=telnet_enabled,
+        )
+        server, thread, failures, port = _start_real_asgi_server(rig.app)
+        try:
+            yield rig, snmp_handle, vrp_handle, port
+        finally:
+            server.should_exit = True
+            thread.join(timeout=15.0)
+            if failures:
+                raise AssertionError(
+                    f"real ASGI (uvicorn) server failed at runtime: {failures[0]!r}"
+                )
+            rig.close()
+
+
+def _real_login(
+    client: httpx.Client,
+    *,
+    username: str = ADMIN_USERNAME,
+    password: str = ADMIN_PASSWORD,
+) -> str:
+    """Real-HTTP login; returns the per-session CSRF token (the cookie
+    stays in the client's jar for the WebSocket handshake)."""
+    response = client.post(
+        "/auth/login", json={"username": username, "password": password}
+    )
+    assert response.status_code == 200, response.text
+    return str(response.json()["csrf_token"])
+
+
+def _real_onboard(
+    client: httpx.Client,
+    csrf: str,
+    *,
+    name: str,
+    snmp_port: int,
+    ssh_port: int,
+    vrp_fingerprint: str,
+    connection_config: dict[str, object] | None = None,
+) -> str:
+    """Real-HTTP probe + create; returns the device id."""
+    config: dict[str, object] = {
+        "snmp_version": "v3",
+        "port": snmp_port,
+        "ssh_port": ssh_port,
+        "ssh_host_fingerprint": vrp_fingerprint,
+    }
+    if connection_config is not None:
+        config.update(connection_config)
+    payload = {
+        "device_type": "core_switch",
+        "adapter_key": CORE_ADAPTER_KEY,
+        "management_endpoint": SIM_HOST,
+        "connection_config": config,
+        "credentials": _credentials(),
+    }
+    probe = client.post("/device-probes", json=payload, headers={"X-CSRF-Token": csrf})
+    assert probe.status_code == 200, probe.text
+    body = probe.json()
+    assert body["ok"] is True, body
+    created = client.post(
+        "/devices",
+        json={
+            "name": name,
+            "device_type": "core_switch",
+            "adapter_key": CORE_ADAPTER_KEY,
+            "management_endpoint": SIM_HOST,
+            "connection_config": config,
+            "credentials": _credentials(),
+            "enabled": True,
+            "probe_token": body["probe_token"],
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert created.status_code == 201, created.text
+    return str(created.json()["id"])
+
+
+def _real_launch(client: httpx.Client, csrf: str, device_id: str, capability_key: str) -> str:
+    response = client.post(
+        f"/devices/{device_id}/launches",
+        json={"capability_key": capability_key},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 201, response.text
+    return str(response.json()["launch_id"])
+
+
+async def _real_ws_observe(
+    port: int,
+    ticket: str,
+    *,
+    cookie: str | None,
+    origin: str = "http://localhost",
+) -> tuple[int | None, list[dict[str, object]]]:
+    """One real client WS connect over uvicorn: collect text frames until
+    the server closes; returns (close_code, parsed text frames)."""
+    uri = f"ws://127.0.0.1:{port}/api/v1/terminal/sessions/{ticket}"
+    headers = [("Cookie", f"{SESSION_COOKIE_NAME}={cookie}")] if cookie else []
+    frames: list[dict[str, object]] = []
+    close_code: int | None = None
+    async with websockets.connect(uri, origin=origin, additional_headers=headers) as ws:
+        while True:
+            try:
+                message = await asyncio.wait_for(ws.recv(), timeout=15.0)
+            except websockets.ConnectionClosed as exc:
+                close_code = exc.rcvd.code if exc.rcvd is not None else None
+                break
+            except TimeoutError:
+                raise AssertionError(f"no close within 15 s; frames so far: {frames!r}") from None
+            if isinstance(message, str):
+                frames.append(json.loads(message))
+    return close_code, frames
+
+
+def _assert_real_refusal(
+    frames: list[dict[str, object]], code: int, reason: str
+) -> None:
+    refused = [frame for frame in frames if frame.get("type") == "refused"]
+    assert refused, f"expected a refused frame, got {frames!r}"
+    assert refused[-1]["reason"] == reason, frames
+    assert refused[-1]["code"] == code, frames
+
+
+class TestRealAsgiRefusalDelivery:
+    """What a REAL client observes for every terminal refusal class.
+
+    Pre-fix, all of these were pre-accept closes: uvicorn answered each
+    with HTTP 403 (no close code, no reason frame) — the per-code Chinese
+    mapping was dead code in production. Post-fix each refusal must be a
+    deliverable post-accept close (frame + code) while the security
+    semantics stay identical (a refused ticket is never consumed).
+    """
+
+    # uvicorn 0.52's bundled websockets server protocol imports the
+    # deprecated ``websockets.legacy`` implementation and warns about it
+    # (both warnings fire inside the server thread); pytest's -W error
+    # would turn them into a server crash. The client side of these tests
+    # uses the current websockets API — only the uvicorn implementation is
+    # legacy (uvicorn 0.52 + websockets is the only ws option without new
+    # dependencies: no websockets-sansio/wsproto in the lockfile).
+    pytestmark = [
+        pytest.mark.filterwarnings("ignore:websockets.legacy is deprecated.*:DeprecationWarning"),
+        pytest.mark.filterwarnings(
+            "ignore:The `websockets` implementation is deprecated.*:uvicorn.config.UvicornDeprecationWarning"
+        ),
+        # websockets.legacy warns per connection when uvicorn wraps its
+        # ws_handler for the removed second argument.
+        pytest.mark.filterwarnings("ignore:remove second argument of ws_handler:DeprecationWarning"),
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _collect_garbage_inside_the_item(self) -> Iterator[None]:
+        """Finalize GC objects within the item scope.
+
+        The uvicorn/websockets/psycopg objects of these tests carry
+        finalizers (``__del__``) that warn when they are collected while
+        still open/not closed cleanly. If collection only happens at
+        session cleanup, pytest replays the unraisable AFTER the summary —
+        outside every item's ``filterwarnings`` scope — which flips the
+        exit code. Collecting deterministically at item teardown keeps the
+        finalizers inside the module's warning filters.
+        """
+        import gc
+
+        yield
+        gc.collect()
+
+    async def test_expired_ticket_refusal_is_a_post_accept_close(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        with _real_asgi_env(
+            switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+        ) as (rig, snmp_handle, vrp, port):
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}/api/v1", timeout=httpx.Timeout(30.0)) as client:
+                csrf = _real_login(client)
+                device_id = _real_onboard(
+                    client,
+                    csrf,
+                    name="real-expiry",
+                    snmp_port=int(snmp_handle.port),
+                    ssh_port=int(vrp.port),
+                    vrp_fingerprint=vrp.host_fingerprint,
+                )
+                ticket = _real_launch(client, csrf, device_id, "console.ssh.open")
+                rig.exec(
+                    "UPDATE launch_sessions SET expires_at = now() - interval '1 minute' "
+                    "WHERE id = :id",
+                    id=uuid.UUID(ticket),
+                )
+                close_code, frames = await _real_ws_observe(
+                    port, ticket, cookie=client.cookies.get(SESSION_COOKIE_NAME)
+                )
+            assert close_code == CLOSE_TICKET_UNAVAILABLE
+            _assert_real_refusal(frames, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(ticket)
+            ) == "issued"
+
+    async def test_cross_user_ticket_refusal_is_a_post_accept_close(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        with _real_asgi_env(
+            switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+        ) as (rig, snmp_handle, vrp, port):
+            with rig.factory() as session:
+                create_user(
+                    session,
+                    username="real-op",
+                    password="Op!pass-2026-Strong",
+                    role="operator",
+                )
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}/api/v1", timeout=httpx.Timeout(30.0)) as admin:
+                csrf = _real_login(admin)
+                device_id = _real_onboard(
+                    admin,
+                    csrf,
+                    name="real-cross",
+                    snmp_port=int(snmp_handle.port),
+                    ssh_port=int(vrp.port),
+                    vrp_fingerprint=vrp.host_fingerprint,
+                )
+                ticket = _real_launch(admin, csrf, device_id, "console.ssh.open")
+                with httpx.Client(base_url=f"http://127.0.0.1:{port}/api/v1", timeout=httpx.Timeout(30.0)) as foreign:
+                    _real_login(foreign, username="real-op", password="Op!pass-2026-Strong")
+                    close_code, frames = await _real_ws_observe(
+                        port, ticket, cookie=foreign.cookies.get(SESSION_COOKIE_NAME)
+                    )
+            assert close_code == CLOSE_TICKET_UNAVAILABLE
+            _assert_real_refusal(frames, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(ticket)
+            ) == "issued"
+
+    async def test_device_version_drift_refusal_is_a_post_accept_close(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        with _real_asgi_env(
+            switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+        ) as (rig, snmp_handle, vrp, port):
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}/api/v1", timeout=httpx.Timeout(30.0)) as client:
+                csrf = _real_login(client)
+                device_id = _real_onboard(
+                    client,
+                    csrf,
+                    name="real-drift",
+                    snmp_port=int(snmp_handle.port),
+                    ssh_port=int(vrp.port),
+                    vrp_fingerprint=vrp.host_fingerprint,
+                )
+                ticket = _real_launch(client, csrf, device_id, "console.ssh.open")
+                rig.exec(
+                    "UPDATE devices SET version = version + 1 WHERE id = :id",
+                    id=uuid.UUID(device_id),
+                )
+                close_code, frames = await _real_ws_observe(
+                    port, ticket, cookie=client.cookies.get(SESSION_COOKIE_NAME)
+                )
+            assert close_code == CLOSE_TICKET_UNAVAILABLE
+            _assert_real_refusal(frames, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(ticket)
+            ) == "issued"
+
+    async def test_telnet_gate_closed_at_claim_is_a_post_accept_close(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        # The device launches a telnet ticket with BOTH gates on, then the
+        # per-device opt-in disappears before the claim: the claim re-gate
+        # refuses — deliverable post-accept, ticket never consumed.
+        with _real_asgi_env(
+            switch_agent,
+            fresh_test_db_dsn,
+            tmp_path,
+            monkeypatch,
+            telnet_enabled=True,
+        ) as (rig, snmp_handle, vrp, port):
+            assert vrp.telnet_port is not None
+            telnet_config: dict[str, object] = {
+                "telnet": True,
+                "telnet_port": int(vrp.telnet_port),
+            }
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}/api/v1", timeout=httpx.Timeout(30.0)) as client:
+                csrf = _real_login(client)
+                device_id = _real_onboard(
+                    client,
+                    csrf,
+                    name="real-telnet-gate",
+                    snmp_port=int(snmp_handle.port),
+                    ssh_port=int(vrp.port),
+                    vrp_fingerprint=vrp.host_fingerprint,
+                    connection_config=telnet_config,
+                )
+                ticket = _real_launch(client, csrf, device_id, "console.telnet.open")
+                # Device opt-in revoked between issue and claim (raw config
+                # change — the device VERSION is untouched, so only the
+                # telnet gate can refuse).
+                rig.exec(
+                    "UPDATE devices SET connection_config = connection_config - 'telnet' "
+                    "WHERE id = :id",
+                    id=uuid.UUID(device_id),
+                )
+                close_code, frames = await _real_ws_observe(
+                    port, ticket, cookie=client.cookies.get(SESSION_COOKIE_NAME)
+                )
+            assert close_code == CLOSE_TICKET_UNAVAILABLE
+            _assert_real_refusal(frames, CLOSE_TICKET_UNAVAILABLE, REASON_TICKET_UNAVAILABLE)
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(ticket)
+            ) == "issued"
+
+    async def test_concurrency_refusal_is_a_post_accept_close(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        with _real_asgi_env(
+            switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+        ) as (rig, snmp_handle, vrp, port):
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}/api/v1", timeout=httpx.Timeout(30.0)) as client:
+                csrf = _real_login(client)
+                device_id = _real_onboard(
+                    client,
+                    csrf,
+                    name="real-cap",
+                    snmp_port=int(snmp_handle.port),
+                    ssh_port=int(vrp.port),
+                    vrp_fingerprint=vrp.host_fingerprint,
+                )
+                ticket = _real_launch(client, csrf, device_id, "console.ssh.open")
+                # Defense-in-depth claim-time user cap: while the user's
+                # ticket is still valid, two other open interactions appear
+                # (direct seeding — the issue-time caps already passed).
+                with rig.factory() as session:
+                    user_id = session.execute(
+                        text("SELECT id FROM users WHERE username = 'admin'")
+                    ).scalar_one()
+                    web_session_id = session.execute(
+                        text("SELECT id FROM sessions ORDER BY created_at DESC LIMIT 1")
+                    ).scalar_one()
+                    device_uuid = uuid.UUID(device_id)
+                    for _index in range(2):
+                        extra_ticket = uuid.uuid4()
+                        session.execute(
+                            text(
+                                "INSERT INTO launch_sessions (id, device_id, capability_key, "
+                                " requirement_id, user_id, session_id, protocol, descriptor_data, "
+                                " status, expires_at, device_version, version) "
+                                "VALUES (:id, :device_id, 'console.ssh.open', 'CORE-ACT-03', "
+                                " :user_id, :session_id, 'ssh', '{}'::jsonb, 'issued', "
+                                " now() + interval '60 seconds', 1, 1)"
+                            ),
+                            {
+                                "id": extra_ticket,
+                                "device_id": device_uuid,
+                                "user_id": user_id,
+                                "session_id": web_session_id,
+                            },
+                        )
+                        session.execute(
+                            text(
+                                "INSERT INTO terminal_sessions (id, launch_session_id, device_id, "
+                                " user_id, protocol, capability_key, requirement_id, status, "
+                                " opened_at, last_activity_at) "
+                                "VALUES (:id, :ticket_id, :device_id, :user_id, 'ssh', "
+                                " 'console.ssh.open', 'CORE-ACT-03', 'open', now(), now())"
+                            ),
+                            {
+                                "id": uuid.uuid4(),
+                                "ticket_id": extra_ticket,
+                                "device_id": device_uuid,
+                                "user_id": user_id,
+                            },
+                        )
+                    session.commit()
+                close_code, frames = await _real_ws_observe(
+                    port, ticket, cookie=client.cookies.get(SESSION_COOKIE_NAME)
+                )
+            assert close_code == CLOSE_CAPACITY
+            _assert_real_refusal(frames, CLOSE_CAPACITY, REASON_CAPACITY_USER)
+            assert rig.scalar(
+                "SELECT status FROM launch_sessions WHERE id = :id", id=uuid.UUID(ticket)
+            ) == "issued"
+
+    async def test_pre_accept_auth_denials_stay_http_level(
+        self, switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+    ) -> None:
+        """Origin/session conditions close BEFORE accept on purpose: a real
+        client observes an HTTP 403 handshake denial (no code) — that is
+        the documented HTTP-level behavior, unlike ticket refusals."""
+        with _real_asgi_env(
+            switch_agent, fresh_test_db_dsn, tmp_path, monkeypatch
+        ) as (_rig, _snmp, _vrp, port):
+            uri = f"ws://127.0.0.1:{port}/api/v1/terminal/sessions/{uuid.uuid4()}"
+            with pytest.raises(websockets.exceptions.InvalidStatus) as excinfo:
+                async with websockets.connect(uri, origin="http://localhost"):
+                    pass  # pragma: no cover - the handshake must be denied
+            assert excinfo.value.response.status_code == 403
+            with pytest.raises(websockets.exceptions.InvalidStatus) as excinfo:
+                async with websockets.connect(
+                    uri,
+                    origin="http://evil.example",
+                    additional_headers=[("Cookie", "warden_session=bogus")],
+                ):
+                    pass  # pragma: no cover - the handshake must be denied
+            assert excinfo.value.response.status_code == 403
+

@@ -11,7 +11,9 @@ import TerminalPage from '@/features/terminal/TerminalPage.vue';
  * - 挂载即按 ticket 建立 WebSocket（ws(s)://host + /api/v1/terminal/sessions/..，
  *   二进制帧 = 终端字节流、文本帧 = 控制消息）；
  * - ready 控制帧进入 open 状态并记录 session_id/protocol；
- * - closed 帧把关闭原因转成中文展示；预握手关闭码有对应文案；
+ * - closed 帧把关闭原因转成中文展示；
+ * - refused 帧（accept 后拒绝契约：机器 reason 键 + code 4000-4999 关闭码）
+ *   按 reason 显示具体中文；帧丢失时按关闭码兜底；
  * - Telnet 会话显示持久弱协议横幅；
  * - "关闭会话"调用 POST /terminal/sessions/{id}/close；
  * - 终端内容（二进制帧）只写入 xterm，不进入任何 DOM 文本断言之外的状态。
@@ -197,7 +199,27 @@ describe('terminal page（M5T4）', () => {
     expect(wrapper.text()).toContain('会话达到最长时限');
   });
 
-  it('握手关闭码（票据不可用/容量/握手失败）渲染对应中文提示', async () => {
+  it('refused 帧（post-accept 拒绝契约）按 reason 渲染对应中文提示', async () => {
+    for (const [reason, snippet] of [
+      ['ticket_unavailable', '终端票据不可用'],
+      ['capacity_user', '会话数量已达上限'],
+      ['capacity_device', '会话数量已达上限'],
+      ['handshake_failed', '握手失败'],
+      ['internal_error', '会话异常终止'],
+      ['password_change_required', '先修改密码'],
+    ] as const) {
+      const wrapper = await mountPage();
+      const socket = sockets[sockets.length - 1]!;
+      // 服务端：refused 帧先到，随后以同一 code 关闭；状态已 closed 的
+      // onClose 不再覆盖具体文案。
+      emitText(socket, { type: 'refused', code: 4404, reason, protocol: 'ssh' });
+      socket.onclose?.({ code: 4404, reason: '' } as CloseEvent);
+      await flushAll();
+      expect(wrapper.text()).toContain(snippet);
+    }
+  });
+
+  it('refused 帧丢失时按关闭码兜底（回退路径仍映射具体中文）', async () => {
     for (const [code, snippet] of [
       [4404, '终端票据不可用'],
       [4429, '会话数量已达上限'],
