@@ -114,7 +114,7 @@ foreach ($wardenRequirement in $wardenCatalog.requirements) {
         if ($wardenKey) { $wardenCapabilityKeys.Add($wardenKey) }
     }
     foreach ($wardenOperation in @($wardenRequirement.operations)) {
-        $wardenCapabilityKeys.Add($wardenOperation.key)
+        if ($wardenOperation -and $wardenOperation.key) { $wardenCapabilityKeys.Add($wardenOperation.key) }
     }
 }
 $wardenUniqueKeys = @($wardenCapabilityKeys | Sort-Object -Unique)
@@ -170,7 +170,7 @@ foreach ($wardenRequirement in $wardenCatalog.requirements) {
         if ($wardenKey) { $wardenAdapterKeysForRequirement += $wardenKey }
     }
     foreach ($wardenOperation in @($wardenRequirement.operations)) {
-        $wardenAdapterKeysForRequirement += $wardenOperation.key
+        if ($wardenOperation -and $wardenOperation.key) { $wardenAdapterKeysForRequirement += $wardenOperation.key }
     }
     $wardenAdapterRefs = [System.Collections.Generic.List[string]]::new()
     foreach ($wardenKey in $wardenAdapterKeysForRequirement) {
