@@ -253,6 +253,15 @@
 - 原因：把测试/开发适配器暴露在正式接入向导中会让用户以为存在一条通往"已支持"的捷径；向导呈现的每个适配器都应是对应正式支持路径的入口，正式支持状态由认证矩阵决定。
 - 结果：向导与后端注册表分离（注册表仍可注册任意适配器供测试/API 使用）；能力支持状态与认证矩阵继续作为正式支持的唯一声明来源。
 
+## ADR-033：空组件指标唯一性用成对部分唯一索引，不用表达式索引仲裁
+
+- 状态：`accepted`
+- 日期：2026-09-07
+- 决策：`metric_points`/`metric_latest`/滚动聚合表中"component_id 为空时按 (device_id, metric_key) 唯一"的约束由两个部分唯一索引实现：`(device_id, component_id, metric_key) WHERE component_id IS NOT NULL` 与 `(device_id, metric_key) WHERE component_id IS NULL`；upsert 的 `ON CONFLICT` 仲裁子句使用常量谓词（`WHERE component_id IS NOT NULL` / `IS NULL`），不含参数。
+- 原因：原方案用 `COALESCE(component_id, $1::uuid)` 表达式索引并在仲裁子句传参数；psycopg3 auto-PREPARE 切换到 generic plan 后仲裁间歇性失配（默认阈值下实测每 60 次 upsert 失败 30-50 次），导致 latest 状态丢失与 handler_failed 抖动。正确性不能依赖规划器/预处理行为。
+- 结果：迁移 0016 重写相关唯一索引（含降级）；回归测试在 auto-PREPARE 默认与禁用两种设置下均零失败；M6T4 负载 smoke 复跑 0 handler_failed。
+
+
 
 
 
