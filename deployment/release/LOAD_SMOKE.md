@@ -79,6 +79,21 @@ API/Worker/PostgreSQL 栈，不是现场验收负载运行，不构成任何容�
   `metric_rollups_5m` +454、`ui_events` +387，其余表无增量；逐表数字见报告）；
 - 告警：2 条活跃（access 交换机按 profile 自带的 PoE 端口问题由告警引擎真实开出）。
 
+## 已记录运行（M6T4b 修复后重跑，2026-09-07，window=600 s，readers=3）
+
+文件：`deployment/release/load-smoke-20260907-m6t4b.json`。同一场景在 M6T4b 修复
+（migration 0016：COALESCE 表达式唯一索引 → 部分唯一索引对，ON CONFLICT arbiter 不再含参数）
+后重跑，验证下节可靠性现象的修复：
+
+- **Worker 零失败**：`worker_log.handler_failed_count = 0`（修复前 9 次）；
+  API 读取 3×~760 = 2282 次全部 HTTP 200；claim 延迟总体 P95 ≈ 954 ms、P99 ≈ 1087 ms；
+  调度网格延迟 P95 ≈ 10.2 s（不变，仍是一个 10 s tick 的量化延迟）；
+- 队列：窗口结束 `succeeded=349, partial=2`（与修复前相同的诚实 partial 语义），无排队/运行中/失败残留；
+- DB：窗口内增长 4.6 MB（`metric_points` +8,676、`metric_rollups_5m` +662、`collection_runs` +272、
+  `ui_events` +388；`metric_latest` 稳定 926 行、delta 0）；活动告警 2。
+- 回归测试：`tests/infrastructure/test_upsert_prepare.py` 在 psycopg3 自动 PREPARE 默认配置与
+  `prepare_threshold=None` 两种设置下均 0 失败（单连接 60 次最新值 upsert + 30 次 rollup 重生成）。
+
 ## 观察到的平台可靠性现象（必须随本报告一起读）
 
 运行期间 Worker 出现 9 次 `handler_failed`（`collection_pool` 内 `metric_latest` upsert 报
@@ -100,11 +115,18 @@ API/Worker/PostgreSQL 栈，不是现场验收负载运行，不构成任何容�
 或把冲突目标改为文本字面量、或迁移为 `NULLS NOT DISTINCT` 普通唯一索引——均属平台代码/迁移变更，需 ADR，
 超出 M6T4 的“deployment/ 增量”范围，已上报 M6T4 报告待决策）。
 
+**修复（M6T4b，已实施）**：采用“部分唯一索引对”方向 —— migration `0016_metric_dedupe_partial`
+把 metric_points/metric_latest/metric_rollups_5m/1h 的 COALESCE 表达式唯一索引改写为
+`(…, component_id, …) WHERE component_id IS NOT NULL` 与 `(…, metric_key, …) WHERE component_id IS NULL`
+两两一组，upsert 的 `ON CONFLICT` arbiter 只含常量谓词、不再含参数，正确性不再依赖 planner/prepare
+行为；修复后重跑本节见上（零 handler_failed，回归测试覆盖两种 prepare 设置）。ADR 记录见控制者决策链。
+
 ## 文件
 
 | 文件 | 内容 |
 | --- | --- |
 | `load-smoke-20260907.json` | 2026-09-07 记录运行完整报告（含场景、逐端点延迟、claim/调度、队列、DB 增长、worker_log 错误计数） |
+| `load-smoke-20260907-m6t4b.json` | 2026-09-07 M6T4b 修复后同场景重跑报告（`handler_failed_count=0`） |
 | `backend/tests/performance/load_smoke.py` | 冒烟驱动器（含本 README 所载语义的实现） |
 
 现场复用：按 `TEST_STRATEGY.md` §5 生成验收负载清单并保留散列后，可在部署环境以真机/真实规模改写设备表

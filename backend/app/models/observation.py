@@ -6,8 +6,10 @@ Notes that matter for ORM usage:
 - ``metric_points`` is day-partitioned (``postgresql_partition_by``); the
   composite primary key ``(id, observed_at)`` reflects the PostgreSQL rule
   that unique keys on partitioned tables must include the partition key. The
-  at-least-once dedupe index is a COALESCE expression index declared in the
-  migration (expression indexes are not mirrored as model constraints).
+  at-least-once dedupe is a pair of partial unique indexes declared in the
+  migration (partial predicates are not mirrored as model constraints);
+  migration 0016 replaced the original COALESCE expression indexes with the
+  partial pairs so upsert conflict inference cannot depend on plan caching.
 - ``device_events``/``alerts`` dedupe is enforced by partial unique indexes
   declared in the migration (partial predicates are not model constraints).
 - ``ui_events.id`` is BIGSERIAL — the SSE event id (Last-Event-ID ordering).
@@ -164,8 +166,11 @@ class MetricLatest(Base):
             name="ck_metric_latest_exactly_one_value",
         ),
     )
-    # UNIQUE (device_id, COALESCE(component_id, zero-uuid), metric_key) is the
-    # expression index ``uq_metric_latest_device_component_key`` from 0006.
+    # UNIQUE (device_id, component_id, metric_key) WHERE component_id IS NOT
+    # NULL + UNIQUE (device_id, metric_key) WHERE component_id IS NULL is the
+    # partial index pair ``uq_metric_latest_series_component/device`` from
+    # migration 0016 (the COALESCE expression index of 0006 was replaced so
+    # the ON CONFLICT arbiter never carries parameters — M6T4b).
 
 
 class MetricRollup5m(Base):
@@ -174,8 +179,9 @@ class MetricRollup5m(Base):
     Columns mirror migration ``0007_rollups`` exactly. Only closed UTC-aligned
     5-minute windows of numeric gauge keys are written (state/boolean/
     monotonic_counter series are never numerically aggregated). Rows are
-    idempotently regenerated (ON CONFLICT DO UPDATE on the COALESCE expression
-    index). Not partitioned: retention deletes by ``window_start``.
+    idempotently regenerated (ON CONFLICT DO UPDATE against the partial
+    unique index pair of migration 0016). Not partitioned: retention deletes
+    by ``window_start``.
     """
 
     __tablename__ = "metric_rollups_5m"
@@ -201,8 +207,9 @@ class MetricRollup5m(Base):
         CheckConstraint("count >= 1", name="ck_metric_rollups_5m_count"),
         CheckConstraint("quality IN ('good', 'partial')", name="ck_metric_rollups_5m_quality"),
     )
-    # UNIQUE (device_id, COALESCE(component_id, zero-uuid), metric_key,
-    # window_start) + the series/window_start indexes are declared in 0007.
+    # UNIQUE pairs per migration 0016 (component-scoped / device-scope
+    # partial unique indexes on (device_id, component_id|NULL, metric_key,
+    # window_start)); the series/window_start indexes are declared in 0007.
 
 
 class MetricRollup1h(Base):

@@ -23,8 +23,9 @@ Rollup semantics:
   averages with count summed, last value of the newest window, quality
   ``partial`` when any window is partial. Only windows that have rows
   contribute — a window without data has no row and is never invented.
-- Both tables are upserted (ON CONFLICT DO UPDATE on the COALESCE key), so
-  regeneration is idempotent: a rerun converges to identical rows.
+- Both tables are upserted (ON CONFLICT DO UPDATE against the partial unique
+  index pair of migration 0016), so regeneration is idempotent: a rerun
+  converges to identical rows.
 
 Retention semantics (DATA_MODEL.md §10) and the production privilege model
 (migration 0008_retention_grants):
@@ -73,7 +74,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from typing import cast as typing_cast
 
-from sqlalchemy import Uuid, cast, func, select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -379,65 +380,74 @@ class _WindowAccumulator:
             self.quality = "partial"
 
 
-def _upsert_rollups_5m(db: Session, rows: list[dict[str, object]]) -> int:
-    """Idempotent 5m regeneration: ON CONFLICT DO UPDATE (COALESCE key).
+def _upsert_rollup_rows(
+    db: Session,
+    rows: list[dict[str, object]],
+    *,
+    model: type[MetricRollup5m] | type[MetricRollup1h],
+) -> int:
+    """Idempotent regeneration: ON CONFLICT DO UPDATE on the partial pair.
 
-    The arbiter mirrors the expression index of migration 0007 exactly
-    (same pattern as the metric_latest upsert in observation_store, 0006).
-    The statement is all-or-nothing, so the parameter count IS the number of
+    One statement per index partition — component-scoped rows (component_id
+    NOT NULL) target ``ON CONFLICT (device_id, component_id, metric_key,
+    window_start) WHERE component_id IS NOT NULL`` and device-scope rows
+    (NULL component) the ``(device_id, metric_key, window_start) WHERE
+    component_id IS NULL`` arbiter. Both arbiters are column lists + CONSTANT
+    predicates — no parameters — so conflict inference never depends on
+    psycopg3 auto-PREPARE/plan caching (M6T4b; the old COALESCE arbiter
+    failed intermittently under generic plans — same defect as metric_latest,
+    migration 0016 replaced the expression index with the partial pairs).
+
+    Each statement is all-or-nothing, so the parameter count IS the number of
     windows processed (multi-row executemany rowcounts are not reliable).
     """
     if not rows:
         return 0
-    db.execute(
-        pg_insert(MetricRollup5m)
-        .values(rows)
-        .on_conflict_do_update(
-            index_elements=[
-                MetricRollup5m.device_id,
-                func.coalesce(MetricRollup5m.component_id, cast(ZERO_UUID, Uuid)),
-                MetricRollup5m.metric_key,
-                MetricRollup5m.window_start,
-            ],
-            set_={
-                "min_value": pg_insert(MetricRollup5m).excluded.min_value,
-                "max_value": pg_insert(MetricRollup5m).excluded.max_value,
-                "avg_value": pg_insert(MetricRollup5m).excluded.avg_value,
-                "last_value": pg_insert(MetricRollup5m).excluded.last_value,
-                "count": pg_insert(MetricRollup5m).excluded.count,
-                "quality": pg_insert(MetricRollup5m).excluded.quality,
-                "collection_run_id": pg_insert(MetricRollup5m).excluded.collection_run_id,
-            },
+    component_rows = [row for row in rows if row["component_id"] is not None]
+    device_rows = [row for row in rows if row["component_id"] is None]
+    set_ = {
+        "min_value": pg_insert(model).excluded.min_value,
+        "max_value": pg_insert(model).excluded.max_value,
+        "avg_value": pg_insert(model).excluded.avg_value,
+        "last_value": pg_insert(model).excluded.last_value,
+        "count": pg_insert(model).excluded.count,
+        "quality": pg_insert(model).excluded.quality,
+        "collection_run_id": pg_insert(model).excluded.collection_run_id,
+    }
+    if component_rows:
+        db.execute(
+            pg_insert(model)
+            .values(component_rows)
+            .on_conflict_do_update(
+                index_elements=[
+                    model.device_id,
+                    model.component_id,
+                    model.metric_key,
+                    model.window_start,
+                ],
+                index_where=text("component_id IS NOT NULL"),
+                set_=set_,
+            )
         )
-    )
+    if device_rows:
+        db.execute(
+            pg_insert(model)
+            .values(device_rows)
+            .on_conflict_do_update(
+                index_elements=[model.device_id, model.metric_key, model.window_start],
+                index_where=text("component_id IS NULL"),
+                set_=set_,
+            )
+        )
     return len(rows)
+
+
+def _upsert_rollups_5m(db: Session, rows: list[dict[str, object]]) -> int:
+    return _upsert_rollup_rows(db, rows, model=MetricRollup5m)
 
 
 def _upsert_rollups_1h(db: Session, rows: list[dict[str, object]]) -> int:
-    if not rows:
-        return 0
-    db.execute(
-        pg_insert(MetricRollup1h)
-        .values(rows)
-        .on_conflict_do_update(
-            index_elements=[
-                MetricRollup1h.device_id,
-                func.coalesce(MetricRollup1h.component_id, cast(ZERO_UUID, Uuid)),
-                MetricRollup1h.metric_key,
-                MetricRollup1h.window_start,
-            ],
-            set_={
-                "min_value": pg_insert(MetricRollup1h).excluded.min_value,
-                "max_value": pg_insert(MetricRollup1h).excluded.max_value,
-                "avg_value": pg_insert(MetricRollup1h).excluded.avg_value,
-                "last_value": pg_insert(MetricRollup1h).excluded.last_value,
-                "count": pg_insert(MetricRollup1h).excluded.count,
-                "quality": pg_insert(MetricRollup1h).excluded.quality,
-                "collection_run_id": pg_insert(MetricRollup1h).excluded.collection_run_id,
-            },
-        )
-    )
-    return len(rows)
+    return _upsert_rollup_rows(db, rows, model=MetricRollup1h)
 
 
 def _five_minute_window_rows(
@@ -445,7 +455,7 @@ def _five_minute_window_rows(
 ) -> list[dict[str, object]]:
     """Aggregate raw gauge points in [start, end) into 5m rollup parameters.
 
-    One row per (device, COALESCE(component), metric_key, window_start) with
+    One row per (device, component-or-NULL, metric_key, window_start) with
     min/max/simple-avg/last-by-time/count; window quality is ``partial`` when
     any point in it is partial; collection_run_id comes from the newest point.
     """

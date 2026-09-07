@@ -13,7 +13,11 @@ collection pipeline commits exactly once per batch.
   re-running is honest and is what keeps a crashed worker from permanently
   blocking a device (the partial unique index forbids a second scheduled run).
 - batch persistence uses INSERT .. ON CONFLICT DO NOTHING (metric points,
-  events) and an upsert on the COALESCE expression index (metric_latest);
+  events) and a two-part upsert on the partial unique index pair
+  (metric_latest); the upsert arbiters are column lists + constant predicates
+  ONLY — a parameterized COALESCE arbiter made inference depend on psycopg3
+  plan caching and failed intermittently under auto-PREPARE (M6T4b,
+  migration 0016 replaces the expression indexes with partial unique pairs);
   validation against contracts/metrics.json + events.json happens here — a
   bad value becomes an ``ObservationError`` row, never a fabricated point.
 - ``apply_alert_signals`` turns evaluator signals into durable
@@ -31,7 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 from typing import cast as typing_cast
 
-from sqlalchemy import Uuid, and_, cast, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -58,8 +62,6 @@ from app.models.observation import (
     MetricLatest,
     MetricPoint,
 )
-
-ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
 _EVENT_SEVERITIES = ("unknown", "info", "warning", "critical")
 
@@ -419,6 +421,57 @@ class PersistOutcome:
     events_deduped: int = 0
 
 
+def _upsert_metric_latest(db: Session, rows: list[dict[str, object]]) -> None:
+    """Upsert metric_latest rows against the migration-0016 partial pair.
+
+    One statement per index partition: component-scoped rows (component_id
+    NOT NULL) target ``ON CONFLICT (device_id, component_id, metric_key)
+    WHERE component_id IS NOT NULL`` and device-scope rows (NULL component)
+    the ``(device_id, metric_key) WHERE component_id IS NULL`` arbiter. Both
+    arbiters are plain column lists + CONSTANT predicates — no parameters —
+    so conflict inference never depends on psycopg3 auto-PREPARE/plan
+    caching (the M6T4b defect: the old ``coalesce(component_id, $1::uuid)``
+    arbiter failed intermittently under generic plans; migration 0016
+    replaced the COALESCE expression index with the partial pairs).
+    """
+    component_rows = [row for row in rows if row["component_id"] is not None]
+    device_rows = [row for row in rows if row["component_id"] is None]
+    set_ = {
+        "value_double": pg_insert(MetricLatest).excluded.value_double,
+        "value_text": pg_insert(MetricLatest).excluded.value_text,
+        "unit": pg_insert(MetricLatest).excluded.unit,
+        "quality": pg_insert(MetricLatest).excluded.quality,
+        "source": pg_insert(MetricLatest).excluded.source,
+        "observed_at": pg_insert(MetricLatest).excluded.observed_at,
+        "collection_run_id": pg_insert(MetricLatest).excluded.collection_run_id,
+        "updated_at": func.now(),
+    }
+    if component_rows:
+        db.execute(
+            pg_insert(MetricLatest)
+            .values(component_rows)
+            .on_conflict_do_update(
+                index_elements=[
+                    MetricLatest.device_id,
+                    MetricLatest.component_id,
+                    MetricLatest.metric_key,
+                ],
+                index_where=text("component_id IS NOT NULL"),
+                set_=set_,
+            )
+        )
+    if device_rows:
+        db.execute(
+            pg_insert(MetricLatest)
+            .values(device_rows)
+            .on_conflict_do_update(
+                index_elements=[MetricLatest.device_id, MetricLatest.metric_key],
+                index_where=text("component_id IS NULL"),
+                set_=set_,
+            )
+        )
+
+
 def persist_observation_batch(
     db: Session,
     *,
@@ -431,14 +484,15 @@ def persist_observation_batch(
 
     - components: upsert + retire missing (soft);
     - metric_points: good/partial observations only, INSERT .. ON CONFLICT DO
-      NOTHING (at-least-once dedupe via the COALESCE unique index); a point
+      NOTHING (at-least-once dedupe via the partial unique index pair); a point
       with a duplicate unique key is counted as deduped, never overwritten;
     - metric_points/device_events only for SUPPORTED capabilities: an
       observation/event for a capability the device does not support becomes
       an ``unsupported_capability`` observation error and is never persisted
       as data (ADR-014: 不支持 -> 无信号);
-    - metric_latest: upsert on the COALESCE unique index — good observations
-      only (a partial value is suspect and must not become "current");
+    - metric_latest: upsert against the partial unique index pair — good
+      observations only (a partial value is suspect and must not become
+      "current");
     - device_events: dedup via the native-id and content-hash unique indexes;
     - observation errors (adapter errors, validation failures, error-quality
       observations) go to collection_observation_errors; the run-level
@@ -539,27 +593,7 @@ def persist_observation_batch(
         outcome.points_deduped = len(point_params) - inserted
     if latest_params:
         outcome.latest_written = len(latest_params)
-        db.execute(
-            pg_insert(MetricLatest)
-            .values(latest_params)
-            .on_conflict_do_update(
-                index_elements=[
-                    MetricLatest.device_id,
-                    func.coalesce(MetricLatest.component_id, cast(ZERO_UUID, Uuid)),
-                    MetricLatest.metric_key,
-                ],
-                set_={
-                    "value_double": pg_insert(MetricLatest).excluded.value_double,
-                    "value_text": pg_insert(MetricLatest).excluded.value_text,
-                    "unit": pg_insert(MetricLatest).excluded.unit,
-                    "quality": pg_insert(MetricLatest).excluded.quality,
-                    "source": pg_insert(MetricLatest).excluded.source,
-                    "observed_at": pg_insert(MetricLatest).excluded.observed_at,
-                    "collection_run_id": pg_insert(MetricLatest).excluded.collection_run_id,
-                    "updated_at": func.now(),
-                },
-            )
-        )
+        _upsert_metric_latest(db, latest_params)
 
     event_params: list[dict[str, object]] = []
     for event in batch.events:
