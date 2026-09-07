@@ -1,0 +1,1909 @@
+{
+  "product_version": "0.1.0",
+  "generated_by": "scripts/check-traceability.ps1 (M6T3)",
+  "generated_at_utc": "2026-09-07T08:01:44.1875994Z",
+  "rules": {
+    "test_reference": "backend/tests test_*.py files referencing the requirement id (T-{REQ} per TRACEABILITY.md)",
+    "adapter_path": "capability key literal in backend/app/adapters (collect/operation/create_launch mappings)",
+    "openapi": "http-api.json operationId in backend/openapi.gen.json (WS excluded: FastAPI omits WebSocket routes from OpenAPI)",
+    "frontend": "requirement id literal in frontend/src application source (excludes src/tests and src/api/generated; requirementTrace.ts is the label registry for API-dynamic surfaces)"
+  },
+  "openapi_endpoints": [
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "operation_id": "auth_login",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/auth/logout",
+      "operation_id": "auth_logout",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "operation_id": "auth_get_me",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/auth/password",
+      "operation_id": "auth_change_password",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/auth/reauth",
+      "operation_id": "auth_reauthenticate",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/users",
+      "operation_id": "users_list",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/users",
+      "operation_id": "users_create",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/users/{id}",
+      "operation_id": "users_get",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "PATCH",
+      "path": "/users/{id}",
+      "operation_id": "users_update",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/roles",
+      "operation_id": "roles_list",
+      "support_id": "PLT-01",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices",
+      "operation_id": "devices_list",
+      "support_id": "PLT-02",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/device-probes",
+      "operation_id": "device_probes_create",
+      "support_id": "PLT-02",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/devices",
+      "operation_id": "devices_create",
+      "support_id": "PLT-02",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices/{id}",
+      "operation_id": "devices_get",
+      "support_id": "PLT-02",
+      "in_openapi": true
+    },
+    {
+      "method": "PATCH",
+      "path": "/devices/{id}",
+      "operation_id": "devices_update",
+      "support_id": "PLT-02",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/devices/{id}/probe",
+      "operation_id": "devices_probe",
+      "support_id": "PLT-02",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices/{id}/capabilities",
+      "operation_id": "device_capabilities_list",
+      "support_id": "PLT-02",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices/{id}/components",
+      "operation_id": "device_components_list",
+      "support_id": "PLT-03",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices/{id}/events",
+      "operation_id": "device_events_list",
+      "support_id": "PLT-03",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/overview",
+      "operation_id": "overview_get",
+      "support_id": "PLT-03",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices/{id}/metrics/latest",
+      "operation_id": "device_metrics_latest",
+      "support_id": "PLT-03",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices/{id}/metrics/series",
+      "operation_id": "device_metrics_series",
+      "support_id": "PLT-03",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/devices/{id}/collection-runs",
+      "operation_id": "device_collection_runs_list",
+      "support_id": "PLT-03",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/alerts",
+      "operation_id": "alerts_list",
+      "support_id": "PLT-04",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/alerts/{id}",
+      "operation_id": "alerts_get",
+      "support_id": "PLT-04",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/devices/{id}/operation-previews",
+      "operation_id": "device_operation_previews_create",
+      "support_id": "PLT-05",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/devices/{id}/operations",
+      "operation_id": "device_operations_create",
+      "support_id": "PLT-05",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/operations",
+      "operation_id": "operations_list",
+      "support_id": "PLT-05",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/operations/{id}",
+      "operation_id": "operations_get",
+      "support_id": "PLT-05",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/operations/{id}/cancel",
+      "operation_id": "operations_cancel",
+      "support_id": "PLT-05",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/operations/{id}/verify",
+      "operation_id": "operations_verify",
+      "support_id": "PLT-05",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/operations/{id}/resolve-verification",
+      "operation_id": "operations_resolve_verification",
+      "support_id": "PLT-05",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/devices/{id}/launches",
+      "operation_id": "device_launches_create",
+      "support_id": "PLT-09",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/launches/{id}",
+      "operation_id": "launches_get",
+      "support_id": "PLT-09",
+      "in_openapi": true
+    },
+    {
+      "method": "WS",
+      "path": "/terminal/sessions/{ticket}",
+      "operation_id": "terminal_sessions_connect",
+      "support_id": "PLT-09",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/terminal/sessions/{id}/close",
+      "operation_id": "terminal_sessions_close",
+      "support_id": "PLT-09",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/files/uploads",
+      "operation_id": "file_uploads_create",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "PUT",
+      "path": "/files/uploads/{id}/content",
+      "operation_id": "file_uploads_put_content",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "POST",
+      "path": "/files/uploads/{id}/complete",
+      "operation_id": "file_uploads_complete",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/files",
+      "operation_id": "files_list",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/files/{id}",
+      "operation_id": "files_get",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/files/{id}/download",
+      "operation_id": "files_download",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "DELETE",
+      "path": "/files/{id}",
+      "operation_id": "files_delete",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/device-file-access/{ticket}",
+      "operation_id": "device_file_access_get",
+      "support_id": "PLT-06",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/audit-logs",
+      "operation_id": "audit_logs_list",
+      "support_id": "PLT-07",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/audit-logs/{id}",
+      "operation_id": "audit_logs_get",
+      "support_id": "PLT-07",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/system/status",
+      "operation_id": "system_status_get",
+      "support_id": "PLT-08",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/health/live",
+      "operation_id": "health_live",
+      "support_id": "PLT-08",
+      "in_openapi": true
+    },
+    {
+      "method": "GET",
+      "path": "/health/ready",
+      "operation_id": "health_ready",
+      "support_id": "PLT-08",
+      "in_openapi": true
+    },
+    {
+      "method": "SSE",
+      "path": "/events/stream",
+      "operation_id": "events_stream",
+      "support_id": "PLT-09",
+      "in_openapi": true
+    }
+  ],
+  "requirements": [
+    {
+      "requirement_id": "SRV-MON-01",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py",
+        "backend/tests/contracts/test_validation.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 6,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-MON-02",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 4,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py",
+        "backend/tests/api/test_devices.py",
+        "backend/tests/application/test_collection.py",
+        "backend/tests/domain/test_observation.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 5,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-MON-03",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-MON-04",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-MON-05",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-MON-06",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-MON-07",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-MON-08",
+      "device_type": "server",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_common.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-ACT-01",
+      "device_type": "server",
+      "kind": "operation",
+      "test_count": 6,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_operations_platform.py",
+        "backend/tests/adapters/test_redfish_operations.py",
+        "backend/tests/adapters/test_redfish_vendors.py",
+        "backend/tests/application/test_operation_preview.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/workers/test_maintenance.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-ACT-02",
+      "device_type": "server",
+      "kind": "operation",
+      "test_count": 15,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_operations.py",
+        "backend/tests/adapters/test_redfish_vendors.py",
+        "backend/tests/api/test_devices.py",
+        "backend/tests/api/test_operations_api.py",
+        "backend/tests/api/test_overview_alerts_components_events.py",
+        "backend/tests/application/test_operation_preview.py",
+        "backend/tests/application/test_retention.py",
+        "backend/tests/db/test_retention_privileges.py",
+        "backend/tests/domain/test_fake_operation_methods.py",
+        "backend/tests/domain/test_schema_validation.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/e2e/test_worker_execution.py",
+        "backend/tests/infrastructure/test_task_claim.py",
+        "backend/tests/workers/test_maintenance.py",
+        "backend/tests/workers/test_operation_executor.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/xfusion.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 5,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-ACT-03",
+      "device_type": "server",
+      "kind": "operation",
+      "test_count": 6,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_platform_slice.py",
+        "backend/tests/adapters/test_redfish_vendors.py",
+        "backend/tests/api/test_launches_api.py",
+        "backend/tests/application/test_operation_preview.py",
+        "backend/tests/application/test_retention.py",
+        "backend/tests/db/test_retention_privileges.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 5,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-ACT-04",
+      "device_type": "server",
+      "kind": "operation",
+      "test_count": 5,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_operations.py",
+        "backend/tests/adapters/test_redfish_vendors.py",
+        "backend/tests/api/test_operations_api.py",
+        "backend/tests/application/test_operation_preview.py",
+        "backend/tests/domain/test_fake_operation_methods.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-ACT-05",
+      "device_type": "server",
+      "kind": "operation",
+      "test_count": 3,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_operations.py",
+        "backend/tests/adapters/test_redfish_vendors.py",
+        "backend/tests/domain/test_timeout_transition.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-ACT-06",
+      "device_type": "server",
+      "kind": "operation",
+      "test_count": 7,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_operations.py",
+        "backend/tests/adapters/test_redfish_vendors.py",
+        "backend/tests/api/test_files_api.py",
+        "backend/tests/application/test_files.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/infrastructure/test_task_claim.py",
+        "backend/tests/workers/test_maintenance.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "SRV-ACT-07",
+      "device_type": "server",
+      "kind": "operation",
+      "test_count": 6,
+      "test_files": [
+        "backend/tests/adapters/test_redfish_operations.py",
+        "backend/tests/adapters/test_redfish_vendors.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/e2e/test_worker_execution.py",
+        "backend/tests/infrastructure/test_task_claim.py",
+        "backend/tests/workers/test_operation_executor.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-MON-01",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/e2e/test_nas_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-MON-02",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-MON-03",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-MON-04",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-MON-05",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-MON-06",
+      "device_type": "synology_nas",
+      "kind": "monitoring",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/e2e/test_nas_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-ACT-01",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "test_count": 5,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/adapters/test_dsm_operations_platform.py",
+        "backend/tests/adapters/test_dsm_operations.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/e2e/test_nas_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-ACT-02",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "test_count": 3,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/adapters/test_dsm_operations.py",
+        "backend/tests/e2e/test_nas_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-ACT-03",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "test_count": 5,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/adapters/test_dsm_operations.py",
+        "backend/tests/application/test_files.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/workers/test_maintenance.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-ACT-04",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "test_count": 5,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/adapters/test_dsm_operations.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/e2e/test_nas_journey.py",
+        "backend/tests/infrastructure/test_task_claim.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-ACT-05",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "test_count": 4,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/adapters/test_dsm_operations.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/e2e/test_nas_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/panels/BackupStatusPanel.vue",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 6,
+      "ok": true
+    },
+    {
+      "requirement_id": "NAS-ACT-06",
+      "device_type": "synology_nas",
+      "kind": "operation",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/test_dsm_adapter.py",
+        "backend/tests/adapters/test_dsm_operations.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-MON-01",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_core.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-MON-02",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_core.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 5,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-MON-03",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_core.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-MON-04",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_core.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-MON-05",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_core.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-MON-06",
+      "device_type": "core_switch",
+      "kind": "monitoring",
+      "test_count": 3,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_core.py",
+        "backend/tests/adapters/huawei/test_huawei_vrp_platform_slice.py",
+        "backend/tests/e2e/test_switch_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-ACT-01",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py",
+        "backend/tests/domain/test_timeout_transition.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-ACT-02",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py",
+        "backend/tests/e2e/test_switch_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-ACT-03",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "test_count": 4,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_terminal_sessions_api.py",
+        "backend/tests/application/test_retention.py",
+        "backend/tests/db/test_retention_privileges.py",
+        "backend/tests/e2e/test_switch_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-ACT-04",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py",
+        "backend/tests/e2e/test_switch_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-ACT-05",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py",
+        "backend/tests/e2e/test_switch_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-ACT-06",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/domain/test_timeout_transition.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "CORE-ACT-07",
+      "device_type": "core_switch",
+      "kind": "operation",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-MON-01",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_access.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-MON-02",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_access.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-MON-03",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_access.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/panels/PoePanel.vue",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 6,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-MON-04",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_access.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-MON-05",
+      "device_type": "access_switch",
+      "kind": "monitoring",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_access.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/__init__.py",
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/fake.py",
+        "backend/app/adapters/huawei/__init__.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/oids.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/__init__.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/dell.py",
+        "backend/app/adapters/redfish/huawei.py",
+        "backend/app/adapters/redfish/inspur.py",
+        "backend/app/adapters/redfish/lenovo.py",
+        "backend/app/adapters/redfish/operations.py",
+        "backend/app/adapters/redfish/xfusion.py",
+        "backend/app/adapters/registry.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/deviceTabs.ts",
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 4,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-ACT-01",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py",
+        "backend/tests/domain/test_timeout_transition.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-ACT-02",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-ACT-03",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "test_count": 4,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py",
+        "backend/tests/domain/test_schema_validation.py",
+        "backend/tests/domain/test_timeout_transition.py",
+        "backend/tests/e2e/test_switch_journey.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/ops.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-ACT-04",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/base.py",
+        "backend/app/adapters/huawei/core.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 3,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-ACT-05",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "test_count": 1,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/huawei/core.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    },
+    {
+      "requirement_id": "ACCESS-ACT-06",
+      "device_type": "access_switch",
+      "kind": "operation",
+      "test_count": 2,
+      "test_files": [
+        "backend/tests/adapters/huawei/test_huawei_vrp_operations.py",
+        "backend/tests/contracts/test_validation.py"
+      ],
+      "adapter_refs": [
+        "backend/app/adapters/dsm_operations.py",
+        "backend/app/adapters/dsm.py",
+        "backend/app/adapters/huawei/access.py",
+        "backend/app/adapters/huawei/core.py",
+        "backend/app/adapters/huawei/ops.py",
+        "backend/app/adapters/redfish/common.py",
+        "backend/app/adapters/redfish/operations.py"
+      ],
+      "api_operation_ids": [],
+      "frontend_refs": [
+        "frontend/src/features/devices/requirementTrace.ts"
+      ],
+      "frontend_all": 2,
+      "ok": true
+    }
+  ],
+  "ok": true
+}
