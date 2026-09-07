@@ -1,6 +1,6 @@
 # Warden 0.1.0-rc.1 已知限制
 
-- 状态：随 `0.1.0-rc.1` 候选发布（M6T3 生成）
+- 状态：随 `0.1.0-rc.1` 候选发布（M6T3 生成；M6T5 最终门禁复核：无新增限制——M6T4 负载冒烟暴露的指标 upsert 可靠性缺陷已由 M6T4b 修复（ADR-033，迁移 `0016_metric_dedupe_partial`，冒烟重跑 0 `handler_failed`），是修复不是残余限制，技术记录见 RELEASE_NOTES M6 摘要与迁移 docstring）
 - 日期：2026-09-07
 - 规则：本文件只记录已实现功能/发布项的边界与诚实依据，每项映射到 ADR、里程碑报告或台账（`.superpowers/sdd/IMPLEMENTATION_PLAN/progress.md`）；**不得**把未实现项当作"限制"移出 0.1.0 范围——范围删减必须由用户明确批准并更新 PROJECT_SPEC（IMPLEMENTATION_PLAN §9）。M6T3 追踪收口发现的唯一缺口（PLT-08 `GET /system/status`）已在 M6T3b 交付（commit `cf375a9`），本文件不再单列"发布前未决缺口"节。
 

@@ -1,6 +1,6 @@
 # Warden 0.1.0-rc.1 发布说明
 
-- 状态：`0.1.0-rc.1` 候选说明（M6T3 生成；M6T4 容量/部署制品与 M6T5 最终门禁尚未执行，正式发布声明以 M6T5 复核后的 `docs/RELEASE_CHECKLIST.md` 为准）
+- 状态：`0.1.0-rc.1` 候选说明（M6T3 生成；M6T4/M6T4b 已执行，M6T5 最终门禁于 2026-09-07 复核，结论维持 rc.1；正式发布声明以复核后的 `docs/RELEASE_CHECKLIST.md` 为准）
 - 日期：2026-09-07
 - 支持编号：PLT-08（发布）；本版本覆盖 51 条原始需求（飞书《边端硬件监控及功能实现项》）
 
@@ -14,9 +14,9 @@
 | M3 服务器监控与管理 | Redfish 客户端与模拟器；通用 Redfish 采集与操作（电源、管理卡复位、支持包、虚拟介质、固件、资产）；launch 一次性票据与 KVM 前端流程；五厂商 overlay（Dell iDRAC/Inspur iBMC/xFusion iBMC/Lenovo XCC/Huawei iBMC）——OEM 专属路径为 experimental/有证据前不声称支持。 |
 | M4 群晖 NAS | DSM 客户端与模拟器、版本化 API 发现与官方错误码映射（ADR-031）；采集（磁盘/存储池/温度风扇电源/卷使用率/UPS/系统日志与连通性）；操作（电源、DSM 控制台、支持包、S.M.A.R.T、备份状态、固件与 SNMP 配置）；NAS 前端类型页签与 DSM 控制台 launch。 |
 | M5 华为交换机 | SNMPv3/v2c 客户端与 MIB 映射、Syslog/Trap 接收（事件入站）、弱协议显式 opt-in；核心/接入交换机采集与速率推导（重启丢失一个间隔语义诚实）；VRP SSH 执行器与 CLI 操作、SFTP；浏览器终端（WS 一次性票据，no-PTY）；核心/接入前端页签、端口/PoE/光模块视图。 |
-| M6 系统整合与发布硬化 | UI 状态一致性收口与前端遗留项；安全收尾（与时钟无关的限流测试、密钥/依赖扫描、离线 license 与漏洞制品）；确定性套件门禁（连续两轮全绿）；PLT-08 收口：`GET /system/status`、维护模式状态面与 503 门禁、摄取存活心跳、`/system` 页面（M6T3b，commit `cf375a9`）；追踪收口：51 需求机器核对（`scripts/check-traceability.ps1` + `tests/traceability/closeout.json`，51/51 全绿无未决缺口）、发布说明、已知限制与发布清单。 |
+| M6 系统整合与发布硬化 | UI 状态一致性收口与前端遗留项；安全收尾（与时钟无关的限流测试、密钥/依赖扫描、离线 license 与漏洞制品）；确定性套件门禁（连续两轮全绿）；PLT-08 收口：`GET /system/status`、维护模式状态面与 503 门禁、摄取存活心跳、`/system` 页面（M6T3b，commit `cf375a9`）；追踪收口：51 需求机器核对（`scripts/check-traceability.ps1` + `tests/traceability/closeout.json`，51/51 全绿无未决缺口）、发布说明、已知限制与发布清单。M6T4（commit `572eb70`）：合成负载冒烟（`backend/tests/performance/load_smoke.py`，真实 API/Worker/PostgreSQL 18，600 s 窗口 ×3 并发只读用户：2292 次读取全 200、采集 claim 延迟 P95≈967 ms、无队列残留、DB 增长 4.7 MB——合成运行非现场验收，ADR-027）、发布清单与镜像 digest 模板（`deployment/release/RELEASE_MANIFEST.md`、`image-digests.env.example`）、安装/升级演练与回滚边界文档（`deployment/drills/`）——Docker 依赖项如实记录 BLOCKED-here（KNOWN_LIMITATIONS §3）。M6T4b（commit `44eddc0` + ADR-033 `3e239f9`）：修复冒烟暴露的指标 upsert 可靠性缺陷——psycopg3 auto-PREPARE 切 generic plan 后 COALESCE 表达式索引的 ON CONFLICT 仲裁间歇失配（每 60 次失败 30–50 次，实测 `InvalidColumnReference`）；迁移 `0016_metric_dedupe_partial` 改为成对部分唯一索引 + 常量谓词、无参数仲裁子句（upgrade/downgrade 齐全；回归测试在 auto-PREPARE 默认与禁用两种设置下均 0 失败）；M6T4 冒烟场景重跑 0 `handler_failed`（`load-smoke-20260907-m6t4b.json`）。 |
 
-套件规模（M6T2b 门禁实测）：后端 2111 通过 / 78 跳过 / 0 失败；前端 163 通过。M6T3b 全量实测（含 PLT-08 系统状态/维护模式/摄取心跳测试）：后端 2136 通过 / 78 跳过 / 0 失败；前端 25 文件 / 177 通过。
+套件规模（M6T2b 门禁实测）：后端 2111 通过 / 78 跳过 / 0 失败；前端 163 通过。M6T3b 全量实测（含 PLT-08 系统状态/维护模式/摄取心跳测试）：后端 2136 通过 / 78 跳过 / 0 失败；前端 25 文件 / 177 通过。M6T5 最终门禁全量实测（HEAD `3e239f9`，本版本最终数字）：后端 **2144 通过 / 78 跳过 / 0 失败 / 0 错误**（单次运行 39:16）；前端 25 文件 / 177 通过。
 
 ## 2. 平台与角色
 
@@ -58,5 +58,5 @@
 ## 6. 完成定义声明
 
 - 51 条原始需求逐条具备代码、API/页面路径与自动化测试引用（机器核对：`scripts/check-traceability.ps1`，逐条证据 `tests/traceability/closeout.json`）。
-- 按 TEST_STRATEGY §9 与 PROJECT_SPEC §7：任一真机证据缺失、语义不一致或存在未决缺口时，0.1.0 均不可标记完成。本候选记录为 `0.1.0-rc.1`（待真机认证 + M6T4/M6T5 门禁），**不是 0.1.0**。
+- 按 TEST_STRATEGY §9 与 PROJECT_SPEC §7：任一真机证据缺失、语义不一致或存在未决缺口时，0.1.0 均不可标记完成。M6T4/M6T4b/M6T5 门禁已执行（负载冒烟与 upsert 可靠性修复见第 1 节 M6 摘要；最终全量套件见套件规模段）。本候选记录为 `0.1.0-rc.1`（待现场真机认证），**不是 0.1.0**。
 - M6T3 追踪收口曾暴露唯一实现缺口：`GET /system/status`（`system_status_get`，PLT-08，见 API_CONTRACT/ARCHITECTURE/DEPLOYMENT 与 `contracts/http-api.json` 白名单）及其前端占位页无实现、契约未定义响应结构、无任何台账延期记录。该缺口已由 M6T3b 补齐交付（commit `cf375a9`，控制者裁决授权）：组件状态诚实推导（api/database/file_storage/worker/ingest，`application/system_status.py`）、维护模式状态面（`system_state` 单行表 + `deployment/scripts/warden maintenance on|off` + 维护中 503 `maintenance_mode` 门禁）、摄取存活心跳（`ingest_heartbeat` 单行表）、`/system` 系统状态页与顶栏状态 chip（SSE `system.status_changed` 触发页面查询缓存失效）；迁移 `0015_system_state` 经真机 PG 迁移/回滚测试。机器核对现为 **51/51 全绿**：49/49 非 WS operationId 均在导出 OpenAPI（WS 豁免按设计），`tests/traceability/closeout.json` `ok: true`，无未决代码缺口；遗留边界全部诚实登记于 `docs/KNOWN_LIMITATIONS.md`。逐项状态见 `docs/RELEASE_CHECKLIST.md`。
