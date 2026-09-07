@@ -17,6 +17,7 @@ exactly like a real switch configured to send authPriv traps to Warden).
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import warnings
 from dataclasses import dataclass
@@ -205,6 +206,20 @@ class TrapEmitter:
             self._log.warning("sim.trap-emitter.error-status", status=int(error_status))
         del error_index
 
+    async def _drain_proactor(self) -> None:
+        """Windows proactor (M6T2b): let the in-flight UDP write complete and
+        its close finalization run while the loop is still alive.
+
+        ``transport.close()`` before the write completion is dispatched
+        permanently stalls the finalization (proactor_events ``close()``
+        defers to the write-future callback, which bails on a closing
+        transport), so the transport's ``__del__`` ResourceWarning fires at
+        an arbitrary later cyclic GC. Trap sends are fire-and-forget (no
+        response), so the write may still be in flight when the sender
+        returns: wait for it, then close, then let the finalization run.
+        """
+        await asyncio.sleep(0.05)
+
     async def send_v2c(self, trap_oid: str, *, if_index: int | None = None) -> None:
         """One v2c trap with the configured community."""
         credentials = self._credentials
@@ -228,7 +243,9 @@ class TrapEmitter:
                 notification,
             )
         finally:
+            await self._drain_proactor()
             engine_obj.transportDispatcher.closeDispatcher()
+            await asyncio.sleep(0)
         if error_indication is not None:
             self._log.warning("sim.trap-emitter.send-failed", error=str(error_indication))
         if error_status:
@@ -236,7 +253,9 @@ class TrapEmitter:
 
     async def close(self) -> None:
         if self._engine is not None and self._engine.transportDispatcher is not None:
+            await self._drain_proactor()
             self._engine.transportDispatcher.closeDispatcher()
+            await asyncio.sleep(0)
         self._engine = None
 
 

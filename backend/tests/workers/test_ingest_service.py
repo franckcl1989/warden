@@ -160,7 +160,15 @@ async def _send_v3_trap(
             ),
         )
     finally:
+        # Windows proactor (M6T2b): a trap send is fire-and-forget: the
+        # sender may return while the UDP write is still in flight. Closing
+        # the dispatcher then stalls the transport finalization forever and
+        # its __del__ ResourceWarning fires at an arbitrary later cyclic GC.
+        # Wait out the write, close, and drain the close callbacks while this
+        # loop is still alive.
+        await asyncio.sleep(0.05)
         sender.transportDispatcher.closeDispatcher()
+        await asyncio.sleep(0)
     assert result[0] is None, result[0]
 
 
@@ -176,7 +184,9 @@ async def _send_v2c_trap(port: int, community: str, trap_oid: str) -> None:
             NotificationType(ObjectIdentity(trap_oid)),
         )
     finally:
+        await asyncio.sleep(0.05)  # proactor write drain (M6T2b), see _send_v3_trap
         engine.transportDispatcher.closeDispatcher()
+        await asyncio.sleep(0)
     assert result[0] is None, result[0]
 
 
@@ -192,7 +202,9 @@ async def _send_v1_trap(port: int, community: str, trap_oid: str) -> None:
             NotificationType(ObjectIdentity(trap_oid)),
         )
     finally:
+        await asyncio.sleep(0.05)  # proactor write drain (M6T2b), see _send_v3_trap
         engine.transportDispatcher.closeDispatcher()
+        await asyncio.sleep(0)
     assert result[0] is None, result[0]
 
 

@@ -510,6 +510,100 @@ class TestM5T2TreesAndKnobs:
             await agent.stop()
 
 
+class TestDeterministicPysnmpTeardown:
+    """Fire-and-forget pysnmp senders are drained before close (M6T2b).
+
+    On the Windows proactor a trap send is fire-and-forget (no response):
+    the sendNotification coroutine may finish while the UDP write is still
+    in flight. Calling ``transportDispatcher.closeDispatcher()`` then stalls
+    the transport finalization forever (``close()`` defers to the write
+    future's done callback, which bails out on a closing transport) and the
+    ``__del__`` ResourceWarning fires at an ARBITRARY later cyclic GC,
+    failing an unrelated test (observed as the suite-level flake family on
+    test_m1_gate/test_pools/test_maintenance). Every sender must wait out
+    the write (0.05 s loopback drain), close the dispatcher and yield a turn
+    for the close callbacks while the loop is alive. These tests force the
+    garbage collection right after the raw loop close and assert no proactor
+    transport survives: deterministic red before the drain, green after.
+    """
+
+    @staticmethod
+    def _litter_after(coro: object) -> list[str]:
+        """Run the coroutine on a fresh loop and report any proactor
+        transport garbage collected once every engine owner is out of scope.
+        The recorder wraps the WHOLE scenario: a close that deadlocked on an
+        in-flight write leaves the transport open inside pysnmp reference
+        cycles, and its __del__ warns at the collection right here."""
+        import gc
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            TestDeterministicPysnmpTeardown._run_on_raw_loop(coro)
+            gc.collect()
+            gc.collect()
+        return [
+            str(warning.message)
+            for warning in caught
+            if issubclass(warning.category, ResourceWarning)
+            and "unclosed transport <_ProactorDatagramTransport"
+            in str(warning.message)
+        ]
+
+    @staticmethod
+    def _run_on_raw_loop(coro: object) -> object:
+        """Run a coroutine on a fresh proactor loop (the platform's default
+        event loop on Windows), closed the raw way pytest-asyncio closes
+        per-test loops."""
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)  # type: ignore[arg-type]
+        finally:
+            loop.close()
+
+    def test_trap_emitter_close_drains_the_cached_engine(
+        self, isolated_snmp_boots: None
+    ) -> None:
+        del isolated_snmp_boots
+        profile = profile_by_key("core_s5732")
+
+        async def scenario() -> None:
+            emitter = TrapEmitter(
+                profile_engine_id_hex=profile.engine_id_hex,
+                port=1,  # nothing listens; UDP send still completes
+                credentials=TrapCredentials(
+                    username="monitor",
+                    auth_key=AUTH_KEY,
+                    privacy_key=PRIV_KEY,
+                ),
+            )
+            await emitter.send_v3(TRAP_LINK_DOWN)
+            await emitter.close()
+
+        assert self._litter_after(scenario()) == []
+
+    def test_v2c_sender_engine_close_is_drained(self, isolated_snmp_boots: None) -> None:
+        """The one-shot v2c sender (emitters.send_v2c / the ingest test
+        helpers) creates an engine per send and closes it in a finally:
+        exactly the deadlock shape without the pre-close drain."""
+        del isolated_snmp_boots
+        profile = profile_by_key("core_s5732")
+
+        async def scenario() -> None:
+            emitter = TrapEmitter(
+                profile_engine_id_hex=profile.engine_id_hex,
+                port=1,  # nothing listens; UDP send still completes
+                credentials=TrapCredentials(community="public"),
+            )
+            await emitter.send_v2c(TRAP_LINK_DOWN)
+            await emitter.close()
+
+        assert self._litter_after(scenario()) == []
+
+
+
 class TestTrapEmitter:
     async def test_v3_link_down_trap_is_decoded_by_platform_receiver(
         self, isolated_snmp_boots: None
