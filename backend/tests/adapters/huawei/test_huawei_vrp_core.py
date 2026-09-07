@@ -223,6 +223,18 @@ class TestDiscover:
                 assert row.discovery_method == ADAPTER_KEY
                 assert row.reason_code is None
                 assert row.requirement_id.startswith("CORE-MON-")
+            # Exact requirement attribution per type-unique key (one
+            # representative per CORE-MON requirement + event keys).
+            expected_requirement_id = {
+                "system.cpu_percent": "CORE-MON-01",
+                "interface.admin_status": "CORE-MON-02",
+                "transceiver.rx_dbm": "CORE-MON-03",
+                "psu.present": "CORE-MON-04",
+                "loop.status": "CORE-MON-05",
+                "event.port_flap": "CORE-MON-06",
+            }
+            for key, requirement_id in expected_requirement_id.items():
+                assert rows[key].requirement_id == requirement_id, key
             # Wired CLI/SSH keys without a declared SSH endpoint are honest
             # not_configured (ssh_unconfigured); M5T4 terminal console keys
             # without their config are not_configured too (ssh_unconfigured /

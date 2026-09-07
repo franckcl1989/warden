@@ -73,3 +73,17 @@ export type FileLinkView = Schemas['FileLinkView'];
 export type AuditLogListItem = Schemas['AuditLogListItem'];
 export type AuditLogDetailItem = Schemas['AuditLogDetailItem'];
 export type AuditLogListResponse = Schemas['AuditLogListResponse'];
+
+export type SystemStatusResponse = Schemas['SystemStatusResponse'];
+export type MaintenanceView = Schemas['MaintenanceView'];
+export type ComponentsView = Schemas['ComponentsView'];
+export type ApiComponentStatus = Schemas['ApiComponentStatus'];
+export type DatabaseComponentStatus = Schemas['DatabaseComponentStatus'];
+export type FileStorageComponentStatus = Schemas['FileStorageComponentStatus'];
+export type WorkerComponentStatus = Schemas['WorkerComponentStatus'];
+export type IngestComponentStatus = Schemas['IngestComponentStatus'];
+export type QueueSummaryView = Schemas['QueueSummaryView'];
+export type CollectionSummaryView = Schemas['CollectionSummaryView'];
+export type CollectionOutcomeView = Schemas['CollectionOutcomeView'];
+export type CollectionFailureView = Schemas['CollectionFailureView'];
+export type VerificationSummaryView = Schemas['VerificationSummaryView'];

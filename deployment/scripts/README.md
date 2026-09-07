@@ -25,8 +25,8 @@ warden bootstrap-admin <用户名>          # 创建首个管理员（仅 users 
 ### maintenance（DEPLOYMENT §8；ADR-026 仅宿主机入口）
 
 - 通过 `docker compose exec -u postgres postgres psql`（容器内 postgres 系统用户、本机 socket peer 认证）执行 SQL，全程不接触任何密码；
-- 前置检查：`system_state` 表必须存在（由 M2/M6 迁移创建），不存在时**明确报错拒绝继续**；
-- 对 `system_state` 表键 `maintenance_mode` 做 upsert（值 `jsonb {enabled, source, set_at}`），并在 `audit_logs` 写一行审计（`audit_logs` 缺失时告警但不阻断状态变更）；
+- 前置检查：`system_state` 表必须存在（迁移 `0015_system_state` 创建），不存在时**明确报错拒绝继续**；
+- 对 `system_state` 单行表（`id = 1`，CHECK 约束）做 upsert：`maintenance on` 置 `maintenance_mode = true` 并记录 `maintenance_since = now()`，`off` 置 `false` 并清空 since/reason；随后在 `audit_logs` 写一行审计（action `maintenance.on`/`maintenance.off`、`requirement_id 'PLT-08'`、detail `{source: deployment_cli, ...}`）并在 `ui_events` 写 `system.status_changed` SSE 事件（两表缺失时告警但不阻断状态变更）；
 - 维护模式开启后 API 拒绝新任务和 launch，已 dispatch 任务继续执行/核验，监控读取与管理查询保持可用（行为由 API 侧实现，DEPLOYMENT §8）。
 
 ### bootstrap-admin（DEPLOYMENT §6 步骤 8）
@@ -41,8 +41,9 @@ warden bootstrap-admin <用户名>          # 创建首个管理员（仅 users 
 
 | 对象 | 契约 |
 | --- | --- |
-| `system_state` 表 | `key text PRIMARY KEY`、`value jsonb NOT NULL`、`updated_at timestamptz NOT NULL DEFAULT now()`；键 `maintenance_mode` 值 `{enabled: bool, source: text, set_at: text}`（M2/M6 迁移创建） |
-| `audit_logs` 表（CLI 写入列） | `actor text`、`actor_session_id`（可空）、`action text`、`resource_type text`、`resource_id`、`result text`、`detail text`、`created_at timestamptz`（M2 迁移创建；CLI 只追加） |
+| `system_state` 表 | 单行表（M6T3b/0015 实现）：`id int PK`（CHECK `id = 1`）、`maintenance_mode bool NOT NULL`、`maintenance_since timestamptz NULL`、`maintenance_reason text NULL`、`updated_at timestamptz NOT NULL`；应用层同语义见 `backend/app/application/system_state.py` |
+| `audit_logs` 表（CLI 写入列） | `actor_user_id uuid NULL`（CLI 驱动故为空）、`session_id uuid NULL`、`action text`（`maintenance.on`/`maintenance.off`）、`resource_type/resource_id`（`system_state`/`maintenance_mode`）、`requirement_id text`（`PLT-08`）、`result text`、`detail_jsonb jsonb`（`{source: deployment_cli, ...}`）、`occurred_at timestamptz`；只追加（0002 迁移 + 触发器） |
+| `ui_events` 表（CLI 写入列） | `entity_type varchar(32)`（`system`）、`entity_id uuid NULL`、`version int`、`event_type varchar(32)`（`system.status_changed`）、`payload jsonb`（`'{}'::jsonb`）、`occurred_at timestamptz`（0006 迁移；SSE 窗口保留 10 分钟，DATA_MODEL §11） |
 | `users` 表 | DATA_MODEL §3.1 字段；引导只做“空表检查”，行写入由 `app.tools.bootstrap_admin` 负责 |
 | `app.tools.bootstrap_admin` | M2 实现：users 表为空时创建首个管理员（Argon2id 参数见 SECURITY §2），密码从 stdin 或 `WARDEN_BOOTSTRAP_PASSWORD_FILE` 读取，拒绝时非零退出并写审计 |
 | `postgres-init/01-accounts.sh` | 首次空数据目录时由官方镜像执行：从 DSN Secret 文件提取密码创建 `warden_app`（无超级用户/无建库）与 `warden_migrate`，授予 schema 访问；warden_app 另获 `CREATE ON SCHEMA public`（分区维护循环与 0008 所有权转移需要，PG18），`warden_migrate` 获 `warden_app` 成员资格（0008 把可清理表所有权转移给应用账号需要）。表级权限模型由迁移补充：0004 授予 SELECT/INSERT/UPDATE 并 REVOKE audit_logs 的 UPDATE/DELETE；0008 把可清理表（metric_points 及分区、rollups、events、alerts、operation_tasks、ui_events、sessions）所有权转移给 `warden_app`（保留清理的 DELETE/分区生命周期只能靠所有权表达），audit_logs/operation_task_events 保持迁移账号属主 + 只追加触发器；0009 修复 0004 `ON ALL TABLES` 的时点性缺口——对 0004 之后创建的全部表（collection_runs、metric_latest、collection_observation_errors、ui_events 序列等）补授 SELECT/INSERT/UPDATE 与序列 USAGE/SELECT，并在追加式成对表上重申 REVOKE（0009 的 REVOKE 在宽泛 GRANT 之后执行，必然生效）。**迁移约定：任何未来创建表或序列的迁移，必须以同一授权块收尾（对 `warden_app` 执行 `GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public` + 追加式成对表的 REVOKE + `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public`）——`GRANT ON ALL TABLES` 只作用于执行时已存在的对象，不加收尾授权的新迁移会让生产环境的应用账号失去新表的读写权（0004 教训，见 0009 docstring）** |

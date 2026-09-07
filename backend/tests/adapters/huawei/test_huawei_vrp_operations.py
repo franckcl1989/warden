@@ -827,3 +827,7 @@ class TestSshProbeStageAndDiscovery:
             row = rows["poe.port.set"]
             assert row.support_state == "not_configured"
             assert row.reason_code == "ssh_host_fingerprint_missing"
+            # ACCESS-ACT-04 launch keys (console.ssh.open / console.web.open)
+            # keep their exact requirement attribution in every state.
+            assert rows["console.ssh.open"].requirement_id == "ACCESS-ACT-04"
+            assert rows["console.web.open"].requirement_id == "ACCESS-ACT-04"

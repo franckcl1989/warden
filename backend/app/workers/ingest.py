@@ -33,6 +33,7 @@ import logging
 import queue
 import signal
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -49,6 +50,7 @@ from app.application.event_ingest import (
     route_syslog_message,
     route_trap,
 )
+from app.application.system_state import record_ingest_heartbeat
 from app.config import WardenSettings, get_settings
 from app.infrastructure.crypto import (
     CredentialCipher,
@@ -62,6 +64,7 @@ from app.infrastructure.ingest.syslog_parse import ParsedSyslogMessage
 from app.infrastructure.ingest.syslog_receiver import SyslogReceiver
 from app.infrastructure.ingest.trap_receiver import TrapReceiver, TrapUser
 from app.infrastructure.ingest.trap_types import ParsedTrap
+from app.infrastructure.time import utcnow
 from app.models.devices import Device, DeviceCredential
 
 # Default USM engine id (hex for "warden-trap-recv"): the deterministic
@@ -72,6 +75,15 @@ DEFAULT_TRAP_ENGINE_ID_HEX = "77617264656e2d747261702d72656376"
 # How often the device snapshot (attribution + trap auth) refreshes.
 DEFAULT_REFRESH_SECONDS = 60.0
 QUEUE_MAXSIZE = 2048
+
+# PLT-08 ingest heartbeat (M6T3b): received-message deltas flush to the
+# single-row ingest_heartbeat at most every HEARTBEAT_FLUSH_SECONDS while the
+# queue is busy (batched, throttled), immediately when the queue drains idle,
+# and the row is ALWAYS stamped (updated_at = process-alive signal, events or
+# not) at least every ``settings.ingest_heartbeat_interval_seconds``. The
+# durable row is the /system/status ingest surface (ARCHITECTURE.md §9); the
+# in-process IngestCounters stay the hot-path source (M5T1).
+HEARTBEAT_FLUSH_SECONDS = 5.0
 
 _LOGGER = logging.getLogger("warden.ingest")
 
@@ -106,16 +118,24 @@ class IngestService:
         keyring: CredentialKeyring,
         refresh_seconds: float = DEFAULT_REFRESH_SECONDS,
         port_overrides: PortOverrides | None = None,
+        heartbeat_flush_seconds: float = HEARTBEAT_FLUSH_SECONDS,
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
         self._keyring = keyring
         self._refresh_seconds = refresh_seconds
         self._overrides = port_overrides or PortOverrides()
+        self._heartbeat_flush_seconds = heartbeat_flush_seconds
+        self._heartbeat_interval_seconds = float(settings.ingest_heartbeat_interval_seconds)
         self._log = structlog.get_logger("warden.ingest")
         self.counters = IngestCounters()
         self._queue_drops = 0
         self._queue: queue.Queue[tuple[str, object, str]] = queue.Queue(maxsize=QUEUE_MAXSIZE)
+        # PLT-08 heartbeat state (single consumer thread, no locking): pending
+        # received-message deltas not yet flushed + monotonic time of the last
+        # successful heartbeat write.
+        self._heartbeat_pending = 0
+        self._heartbeat_last_write = 0.0
         self._snapshot = _Snapshot(
             attribution=AttributionMap(exact={}, networks=[]),
             expectations={},
@@ -152,9 +172,7 @@ class IngestService:
         )
         self.trap = TrapReceiver(
             host=handler_host,
-            port=self._overrides.snmp_trap
-            if self._overrides.snmp_trap is not None
-            else self._settings.snmp_trap_port,
+            port=self._overrides.snmp_trap if self._overrides.snmp_trap is not None else self._settings.snmp_trap_port,
             handler=self._on_trap,
             engine_id_hex=engine_id,
             logger=self._log,
@@ -162,11 +180,13 @@ class IngestService:
         await self.syslog.start()
         await self.trap.start()
         await self.refresh_now()
-        self._consumer_thread = threading.Thread(
-            target=self._consume_forever, name="ingest-dispatch", daemon=True
-        )
+        self._consumer_thread = threading.Thread(target=self._consume_forever, name="ingest-dispatch", daemon=True)
         self._consumer_thread.start()
         self._refresh_task = asyncio.create_task(self._refresh_forever())
+        # PLT-08: stamp the durable heartbeat row at startup (process alive,
+        # events or not) so /system/status can report the receiver honestly
+        # before the first message arrives.
+        self._flush_heartbeat()
         self._log.info(
             "ingest.started",
             syslog_udp_port=self.syslog.udp_port,
@@ -188,6 +208,10 @@ class IngestService:
         if self._consumer_thread is not None:
             self._consumer_thread.join(timeout=15.0)
             self._consumer_thread = None
+        # PLT-08: flush any uncommitted received-message delta on shutdown so
+        # the durable counter never loses the tail of a crash-free run.
+        if self._heartbeat_pending > 0:
+            self._flush_heartbeat()
         if self.trap is not None:
             await self.trap.stop()
         if self.syslog is not None:
@@ -220,12 +244,18 @@ class IngestService:
             try:
                 kind, payload, peer = self._queue.get(timeout=0.5)
             except queue.Empty:
+                self._maybe_flush_heartbeat(idle=True)
                 continue
+            # Received = the datagram reached the platform consumer (stored,
+            # deduped or dropped all count as received); the durable counter
+            # flushes with the batched heartbeat write.
+            self._heartbeat_pending += 1
             try:
                 self._route_one(kind, payload, peer)
             except Exception:
                 self.counters.errors += 1
                 _LOGGER.exception("ingest.dispatch.failed kind=%s", kind)
+            self._maybe_flush_heartbeat(idle=False)
 
     def _route_one(self, kind: str, payload: object, peer: str) -> None:
         with self._session_factory() as session:
@@ -251,6 +281,51 @@ class IngestService:
             else:
                 self.counters.errors += 1
             session.commit()
+
+    # -- PLT-08 heartbeat flush ----------------------------------------------
+
+    def _maybe_flush_heartbeat(self, *, idle: bool) -> None:
+        """Flush the single-row heartbeat when a write is due.
+
+        Two independent triggers (documented cadence): received-message
+        deltas flush at most every ``heartbeat_flush_seconds`` while the
+        queue is busy and immediately when the drain goes idle; the
+        process-alive stamp (updated_at) is written at least every
+        ``ingest_heartbeat_interval_seconds`` whether or not events arrived.
+        """
+        now = time.monotonic()
+        if self._heartbeat_pending > 0 and (idle or now - self._heartbeat_last_write >= self._heartbeat_flush_seconds):
+            self._flush_heartbeat()
+            return
+        if now - self._heartbeat_last_write >= self._heartbeat_interval_seconds:
+            self._flush_heartbeat()
+
+    def _flush_heartbeat(self) -> None:
+        """One single-row upsert with the pending delta (own session).
+
+        Callers gate the cadence (``_maybe_flush_heartbeat``); the startup
+        stamp and the shutdown tail flush call unconditionally. A failed
+        write keeps the pending delta AND advances the last-write clock: the
+        next due flush retries the same delta (the previous commit never
+        landed, so a DB outage never double-counts) at the regular cadence
+        instead of turning into a per-tick connection hot loop.
+        """
+        pending = self._heartbeat_pending
+        try:
+            with self._session_factory() as session:
+                record_ingest_heartbeat(
+                    session,
+                    events_received_delta=pending,
+                    received_at=utcnow() if pending > 0 else None,
+                    now=utcnow(),
+                )
+                session.commit()
+        except Exception:
+            _LOGGER.exception("ingest.heartbeat_flush_failed pending=%s", pending)
+            self._heartbeat_last_write = time.monotonic()
+            return
+        self._heartbeat_pending = 0
+        self._heartbeat_last_write = time.monotonic()
 
     # -- snapshot refresh ---------------------------------------------------
 
@@ -345,9 +420,7 @@ class IngestService:
         self,
         device: Device,
         credential: DeviceCredential | None,
-    ) -> (
-        tuple[str, str | None, str | None, str | None, str | None, str | None, str, str] | None
-    ):
+    ) -> tuple[str, str | None, str | None, str | None, str | None, str | None, str, str] | None:
         """Decrypted per-device SNMP expectation (None = no snmp config).
 
         Reads the documented convention (docs/API_CONTRACT.md §4.3): the
@@ -366,9 +439,7 @@ class IngestService:
         payload: object = None
         if credential is not None:
             try:
-                aad = credential_aad(
-                    str(device.id), device.adapter_key, credential.secret_schema_version
-                )
+                aad = credential_aad(str(device.id), device.adapter_key, credential.secret_schema_version)
                 secret = EncryptedSecret(
                     ciphertext=credential.ciphertext,
                     nonce=credential.nonce,

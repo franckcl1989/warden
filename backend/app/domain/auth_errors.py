@@ -69,9 +69,7 @@ def resource_not_found(resource_type: str) -> AppError:
 
 
 def version_conflict(current_version: int) -> AppError:
-    return AppError(
-        "version_conflict", MESSAGE_VERSION_CONFLICT, details={"current_version": current_version}
-    )
+    return AppError("version_conflict", MESSAGE_VERSION_CONFLICT, details={"current_version": current_version})
 
 
 def invalid_credentials() -> AppError:
@@ -100,6 +98,20 @@ def username_taken() -> AppError:
 
 def dependency_unavailable(dependency: str = "postgres") -> AppError:
     return AppError("dependency_unavailable", "数据库不可用", details={"dependency": dependency})
+
+
+def maintenance_mode(*, since: datetime.datetime | None = None, reason: str | None = None) -> AppError:
+    """503 maintenance_mode (contracts/error-codes.json: since/reason safe).
+
+    DEPLOYMENT.md §8: 维护模式开启后 API 拒绝新任务和 launch；details 只带
+    契约允许的 since/reason。
+    """
+    details: dict[str, object] = {}
+    if since is not None:
+        details["since"] = since.isoformat()
+    if reason:
+        details["reason"] = reason
+    return AppError("maintenance_mode", "系统维护中：已暂停新建操作任务与远程连接", details=details)
 
 
 def internal() -> AppError:

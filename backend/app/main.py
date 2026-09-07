@@ -33,6 +33,7 @@ from app.api.routes import (
     operations,
     overview,
     roles,
+    system,
     terminal,
     users,
 )
@@ -112,6 +113,9 @@ def create_app(settings: WardenSettings | None = None) -> FastAPI:
     # logical delete. Sessions, storage and keyring dependencies resolve per
     # request from app.state (lazy, see api/deps.py).
     api_v1_router.include_router(files.router, dependencies=[Depends(require_password_changed)])
+    # M6T3b system status (PLT-08): protected component + queue summary,
+    # admin-only (system.read per SECURITY.md §3.1).
+    api_v1_router.include_router(system.router, dependencies=[Depends(require_password_changed)])
     # Device pulls (PLT-06) carry NO user session: mounted outside the gates,
     # still under /api/v1 for the path contract.
     api_v1_router.include_router(device_file_access.router)

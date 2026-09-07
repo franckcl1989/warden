@@ -122,6 +122,17 @@ class TestProbeAndDiscover:
             row = rows[key]
             assert row.support_state == "supported", (key, row.detail)
             assert row.discovery_method == ADAPTER_KEY and row.reason_code is None
+        # Exact requirement attribution per type-unique key (one
+        # representative per ACCESS-MON requirement).
+        expected_requirement_id = {
+            "system.cpu_percent": "ACCESS-MON-01",
+            "interface.admin_status": "ACCESS-MON-02",
+            "poe.port.status": "ACCESS-MON-03",
+            "psu.status": "ACCESS-MON-04",
+            "transceiver.rx_dbm": "ACCESS-MON-05",
+        }
+        for key, requirement_id in expected_requirement_id.items():
+            assert rows[key].requirement_id == requirement_id, key
         # Wired CLI/SSH keys without a declared SSH endpoint are honest
         # not_configured; the M5T4 terminal key (console.ssh.open) likewise;
         # M5T5 console.web.open without a declared Web origin is

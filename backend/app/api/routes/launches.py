@@ -34,6 +34,7 @@ from app.api.deps import (
     get_credential_keyring,
     get_db,
     get_rate_limiter,
+    require_operations_allowed,
 )
 from app.application import launches as launch_service
 from app.application.devices import get_device
@@ -177,8 +178,13 @@ def device_launches_create(
     context: Annotated[AuthContext, Depends(get_auth_context)],
     db: Annotated[Session, Depends(get_db)],
     limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+    _maintenance_gate: Annotated[None, Depends(require_operations_allowed)],
     keyring: Annotated[CredentialKeyring, Depends(get_credential_keyring)],
 ) -> LaunchCreateResponse:
+    del _maintenance_gate
+    # The maintenance gate sits BEFORE the keyring dependency: a refused
+    # request must fail with 503 maintenance_mode, never surface the keyring
+    # (declaration order = FastAPI dependency resolution order).
     rate = limiter.check_launch(str(context.user.id))
     if not rate.allowed:
         raise auth_errors.rate_limited(rate.retry_after_seconds, "launch")
@@ -239,9 +245,7 @@ def launches_get(
     if consumed is None:
         raise auth_errors.resource_not_found("launch_session")
     profile = OPERATION_PROFILES.get(f"{consumed.requirement_id}:{consumed.capability_key}")
-    if profile is None or not matrix_require(
-        context.user.role, execute_permission_for(profile.risk)
-    ):
+    if profile is None or not matrix_require(context.user.role, execute_permission_for(profile.risk)):
         raise auth_errors.resource_not_found("launch_session")
     db.commit()
     db.refresh(consumed)

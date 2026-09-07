@@ -209,26 +209,54 @@ maintenance() {
     check_docker
     require_postgres_up
 
-    # system_state 表由 M2/M6 迁移创建；缺失时给出明确错误（不允许绕过约束）
+    # system_state 表由迁移 0015_system_state 创建；缺失时给出明确错误（不允许绕过约束）
     has_table=$(pg_exec -c "SELECT to_regclass('public.system_state') IS NOT NULL" 2>/dev/null)
     if [ "$has_table" != "t" ]; then
-        log_fail "system_state 表不存在：请先运行一次性迁移（docker compose run --rm migrate）"
-        echo "  包含 system_state 表的迁移版本由 M2/M6 提供；在没有该表时维护命令拒绝继续。"
+        log_fail "system_state 表不存在：请先运行数据库迁移（docker compose run --rm migrate，0015_system_state 提供该表）"
         exit 1
     fi
 
     state_enabled=$([ "$1" = "on" ] && printf true || printf false)
-    pg_exec -c "INSERT INTO system_state (key, value, updated_at)
-                VALUES ('maintenance_mode', jsonb_build_object('enabled', $state_enabled, 'source', 'host_cli', 'set_at', now()::text), now())
-                ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+    # 0015 单行表（CHECK id = 1）：开关与 since/reason 同在一行；on 记录窗口
+    # 起点（maintenance_since），off 清空。列布局与应用层同语义
+    # （backend/app/application/system_state.py：enter/exit_maintenance）。
+    if [ "$1" = "on" ]; then
+        since_expr="now()"
+    else
+        since_expr="NULL"
+    fi
+    pg_exec -c "INSERT INTO system_state (id, maintenance_mode, maintenance_since, maintenance_reason, updated_at)
+                VALUES (1, $state_enabled, $since_expr, NULL, now())
+                ON CONFLICT (id) DO UPDATE SET maintenance_mode = excluded.maintenance_mode,
+                    maintenance_since = excluded.maintenance_since,
+                    maintenance_reason = excluded.maintenance_reason,
+                    updated_at = excluded.updated_at"
 
-    # 审计（DEPLOYMENT §8）；audit_logs 表由 M2 迁移创建，缺失时告警但不阻断状态变更
+    # 审计（DEPLOYMENT §8）：列名与 0002/0004 迁移一致（actor_user_id/session_id/
+    # requirement_id/detail_jsonb/occurred_at...）。宿主机 CLI 没有用户会话，
+    # actor_user_id 保持 NULL，来源记在 detail（与 system_state.py 的
+    # HOST_CLI_SOURCE/审计行同构）。audit_logs/ui_events 缺失时告警但不阻断状态变更。
+    audit_detail="jsonb_build_object('source', 'deployment_cli', 'maintenance_enabled', false)"
+    if [ "$1" = "on" ]; then
+        audit_detail="jsonb_build_object('source', 'deployment_cli', 'maintenance_enabled', true, 'maintenance_since', maintenance_since::text)"
+    fi
     has_audit=$(pg_exec -c "SELECT to_regclass('public.audit_logs') IS NOT NULL" 2>/dev/null)
     if [ "$has_audit" = "t" ]; then
-        pg_exec -c "INSERT INTO audit_logs (actor, actor_session_id, action, resource_type, resource_id, result, detail, created_at)
-                    VALUES ('system:host_cli', NULL, 'maintenance_mode.$1', 'system_state', 'maintenance_mode', 'success', 'set by warden host CLI', now())"
+        # id 无数据库默认值（应用层在客户端生成 uuid7）；CLI 用 gen_random_uuid()
+        pg_exec -c "INSERT INTO audit_logs (id, actor_user_id, session_id, action, resource_type, resource_id, requirement_id, result, detail_jsonb)
+                    SELECT gen_random_uuid(), NULL, NULL, 'maintenance.$1', 'system_state', 'maintenance_mode', 'PLT-08', 'success', $audit_detail
+                    FROM system_state WHERE id = 1"
     else
         log_warn "audit_logs 表不存在，本次变更未写审计记录（迁移补齐后重新执行该命令补记）"
+    fi
+
+    # SSE 刷新信号（API_CONTRACT.md §10）：维护状态变化立即推给前端顶栏/system 页
+    has_events=$(pg_exec -c "SELECT to_regclass('public.ui_events') IS NOT NULL" 2>/dev/null)
+    if [ "$has_events" = "t" ]; then
+        pg_exec -c "INSERT INTO ui_events (entity_type, entity_id, version, event_type, payload)
+                    VALUES ('system', NULL, 1, 'system.status_changed', '{}'::jsonb)"
+    else
+        log_warn "ui_events 表不存在，本次变更未发 SSE 刷新事件（迁移补齐后重新执行该命令补发）"
     fi
 
     log_info "维护模式已$([ "$1" = "on" ] && printf 开启 || printf 关闭)：system_state.maintenance_mode = $state_enabled"

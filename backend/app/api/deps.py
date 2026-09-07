@@ -17,10 +17,12 @@ from fastapi import Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.system_state import get_system_state
 from app.config import WardenSettings
 from app.domain.auth_errors import (
     csrf_failed,
     dependency_unavailable,
+    maintenance_mode,
     permission_denied,
     rate_limited,
     session_expired,
@@ -189,9 +191,7 @@ def get_file_storage(request: Request) -> FileStorage:
     try:
         storage.check_available()
     except FileStorageError as exc:
-        raise AppError(
-            "storage_unavailable", "文件存储不可用", details={"purpose": "file_volume"}
-        ) from exc
+        raise AppError("storage_unavailable", "文件存储不可用", details={"purpose": "file_volume"}) from exc
     request.app.state.file_storage = storage
     return storage
 
@@ -233,9 +233,7 @@ def get_auth_context(
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
         raise unauthenticated()
-    session = db.scalar(
-        select(DBSession).where(DBSession.session_id_hash == hash_session_token(token))
-    )
+    session = db.scalar(select(DBSession).where(DBSession.session_id_hash == hash_session_token(token)))
     if session is None:
         raise unauthenticated()
     settings: WardenSettings = request.app.state.settings
@@ -311,6 +309,25 @@ def require_permission(permission: str) -> Callable[..., AuthContext]:
         return context
 
     return _check
+
+
+def require_operations_allowed(db: Annotated[Session, Depends(get_db)]) -> None:
+    """Maintenance-mode gate for NEW task/launch creation (PLT-08, DEPLOYMENT §8).
+
+    维护模式开启后 API 拒绝新任务和 launch，已 dispatch 的任务继续执行/核验，
+    监控读取和管理员查询保持可用 (DEPLOYMENT.md §8)。Documented scope of the
+    gate (M6T3b decisions): applied ONLY to the endpoints that create tasks or
+    launch sessions — ``device_operations_create`` and
+    ``device_launches_create``. Operation previews (read-only planning),
+    device probes (read-only), file uploads (inputs, not tasks/launches),
+    operation cancel/verify/resolve (they operate on ALREADY-dispatched
+    tasks) and all reads stay allowed. Raises 503 ``maintenance_mode`` with
+    the contract's safe details (since/reason) when the persisted state is on.
+    """
+    state = get_system_state(db)
+    if not state.maintenance_mode:
+        return
+    raise maintenance_mode(since=state.maintenance_since, reason=state.maintenance_reason)
 
 
 def require_password_changed(

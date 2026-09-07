@@ -34,6 +34,7 @@ from app.api.deps import (
     get_credential_keyring,
     get_db,
     get_rate_limiter,
+    require_operations_allowed,
     require_permission,
 )
 from app.application import operations as op_service
@@ -52,9 +53,7 @@ from app.models.operation import OperationTask
 
 router = APIRouter(tags=["operations"])
 
-STATE_PATTERN = (
-    r"^(queued|running|waiting_device|succeeded|failed|timed_out|cancelled|verification_required)$"
-)
+STATE_PATTERN = r"^(queued|running|waiting_device|succeeded|failed|timed_out|cancelled|verification_required)$"
 
 MAX_PAGE_SIZE = 100
 
@@ -282,11 +281,7 @@ def _requested_by(db: Session, task: OperationTask) -> OperationUserRef:
 def _task_context_row(db: Session, task: OperationTask) -> tuple[TargetDeviceView, OperationUserRef]:
     """Device reference (with name) + requester reference for a task view."""
     device_row = db.get(Device, task.device_id)
-    device = (
-        _device_ref(device_row)
-        if device_row is not None
-        else TargetDeviceView(id=task.device_id, name="unknown")
-    )
+    device = _device_ref(device_row) if device_row is not None else TargetDeviceView(id=task.device_id, name="unknown")
     return device, _requested_by(db, task)
 
 
@@ -401,8 +396,10 @@ def device_operations_create(
     context: Annotated[AuthContext, Depends(get_auth_context)],
     db: Annotated[Session, Depends(get_db)],
     limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+    _maintenance_gate: Annotated[None, Depends(require_operations_allowed)],
     idempotency_key: Annotated[str | None, Header()] = None,
 ) -> OperationTaskView:
+    del _maintenance_gate
     rate = limiter.check_operation_submit(str(context.user.id))
     if not rate.allowed:
         raise auth_errors.rate_limited(rate.retry_after_seconds, "operation_submit")

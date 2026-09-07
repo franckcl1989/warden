@@ -113,6 +113,12 @@ class WardenSettings(BaseSettings):
     config_backup_keep_per_device: int = Field(default=10, ge=1)
     config_backup_min_days: int = Field(default=90, ge=1)
 
+    # Platform state heartbeat (M6T3b, PLT-08): the event-ingest service
+    # stamps ingest_heartbeat.updated_at at this cadence (events or not) so
+    # GET /system/status can report the receiver component honestly
+    # (ARCHITECTURE.md §9). Deployment configuration, not a product page.
+    ingest_heartbeat_interval_seconds: int = Field(default=30, ge=1, le=3600)
+
     # File quotas (deployment may lower, never raise without capacity evidence)
     max_support_bundle_bytes: int = Field(default=5 * 1024**3)
     max_firmware_bytes: int = Field(default=10 * 1024**3)

@@ -95,6 +95,10 @@ OPERATIONS_ENDPOINTS = {
     "operations_resolve_verification": ("POST", "/operations/{id}/resolve-verification"),
 }
 
+SYSTEM_ENDPOINTS = {
+    "system_status_get": ("GET", "/system/status"),
+}
+
 
 def _assert_operation_ids(
     schema: dict[str, object],
@@ -143,3 +147,14 @@ def test_exported_openapi_monitoring_operation_ids_match_contract() -> None:
 def test_exported_openapi_operations_operation_ids_match_contract() -> None:
     """M2T4 operation endpoints carry the EXACT operationIds of http-api.json."""
     _assert_operation_ids(exported_schema(), OPERATIONS_ENDPOINTS)
+
+
+@pytest.mark.unit
+def test_exported_openapi_system_operation_ids_match_contract() -> None:
+    """M6T3b (PLT-08) system endpoints carry the exact contract operationIds.
+
+    The exported schema contains system_status_get (http-api.json row for
+    GET /system/status) exactly once; operationId uniqueness is covered by
+    test_exported_openapi_operation_ids_are_unique.
+    """
+    _assert_operation_ids(exported_schema(), SYSTEM_ENDPOINTS)

@@ -53,7 +53,20 @@ pytestmark = [
 ]
 
 ADAPTER_KEY = "nas.synology_dsm"
-NAS_REQUIREMENT_IDS = {f"NAS-MON-0{i}" for i in range(1, 7)} | {f"NAS-ACT-0{i}" for i in range(1, 7)}
+NAS_REQUIREMENT_IDS = {
+    "NAS-MON-01",
+    "NAS-MON-02",
+    "NAS-MON-03",
+    "NAS-MON-04",
+    "NAS-MON-05",
+    "NAS-MON-06",
+    "NAS-ACT-01",
+    "NAS-ACT-02",
+    "NAS-ACT-03",
+    "NAS-ACT-04",
+    "NAS-ACT-05",
+    "NAS-ACT-06",
+}
 
 
 # All 24 unique synology_nas capability keys from capabilities.json.

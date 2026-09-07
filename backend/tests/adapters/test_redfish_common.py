@@ -243,6 +243,11 @@ class TestDiscover:
             assert key in declared
         # Shared key: the first server requirement in the registry wins.
         assert rows["indicator.led"].requirement_id == "SRV-MON-01"
+        # Type-unique keys keep their exact requirement attribution
+        # (SRV-MON-05 power / SRV-MON-06 fans / SRV-MON-07 chassis).
+        assert rows["psu.present"].requirement_id == "SRV-MON-05"
+        assert rows["fan.rpm"].requirement_id == "SRV-MON-06"
+        assert rows["chassis.intrusion"].requirement_id == "SRV-MON-07"
 
     def test_no_virtual_media_profile_unsupported_with_reason(self, sim: SimAccess) -> None:
         sim.set(no_virtual_media=True)

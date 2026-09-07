@@ -149,9 +149,7 @@ async def _send_v3_trap(
     try:
         result = await sendNotification(
             sender,
-            UsmUserData(
-                username, auth_key, privacy_key, usmHMACSHAAuthProtocol, usmAesCfb128Protocol
-            ),
+            UsmUserData(username, auth_key, privacy_key, usmHMACSHAAuthProtocol, usmAesCfb128Protocol),
             UdpTransportTarget(("127.0.0.1", port), timeout=2, retries=0),
             ContextData(),
             "trap",
@@ -240,22 +238,21 @@ def ingest_env(fresh_test_db_dsn: str, isolated_snmp_boots: None) -> dict[str, o
         engine.dispose()
 
 
-async def _start_service(env: dict[str, object], db_factory: object) -> IngestService:
+async def _start_service(env: dict[str, object], db_factory: object, **kwargs: object) -> IngestService:
     service = IngestService(
         settings=env["settings"],  # type: ignore[arg-type]
         session_factory=db_factory,  # type: ignore[arg-type]
         keyring=env["keyring"],  # type: ignore[arg-type]
         refresh_seconds=3600,
         port_overrides=PortOverrides(syslog_udp=0, syslog_tcp=0, snmp_trap=0),
+        **kwargs,
     )
     await service.start()
     return service
 
 
 class TestIngestServiceEndToEnd:
-    async def test_v3_device_syslog_and_traps_become_device_events(
-        self, ingest_env: dict[str, object]
-    ) -> None:
+    async def test_v3_device_syslog_and_traps_become_device_events(self, ingest_env: dict[str, object]) -> None:
         factory = ingest_env["session_factory"]
         assert factory is not None
         with factory() as db:
@@ -329,11 +326,7 @@ class TestIngestServiceEndToEnd:
                 assert types == {"event.port_flap", "event.auth_failure"}
                 sources = {row.source for row in rows}
                 assert sources == {"syslog", "snmp_trap"}
-                syslog_flaps = [
-                    row
-                    for row in rows
-                    if row.source == "syslog" and row.event_type == "event.port_flap"
-                ]
+                syslog_flaps = [row for row in rows if row.source == "syslog" and row.event_type == "event.port_flap"]
                 assert {row.message for row in syslog_flaps} == {
                     "interface GigabitEthernet0/0/1 link down",
                     "interface GigabitEthernet0/0/1 link up",
@@ -346,9 +339,7 @@ class TestIngestServiceEndToEnd:
         finally:
             await service.stop()
 
-    async def test_v2c_device_trap_and_dedup_semantics(
-        self, ingest_env: dict[str, object]
-    ) -> None:
+    async def test_v2c_device_trap_and_dedup_semantics(self, ingest_env: dict[str, object]) -> None:
         factory = ingest_env["session_factory"]
         assert factory is not None
         with factory() as db:
@@ -388,9 +379,7 @@ class TestIngestServiceEndToEnd:
         finally:
             await service.stop()
 
-    async def test_duplicate_syslog_dedupes_and_unattributed_drops(
-        self, ingest_env: dict[str, object]
-    ) -> None:
+    async def test_duplicate_syslog_dedupes_and_unattributed_drops(self, ingest_env: dict[str, object]) -> None:
         factory = ingest_env["session_factory"]
         assert factory is not None
         service = await _start_service(ingest_env, factory)
@@ -413,9 +402,7 @@ class TestIngestServiceEndToEnd:
         finally:
             await service.stop()
 
-    async def test_v1_traps_follow_the_community_policy(
-        self, ingest_env: dict[str, object]
-    ) -> None:
+    async def test_v1_traps_follow_the_community_policy(self, ingest_env: dict[str, object]) -> None:
         factory = ingest_env["session_factory"]
         assert factory is not None
         with factory() as db:
@@ -471,9 +458,97 @@ class TestIngestServiceEndToEnd:
         finally:
             await service.stop()
 
-    async def test_receiver_user_and_community_removal_paths(
-        self, ingest_env: dict[str, object]
-    ) -> None:
+    async def test_heartbeat_row_advances_on_real_udp_ingest(self, ingest_env: dict[str, object]) -> None:
+        """PLT-08: real UDP messages advance the durable ingest_heartbeat.
+
+        The row is stamped at service start (process alive, no events yet)
+        and received messages flush into events_received_total +
+        last_received_at (batched single-row upsert, /system/status surface).
+        """
+        factory = ingest_env["session_factory"]
+        assert factory is not None
+        service = await _start_service(ingest_env, factory, heartbeat_flush_seconds=0.2)
+        try:
+
+            def _heartbeat() -> tuple[int, object, object]:
+                from app.models.system import IngestHeartbeat
+
+                with factory() as db:
+                    row = db.get(IngestHeartbeat, 1)
+                if row is None:
+                    return 0, None, None
+                return int(row.events_received_total), row.last_received_at, row.updated_at
+
+            # Startup stamp: row exists with no events (idle is alive).
+            await _wait_for(lambda: _heartbeat()[2] is not None)
+
+            # Unattributed syslog still counts as RECEIVED (drop semantics):
+            # the durable counter tracks the receiver, not only stored rows.
+            assert service.syslog is not None
+            udp_port = service.syslog.udp_port or 0
+            await _send_udp(
+                udp_port,
+                vrp_link_state_line(
+                    hostname="sim-x",
+                    interface="GigabitEthernet0/0/1",
+                    direction="down",
+                    when=datetime.datetime(2026, 8, 5, 9, 0, 0, tzinfo=UTC),
+                ).encode("utf-8"),
+            )
+            await _wait_for(lambda: _heartbeat()[0] >= 1, timeout=15.0)
+            total, last_received_at, _updated = _heartbeat()
+            assert last_received_at is not None
+            assert service.counters.dropped_unattributed >= 1
+            assert total >= 1
+        finally:
+            await service.stop()
+
+    async def test_heartbeat_alive_stamp_advances_while_idle(self, ingest_env: dict[str, object]) -> None:
+        """PLT-08: the process-alive stamp advances with NO events arriving.
+
+        updated_at IS the /system/status ingest signal: the service must keep
+        stamping the single row every ingest_heartbeat_interval_seconds while
+        idle (an event-less site is legitimately idle — last_received_at stays
+        NULL — never "stopped"). Regression: the cadence-gated flush used to
+        drop zero-pending writes, freezing the stamp after the startup row.
+        """
+        factory = ingest_env["session_factory"]
+        settings = ingest_env["settings"]
+        keyring = ingest_env["keyring"]
+        assert factory is not None and keyring is not None
+        assert isinstance(settings, WardenSettings)
+        fast_settings = settings.model_copy(update={"ingest_heartbeat_interval_seconds": 1})
+        service = IngestService(
+            settings=fast_settings,
+            session_factory=factory,
+            keyring=keyring,
+            refresh_seconds=3600,
+            port_overrides=PortOverrides(syslog_udp=0, syslog_tcp=0, snmp_trap=0),
+        )
+        await service.start()
+        try:
+            from app.models.system import IngestHeartbeat
+
+            def _updated_at() -> object:
+                with factory() as db:
+                    row = db.get(IngestHeartbeat, 1)
+                return None if row is None else row.updated_at
+
+            # Startup stamp first (no events ever sent).
+            await _wait_for(lambda: _updated_at() is not None, timeout=15.0)
+            first_stamp = _updated_at()
+            # No messages: the stamp must still advance within a few intervals
+            # (consumer loop ticks every 0.5 s; cadence here is 1 s).
+            await _wait_for(lambda: _updated_at() is not None and _updated_at() > first_stamp, timeout=15.0)
+            with factory() as db:
+                row_events = db.get(IngestHeartbeat, 1)
+            assert row_events is not None
+            assert row_events.events_received_total == 0
+            assert row_events.last_received_at is None
+        finally:
+            await service.stop()
+
+    async def test_receiver_user_and_community_removal_paths(self, ingest_env: dict[str, object]) -> None:
         """Delta removal: set_users/set_communities empty actually unregisters."""
         factory = ingest_env["session_factory"]
         assert factory is not None
@@ -599,12 +674,8 @@ def test_snapshot_counts_only_real_credential_load_failures(
     assert snapshot.snmp_credential_load_failures == 1  # only the broken row
     assert snapshot.communities == ("public",)
     assert snapshot.users == ()
-    assert snapshot.expectations[v2c_device.id] == DeviceSnmpExpectation(
-        version="v2c", community="public"
-    )
+    assert snapshot.expectations[v2c_device.id] == DeviceSnmpExpectation(version="v2c", community="public")
     # The NAS device defaults to snmp_version v3 with no keys: an expected
     # configuration state (expectation present, no USM user), not a failure.
-    assert snapshot.expectations[nas_device.id] == DeviceSnmpExpectation(
-        version="v3", community=None
-    )
+    assert snapshot.expectations[nas_device.id] == DeviceSnmpExpectation(version="v3", community=None)
     assert broken.id not in snapshot.expectations

@@ -173,6 +173,23 @@ export const RESOLVE_OUTCOME_LABELS: Record<string, string> = {
   failed: '标记为失败',
 };
 
+/** 系统状态组件名称（M6T3b /system 页，PRODUCT_DESIGN §2）。 */
+export const SYSTEM_COMPONENT_LABELS: Record<string, string> = {
+  api: 'API 服务',
+  database: '数据库',
+  file_storage: '文件存储',
+  worker: 'Worker',
+  ingest: '事件接收器',
+};
+
+/** 系统状态组件状态（system_status_get：ok/degraded/stopped/unavailable）。 */
+export const SYSTEM_COMPONENT_STATUS_LABELS: Record<string, string> = {
+  ok: '正常',
+  degraded: '降级',
+  stopped: '已停止',
+  unavailable: '不可用',
+};
+
 /** 人工核验证据类型（operations 路由白名单）。 */
 export const RESOLVE_EVIDENCE_LABELS: Record<string, string> = {
   device_ui: '设备界面',

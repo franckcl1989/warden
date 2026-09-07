@@ -726,6 +726,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * System Status Get
+         * @description Protected component status + queue summary (PLT-08, system.read).
+         */
+        get: operations["system_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/device-file-access/{ticket}": {
         parameters: {
             query?: never;
@@ -882,6 +902,19 @@ export interface components {
             page_size: number;
             /** Total */
             total: number;
+        };
+        /** ApiComponentStatus */
+        ApiComponentStatus: {
+            /**
+             * Status
+             * @default ok
+             */
+            status: string;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
         };
         /** AttentionDevice */
         AttentionDevice: {
@@ -1079,6 +1112,43 @@ export interface components {
             /** New Password */
             new_password: string;
         };
+        /** CollectionFailureView */
+        CollectionFailureView: {
+            /**
+             * Device Id
+             * Format: uuid
+             */
+            device_id: string;
+            /** Device Name */
+            device_name: string;
+            /** Collection Type */
+            collection_type: string;
+            /** Error Code */
+            error_code?: string | null;
+            /**
+             * Failed At
+             * Format: date-time
+             */
+            failed_at: string;
+        };
+        /** CollectionOutcomeView */
+        CollectionOutcomeView: {
+            /**
+             * Succeeded
+             * @default 0
+             */
+            succeeded: number;
+            /**
+             * Partial
+             * @default 0
+             */
+            partial: number;
+            /**
+             * Failed
+             * @default 0
+             */
+            failed: number;
+        };
         /** CollectionRunView */
         CollectionRunView: {
             /**
@@ -1109,6 +1179,12 @@ export interface components {
             error_code: string | null;
             /** Error Summary */
             error_summary: string | null;
+        };
+        /** CollectionSummaryView */
+        CollectionSummaryView: {
+            last_24h: components["schemas"]["CollectionOutcomeView"];
+            /** Current Failures */
+            current_failures: components["schemas"]["CollectionFailureView"][];
         };
         /** ComponentObservedView */
         ComponentObservedView: {
@@ -1172,12 +1248,30 @@ export interface components {
              */
             last_seen_at: string;
         };
+        /** ComponentsView */
+        ComponentsView: {
+            api: components["schemas"]["ApiComponentStatus"];
+            database: components["schemas"]["DatabaseComponentStatus"];
+            file_storage: components["schemas"]["FileStorageComponentStatus"];
+            worker: components["schemas"]["WorkerComponentStatus"];
+            ingest: components["schemas"]["IngestComponentStatus"];
+        };
         /** ConfirmationView */
         ConfirmationView: {
             /** Kind */
             kind: string;
             /** Expected */
             expected: string;
+        };
+        /** DatabaseComponentStatus */
+        DatabaseComponentStatus: {
+            /** Status */
+            status: string;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
         };
         /** DeviceCollectionRunsListResponse */
         DeviceCollectionRunsListResponse: {
@@ -1549,6 +1643,16 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** FileStorageComponentStatus */
+        FileStorageComponentStatus: {
+            /** Status */
+            status: string;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+        };
         /** FileUploadContentView */
         FileUploadContentView: {
             /** Received Bytes */
@@ -1620,6 +1724,20 @@ export interface components {
         HealthStatus: {
             /** Status */
             status: string;
+        };
+        /** IngestComponentStatus */
+        IngestComponentStatus: {
+            /** Status */
+            status: string;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /** Events Received Total */
+            events_received_total: number;
+            /** Last Received At */
+            last_received_at?: string | null;
         };
         /** LatestComponentGroup */
         LatestComponentGroup: {
@@ -1723,6 +1841,15 @@ export interface components {
              * Format: date-time
              */
             session_expires_at: string;
+        };
+        /** MaintenanceView */
+        MaintenanceView: {
+            /** Active */
+            active: boolean;
+            /** Since */
+            since?: string | null;
+            /** Reason */
+            reason?: string | null;
         };
         /** MeResponse */
         MeResponse: {
@@ -2041,6 +2168,15 @@ export interface components {
              */
             detail: string;
         };
+        /** QueueSummaryView */
+        QueueSummaryView: {
+            /** Operation Tasks */
+            operation_tasks: {
+                [key: string]: number;
+            };
+            /** Oldest Queued Age Seconds */
+            oldest_queued_age_seconds?: number | null;
+        };
         /** ReadinessReport */
         ReadinessReport: {
             /** Status */
@@ -2097,6 +2233,19 @@ export interface components {
             last_value?: number | null;
             /** Count */
             count?: number | null;
+        };
+        /** SystemStatusResponse */
+        SystemStatusResponse: {
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            maintenance: components["schemas"]["MaintenanceView"];
+            components: components["schemas"]["ComponentsView"];
+            queues: components["schemas"]["QueueSummaryView"];
+            collection: components["schemas"]["CollectionSummaryView"];
+            verification_required: components["schemas"]["VerificationSummaryView"];
         };
         /** TargetDeviceView */
         TargetDeviceView: {
@@ -2194,6 +2343,27 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /** VerificationSummaryView */
+        VerificationSummaryView: {
+            /** Count */
+            count: number;
+            /** Oldest At */
+            oldest_at?: string | null;
+        };
+        /** WorkerComponentStatus */
+        WorkerComponentStatus: {
+            /** Status */
+            status: string;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /** Last Activity At */
+            last_activity_at?: string | null;
+            /** Collection Lag Seconds */
+            collection_lag_seconds?: number | null;
         };
     };
     responses: never;
@@ -4290,6 +4460,47 @@ export interface operations {
                 content?: never;
             };
             /** @description storage_unavailable / dependency_unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    system_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemStatusResponse"];
+                };
+            };
+            /** @description unauthenticated/session_expired */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description permission_denied / password_change_required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description dependency_unavailable（数据库不可用时无法诚实汇总） */
             503: {
                 headers: {
                     [name: string]: unknown;

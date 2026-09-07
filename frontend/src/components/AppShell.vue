@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue';
+import SystemStatusChip from '@/features/system/SystemStatusChip.vue';
 import { ROLE_LABELS, label } from '@/lib/labels';
 import { useAuthStore } from '@/stores/auth';
 import { useRealtimeStore } from '@/stores/realtime';
@@ -105,6 +106,8 @@ onBeforeUnmount(() => {
           >
             {{ realtimeText }}
           </span>
+          <!-- UI_SPEC §2：顶栏显示系统依赖严重状态（维护模式/组件异常），仅管理员 -->
+          <SystemStatusChip v-if="auth.isAuthenticated && auth.isAdmin" />
         </div>
         <el-dropdown v-if="auth.user" trigger="click">
           <span class="app-shell__user">
