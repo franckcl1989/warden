@@ -1,0 +1,676 @@
+{
+  "kind": "warden-load-smoke",
+  "label": "合成负载冒烟（5 个测试模拟器设备；不是现场验收负载，ADR-027）",
+  "results": {
+    "aborted": false,
+    "active_alerts_at_window_end": 2,
+    "api_reads": {
+      "user-1": {
+        "by_endpoint": {
+          "alerts_list": {
+            "count": 139,
+            "max_ms": 14.5,
+            "p50_ms": 3.8,
+            "p95_ms": 6.2,
+            "p99_ms": 11.1
+          },
+          "device_get": {
+            "count": 139,
+            "max_ms": 6.7,
+            "p50_ms": 3.3,
+            "p95_ms": 5.4,
+            "p99_ms": 6.5
+          },
+          "devices_list": {
+            "count": 139,
+            "max_ms": 9.3,
+            "p50_ms": 3.9,
+            "p95_ms": 7.1,
+            "p99_ms": 8.8
+          },
+          "metrics_latest": {
+            "count": 139,
+            "max_ms": 144.4,
+            "p50_ms": 11.0,
+            "p95_ms": 48.2,
+            "p99_ms": 77.6
+          },
+          "metrics_series": {
+            "count": 69,
+            "max_ms": 16.4,
+            "p50_ms": 4.8,
+            "p95_ms": 9.6,
+            "p99_ms": 16.4
+          },
+          "overview": {
+            "count": 139,
+            "max_ms": 34.0,
+            "p50_ms": 10.9,
+            "p95_ms": 27.6,
+            "p99_ms": 33.2
+          }
+        },
+        "http_status_counts": {
+          "alerts_list 200": 139,
+          "device_get 200": 139,
+          "devices_list 200": 139,
+          "metrics_latest 200": 139,
+          "metrics_series 200": 69,
+          "overview 200": 139
+        },
+        "latency_ms_overall": {
+          "count": 764,
+          "max_ms": 144.4,
+          "p50_ms": 4.8,
+          "p95_ms": 30.4,
+          "p99_ms": 46.5
+        },
+        "requests": 764
+      },
+      "user-2": {
+        "by_endpoint": {
+          "alerts_list": {
+            "count": 139,
+            "max_ms": 13.5,
+            "p50_ms": 5.3,
+            "p95_ms": 8.5,
+            "p99_ms": 11.3
+          },
+          "device_get": {
+            "count": 139,
+            "max_ms": 20.1,
+            "p50_ms": 4.6,
+            "p95_ms": 7.1,
+            "p99_ms": 9.3
+          },
+          "devices_list": {
+            "count": 139,
+            "max_ms": 12.8,
+            "p50_ms": 5.8,
+            "p95_ms": 8.7,
+            "p99_ms": 9.9
+          },
+          "metrics_latest": {
+            "count": 139,
+            "max_ms": 115.9,
+            "p50_ms": 16.5,
+            "p95_ms": 77.0,
+            "p99_ms": 114.4
+          },
+          "metrics_series": {
+            "count": 69,
+            "max_ms": 22.3,
+            "p50_ms": 6.3,
+            "p95_ms": 11.7,
+            "p99_ms": 22.3
+          },
+          "overview": {
+            "count": 139,
+            "max_ms": 116.7,
+            "p50_ms": 13.2,
+            "p95_ms": 30.7,
+            "p99_ms": 40.1
+          }
+        },
+        "http_status_counts": {
+          "alerts_list 200": 139,
+          "device_get 200": 139,
+          "devices_list 200": 139,
+          "metrics_latest 200": 139,
+          "metrics_series 200": 69,
+          "overview 200": 139
+        },
+        "latency_ms_overall": {
+          "count": 764,
+          "max_ms": 116.7,
+          "p50_ms": 6.6,
+          "p95_ms": 51.1,
+          "p99_ms": 77.0
+        },
+        "requests": 764
+      },
+      "user-3": {
+        "by_endpoint": {
+          "alerts_list": {
+            "count": 139,
+            "max_ms": 10.7,
+            "p50_ms": 5.5,
+            "p95_ms": 8.0,
+            "p99_ms": 9.4
+          },
+          "device_get": {
+            "count": 139,
+            "max_ms": 35.5,
+            "p50_ms": 4.4,
+            "p95_ms": 9.1,
+            "p99_ms": 19.8
+          },
+          "devices_list": {
+            "count": 139,
+            "max_ms": 15.2,
+            "p50_ms": 5.8,
+            "p95_ms": 10.3,
+            "p99_ms": 13.9
+          },
+          "metrics_latest": {
+            "count": 139,
+            "max_ms": 121.1,
+            "p50_ms": 16.6,
+            "p95_ms": 73.9,
+            "p99_ms": 109.4
+          },
+          "metrics_series": {
+            "count": 69,
+            "max_ms": 14.9,
+            "p50_ms": 6.0,
+            "p95_ms": 9.7,
+            "p99_ms": 14.9
+          },
+          "overview": {
+            "count": 139,
+            "max_ms": 101.0,
+            "p50_ms": 13.3,
+            "p95_ms": 34.7,
+            "p99_ms": 62.2
+          }
+        },
+        "http_status_counts": {
+          "alerts_list 200": 139,
+          "device_get 200": 139,
+          "devices_list 200": 139,
+          "metrics_latest 200": 139,
+          "metrics_series 200": 69,
+          "overview 200": 139
+        },
+        "latency_ms_overall": {
+          "count": 764,
+          "max_ms": 121.1,
+          "p50_ms": 6.6,
+          "p95_ms": 51.8,
+          "p99_ms": 73.9
+        },
+        "requests": 764
+      }
+    },
+    "collection": {
+      "claim_latency_seconds": {
+        "health": {
+          "count": 94,
+          "max_ms": 1187.9,
+          "p50_ms": 529.0,
+          "p95_ms": 966.7,
+          "p99_ms": 1187.9
+        },
+        "logs": {
+          "count": 36,
+          "max_ms": 1036.7,
+          "p50_ms": 605.0,
+          "p95_ms": 1011.8,
+          "p99_ms": 1036.7
+        },
+        "metrics": {
+          "count": 49,
+          "max_ms": 985.7,
+          "p50_ms": 400.7,
+          "p95_ms": 958.2,
+          "p99_ms": 985.7
+        },
+        "overall": {
+          "count": 275,
+          "max_ms": 1187.9,
+          "p50_ms": 504.2,
+          "p95_ms": 966.7,
+          "p99_ms": 1066.5
+        },
+        "reachability": {
+          "count": 96,
+          "max_ms": 1104.2,
+          "p50_ms": 452.4,
+          "p95_ms": 951.8,
+          "p99_ms": 1104.2
+        }
+      },
+      "runs_measured": 275,
+      "scheduler_gap_delay_seconds": {
+        "count": 202,
+        "max_ms": 10294.3,
+        "p50_ms": 10083.4,
+        "p95_ms": 10255.2,
+        "p99_ms": 10277.7
+      },
+      "states_at_window_end": {
+        "partial": 2,
+        "succeeded": 363
+      }
+    },
+    "db_growth": {
+      "database_bytes_end": 17839807,
+      "database_bytes_start": 13113023,
+      "delta_bytes": 4726784,
+      "tables": {
+        "alerts": {
+          "delta": 0,
+          "end": 2,
+          "start": 2
+        },
+        "audit_logs": {
+          "delta": 0,
+          "end": 17,
+          "start": 17
+        },
+        "collection_runs": {
+          "delta": 275,
+          "end": 365,
+          "start": 90
+        },
+        "components": {
+          "delta": 0,
+          "end": 223,
+          "start": 223
+        },
+        "device_events": {
+          "delta": 0,
+          "end": 32,
+          "start": 32
+        },
+        "files": {
+          "delta": 0,
+          "end": 0,
+          "start": 0
+        },
+        "metric_latest": {
+          "delta": 0,
+          "end": 926,
+          "start": 926
+        },
+        "metric_points": {
+          "delta": 9121,
+          "end": 10967,
+          "start": 1846
+        },
+        "metric_rollups_5m": {
+          "delta": 454,
+          "end": 454,
+          "start": 0
+        },
+        "operation_tasks": {
+          "delta": 0,
+          "end": 0,
+          "start": 0
+        },
+        "sessions": {
+          "delta": 0,
+          "end": 4,
+          "start": 4
+        },
+        "ui_events": {
+          "delta": 387,
+          "end": 505,
+          "start": 118
+        },
+        "users": {
+          "delta": 0,
+          "end": 4,
+          "start": 4
+        }
+      }
+    },
+    "duration_seconds": 631.5,
+    "queue": {
+      "end_of_window": {
+        "collection_run_states": {
+          "partial": 2,
+          "succeeded": 363
+        },
+        "oldest_scheduled_age_seconds": null,
+        "operation_task_states": {}
+      },
+      "max_collection_active": 2,
+      "max_oldest_scheduled_age_seconds": 8.368239,
+      "samples": [
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 230
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:57:03.559189+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 237
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:57:18.594731+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 240
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:57:33.629150+00:00"
+        },
+        {
+          "collection_active": 1,
+          "collection_by_state": {
+            "partial": 2,
+            "running": 1,
+            "succeeded": 247
+          },
+          "oldest_scheduled_age_seconds": 3.537949,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:57:48.668187+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 254
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:58:03.695402+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 261
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:58:18.724968+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 262
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:58:33.851432+00:00"
+        },
+        {
+          "collection_active": 1,
+          "collection_by_state": {
+            "partial": 2,
+            "running": 1,
+            "succeeded": 271
+          },
+          "oldest_scheduled_age_seconds": 3.636196,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:58:48.881638+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 278
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:59:03.916366+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 286
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:59:18.946621+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 288
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:59:33.986277+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 296
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T08:59:49.011617+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 301
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:00:04.048521+00:00"
+        },
+        {
+          "collection_active": 1,
+          "collection_by_state": {
+            "partial": 2,
+            "running": 1,
+            "succeeded": 309
+          },
+          "oldest_scheduled_age_seconds": 3.636268,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:00:19.079794+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 313
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:00:34.108630+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 318
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:00:49.144270+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 325
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:01:04.172699+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 337
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:01:19.209446+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 339
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:01:34.237043+00:00"
+        },
+        {
+          "collection_active": 0,
+          "collection_by_state": {
+            "partial": 2,
+            "succeeded": 347
+          },
+          "oldest_scheduled_age_seconds": null,
+          "operation_by_state": {},
+          "taken_at": "2026-09-07T09:01:49.283117+00:00"
+        }
+      ]
+    },
+    "window_ended_at": "2026-09-07T09:02:34.314144+00:00",
+    "window_started_at": "2026-09-07T08:52:02.789940+00:00"
+  },
+  "run": {
+    "finished_at": "2026-09-07T09:02:34.506125+00:00",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "postgres": {
+      "database": "warden_smoke (dropped after the run)",
+      "instance": "dedicated local PG 18.6 (127.0.0.1:55434) started for the smoke: the shared WardenTestPG (127.0.0.1:55433) runs max_connections=8, shared_buffers=16MB which a real API+worker stack exhausts under load; the smoke instance uses max_connections=60, shared_buffers=128MB, autovacuum=on",
+      "max_connections": 60,
+      "version": "PostgreSQL 18.6 (x86_64-windows)"
+    },
+    "python": "3.13.15",
+    "readers": 3,
+    "sim_host": "10.10.82.210",
+    "started_at": "2026-09-07T08:49:17.527054+00:00",
+    "window_seconds": 600.0
+  },
+  "scenario": {
+    "collection_intervals_seconds": {
+      "discovery": 21600,
+      "health": 30,
+      "logs": 120,
+      "metrics": 60,
+      "reachability": 30
+    },
+    "devices": [
+      {
+        "adapter_key": "server.dell_idrac",
+        "device_type": "server",
+        "id": "01a07b0e-ebcb-7000-b398-1c740a47d629",
+        "model": "PowerEdge R760",
+        "name": "smoke-srv-dell",
+        "vendor": "Dell Inc."
+      },
+      {
+        "adapter_key": "server.inspur_ibmc",
+        "device_type": "server",
+        "id": "01a07b0e-ed0d-7000-a893-97accec394b4",
+        "model": "NF5280M6",
+        "name": "smoke-srv-inspur",
+        "vendor": "Inspur"
+      },
+      {
+        "adapter_key": "nas.synology_dsm",
+        "device_type": "synology_nas",
+        "id": "01a07b0e-edd7-7000-b780-cac412ee5ab4",
+        "model": "DS224+ (simulated)",
+        "name": "smoke-nas-ds224",
+        "vendor": "Synology"
+      },
+      {
+        "adapter_key": "switch.huawei_vrp_core",
+        "device_type": "core_switch",
+        "id": "01a07b0f-1527-7000-a1d6-a3d1fb744d24",
+        "model": "S5732-H48XUM2CC",
+        "name": "smoke-sw-core-s5732",
+        "vendor": "Huawei"
+      },
+      {
+        "adapter_key": "switch.huawei_vrp_access",
+        "device_type": "access_switch",
+        "id": "01a07b0f-3d9e-7000-8c1d-a83933669097",
+        "model": "S5735-L48P4S-A1",
+        "name": "smoke-sw-access-s5735",
+        "vendor": "Huawei"
+      }
+    ],
+    "read_tick_seconds": 4.0,
+    "series_targets": [
+      {
+        "component_id": "01a07b0e-ebe1-7000-9421-de80aec43a04",
+        "device_id": "01a07b0e-ebcb-7000-b398-1c740a47d629",
+        "metric_key": "temperature.cpu"
+      },
+      {
+        "component_id": "01a07b0e-ed15-7000-bdb8-b1230fbb4d18",
+        "device_id": "01a07b0e-ed0d-7000-a893-97accec394b4",
+        "metric_key": "temperature.cpu"
+      },
+      {
+        "component_id": "01a07b0e-ede4-7000-aeb0-168e5faaf16a",
+        "device_id": "01a07b0e-edd7-7000-b780-cac412ee5ab4",
+        "metric_key": "temperature.system"
+      },
+      {
+        "component_id": "01a07b0f-1532-7000-9912-e39e969a7f3c",
+        "device_id": "01a07b0f-1527-7000-a1d6-a3d1fb744d24",
+        "metric_key": "interface.crc_errors"
+      },
+      {
+        "component_id": "01a07b0f-3da7-7000-b76d-e8d2a395c6a7",
+        "device_id": "01a07b0f-3d9e-7000-8c1d-a83933669097",
+        "metric_key": "interface.errors"
+      }
+    ],
+    "simulators": [
+      {
+        "endpoint": "10.10.82.210:8000",
+        "key": "srv_dell",
+        "kind": "redfish",
+        "profile": "dell"
+      },
+      {
+        "endpoint": "10.10.82.210:8080",
+        "key": "srv_inspur",
+        "kind": "redfish",
+        "profile": "inspur"
+      },
+      {
+        "endpoint": "10.10.82.210:80",
+        "key": "dsm",
+        "kind": "dsm",
+        "profile": "ds224"
+      },
+      {
+        "endpoint": "10.10.82.210:8443",
+        "key": "sw_core",
+        "kind": "switch",
+        "profile": "core_s5732"
+      },
+      {
+        "endpoint": "10.10.82.210:443",
+        "key": "sw_access",
+        "kind": "switch",
+        "profile": "access_s5735"
+      }
+    ]
+  },
+  "site_gate_note": "合成负载冒烟，不是现场验收运行：无任何容量承诺（ADR-027）；docs/TEST_STRATEGY.md §5 的 P95<500ms/P99<1s 读取门槛与调度 P95<10s 门槛只在现场按验收负载清单执行的验收运行上生效。",
+  "status": "completed",
+  "worker_log": {
+    "handler_failed_count": 9,
+    "note": "metric_latest ON CONFLICT upsert intermittently raises InvalidColumnReference (arbiter coalesce(component_id, ::uuid) vs the COALESCE expression unique index); reproduced standalone; zero failures with psycopg prepare_threshold=None. Collection runs are released for recovery (never re-executed) and later runs recover via the maintenance requeue path. Platform reliability finding to be decided (see M6T4 report).",
+    "sample_error_first_lines": [
+      "Traceback (most recent call last):",
+      "Traceback (most recent call last):",
+      "Traceback (most recent call last):"
+    ]
+  }
+}
