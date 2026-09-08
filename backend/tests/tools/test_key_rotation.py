@@ -58,8 +58,15 @@ def test_rejects_missing_key_file(tmp_path: Path, capsys: pytest.CaptureFixture[
 
 @pytest.mark.unit
 def test_requires_key_file_when_settings_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from app.config import WardenSettings
+
+    monkeypatch.setattr(
+        "app.tools.key_rotation.get_settings",
+        lambda: WardenSettings(_env_file=None),
+    )
     out = run([])
     captured = capsys.readouterr()
     assert out == 2
