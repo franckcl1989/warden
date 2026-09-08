@@ -2,3 +2,12 @@
 # Standard gitleaks defaults: the community ruleset is used, no custom rules.
 [extend]
 useDefault = true
+
+# Test fixtures only: operation idempotency keys (uuid4/hex tokens) look like
+# API keys to the generic rule but are random per-test values with no
+# credential meaning. Path-scoped, so any idempotency_key outside backend/tests
+# still fails the scan.
+[allowlist]
+paths = ["backend/tests/e2e/test_switch_journey.py", "backend/tests/application/test_operation_preview.py"]
+regexes = ['idempotency_key="[^"]+"']
+
