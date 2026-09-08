@@ -116,9 +116,12 @@ def boundary(db_session: Session) -> SimpleNamespace:
 
     ``before`` is local 23:59:59.9 of day X and ``after`` is local
     00:00:00.1 of day X+1 (== 23:59:59.9 / 00:00:00.1 Asia/Shanghai in this
-    deployment). Both share one UTC day for UTC/east-of-UTC sessions — the
-    property that lets the UTC-day-based maintenance window cover both sides
-    of the local-midnight rollover.
+    deployment). Any non-UTC session zone puts both instants on one UTC
+    day; an exactly-UTC session splits them across two consecutive UTC
+    days, whose maintenance windows overlap by design (each covers
+    start..start+13), so both sides of the local-midnight rollover are
+    ensured in every zone the tests run (west-of-UTC sessions skip per the
+    module docstring).
     """
     offset_seconds = int(
         db_session.execute(text("SELECT EXTRACT(TIMEZONE FROM now())")).scalar()
@@ -155,7 +158,11 @@ class TestLocalMidnightBoundary:
         for day_start in utc_days:
             created += ensure_partitions(db_session, now=day_start)
         db_session.commit()
-        assert created == 14 * len(utc_days)  # fully in the past: nothing pre-created
+        # Fully in the past: nothing pre-created. Each window covers
+        # [start .. start+13]; two consecutive UTC days (an exactly-UTC
+        # session splits the local-midnight pair) overlap by 13, so the
+        # second window adds exactly one partition.
+        assert created == 14 + len(utc_days) - 1
 
         device_before = make_collection_device(db_session, index=75, next_poll_at=None)
         device_after = make_collection_device(db_session, index=76, next_poll_at=None)

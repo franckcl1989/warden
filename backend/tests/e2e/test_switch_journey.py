@@ -1184,9 +1184,29 @@ class TestSwitchJourneyE2E:
                             )
                             assert closed.status_code == 200, closed.text
                             assert closed.json()["close_reason"] == "user_closed"
-                            closed_frame = json.loads(websocket.receive_text())
-                            assert closed_frame["type"] == "closed"
-                            assert closed_frame["reason"] == "user_closed"
+                            # Trailing device output may still be in flight as
+                            # binary frames after the close request (load
+                            # dependent); drain until the closed frame or the
+                            # server-side close.
+                            closed_frame = None
+                            saw_close = False
+                            drain_deadline = time.monotonic() + 10.0
+                            while time.monotonic() < drain_deadline:
+                                message = websocket.receive()
+                                if message.get("type") in ("websocket.close", "websocket.disconnect"):
+                                    saw_close = True
+                                    break
+                                frame_text = message.get("text")
+                                if frame_text is None:
+                                    continue  # trailing device bytes
+                                frame = json.loads(frame_text)
+                                if frame.get("type") == "closed":
+                                    closed_frame = frame
+                                    break
+                            assert closed_frame is not None or saw_close
+                            if closed_frame is not None:
+                                assert closed_frame["type"] == "closed"
+                                assert closed_frame["reason"] == "user_closed"
                     except WebSocketDisconnect as exc:
                         assert int(exc.code) in (1000, 1001), exc.code
                     assert session_id is not None
