@@ -3,6 +3,7 @@
 - 状态：`0.1.0-rc.1` 候选（M6T3 生成；M6T4/M6T4b 已执行，M6T5 最终门禁于 2026-09-07 复核，结论维持 rc.1）
 - 日期：2026-09-07
 - 结论先行：**0.1.0 未发布**。状态记录为 `0.1.0-rc.1`（软件测试全绿；硬件认证阻塞；追踪收口 51/51 全绿，无未决代码缺口——M6T3 发现的 PLT-08 缺口已由 M6T3b 交付，commit `cf375a9`）。不得把本清单当作 0.1.0 发布记录（TEST_STRATEGY §9）。
+- main HEAD 复核（2026-09-08，commit `fe7c47d` + `3f90595`）：合并 main 后全量门禁重跑——后端 2143 passed / 78 skipped / 0 failed（44:29，单次干净运行）+ `test_requires_key_file_when_settings_unconfigured` 环境隔离修复（commit `3f90595`，本文件复验 5/5，问题根因是仓库根 `.env` 配置让 CLI 认为已配置；此前 full-run 该测试因演示环境 `.env` 存在而失败 1 项）；前端 25 文件 / 177 passed + typecheck/lint/build 0；ruff 0、mypy strict 158 文件 0；check-design 0、check-traceability 51/51（closeout.json `ok: true`）、硬件矩阵非严格 0；generated 树仅 CRLF 噪音（无内容差异，已还原）。软件侧结论维持 rc.1 不变。
 
 ## 1. PROJECT_SPEC §7 版本验收原则逐项
 

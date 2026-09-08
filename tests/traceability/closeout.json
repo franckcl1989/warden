@@ -1,7 +1,7 @@
 {
   "product_version": "0.1.0",
   "generated_by": "scripts/check-traceability.ps1 (M6T3)",
-  "generated_at_utc": "2026-09-08T01:29:08.1887807Z",
+  "generated_at_utc": "2026-09-08T02:56:37.4320903Z",
   "rules": {
     "test_reference": "backend/tests test_*.py files referencing the requirement id (T-{REQ} per TRACEABILITY.md)",
     "adapter_path": "capability key literal in backend/app/adapters (collect/operation/create_launch mappings)",
